@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
+import { Extension } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import Heading from "@tiptap/extension-heading";
 import Link from "@tiptap/extension-link";
 import Image from "@tiptap/extension-image";
@@ -10,16 +12,75 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TableRow } from "@tiptap/extension-table-row";
 import TurndownService from "turndown";
-import { AllSelection } from "@tiptap/pm/state";
+import { all, createLowlight } from "lowlight";
+import { AllSelection, Plugin } from "@tiptap/pm/state";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { MermaidNode } from "../../extensions/MermaidNode";
 
+const lowlight = createLowlight(all);
+
 const TyporaHeading = Heading.extend({
   addInputRules() {
     return [];
+  },
+});
+
+const TyporaInlineCode = Extension.create({
+  name: "typoraInlineCode",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleKeyDown: (view, event) => {
+            if (event.key !== "`" || event.ctrlKey || event.metaKey || event.altKey) return false;
+            if (!convertInlineCodeBeforeCursor(view)) return false;
+            event.preventDefault();
+            return true;
+          },
+          handleTextInput: (view, from, to, text) => {
+            if (text !== "`") return false;
+            return convertInlineCodeBeforeCursor(view);
+          },
+        },
+        appendTransaction: (transactions, _oldState, newState) => {
+          if (!transactions.some((transaction) => transaction.docChanged)) return null;
+
+          const codeMark = newState.schema.marks.code;
+          if (!codeMark) return null;
+
+          let tr = newState.tr;
+          let converted = false;
+          const inlineCodePattern = /(^|[^`])`([^`\n]+)`/g;
+
+          newState.doc.descendants((node, pos) => {
+            if (converted) return false;
+            if (!node.isTextblock) return true;
+            if (node.type.name === "codeBlock") return false;
+
+            const text = node.textContent;
+            inlineCodePattern.lastIndex = 0;
+            const match = inlineCodePattern.exec(text);
+            if (!match) return true;
+
+            const full = match[0];
+            const leadingLength = match[1].length;
+            const code = match[2];
+            const from = pos + 1 + match.index + leadingLength;
+            const to = pos + 1 + match.index + full.length;
+            tr = tr.insertText(code, from, to);
+            tr = tr.addMark(from, from + code.length, codeMark.create());
+            converted = true;
+            return false;
+          });
+
+          return converted ? tr : null;
+        },
+      }),
+    ];
   },
 });
 
@@ -88,6 +149,11 @@ const editor = useEditor({
   extensions: [
     StarterKit.configure({
       heading: false,
+      codeBlock: false,
+    }),
+    CodeBlockLowlight.configure({
+      lowlight,
+      defaultLanguage: "plaintext",
     }),
     TyporaHeading.configure({
       levels: [1, 2, 3],
@@ -102,6 +168,7 @@ const editor = useEditor({
     InlineMath,
     BlockMath,
     MermaidNode,
+    TyporaInlineCode,
   ],
   content: renderMarkdownForEditor(appStore.currentContent),
   editorProps: {
@@ -154,6 +221,37 @@ function looksLikeMarkdown(text: string) {
 
 function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function convertInlineCodeBeforeCursor(view: any) {
+  const { state } = view;
+  const { $from, empty } = state.selection;
+  const codeMark = state.schema.marks.code;
+  if (!empty || !codeMark || !$from.parent.isTextblock || $from.parent.type.name === "codeBlock") return false;
+
+  const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\n");
+  const openerOffset = findInlineCodeOpener(before);
+  if (openerOffset < 0) return false;
+
+  const code = before.slice(openerOffset + 1);
+  if (!code || /`/.test(code)) return false;
+
+  const cursorPos = state.selection.from;
+  const openerPos = cursorPos - (before.length - openerOffset);
+  const tr = state.tr.insertText(code, openerPos, cursorPos);
+  tr.addMark(openerPos, openerPos + code.length, codeMark.create());
+  tr.removeStoredMark(codeMark);
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function findInlineCodeOpener(text: string) {
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    if (text[index] !== "`") continue;
+    if (index > 0 && text[index - 1] === "\\") continue;
+    return index;
+  }
+  return -1;
 }
 </script>
 

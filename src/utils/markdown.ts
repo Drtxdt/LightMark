@@ -91,7 +91,10 @@ function markSpecialBlocksForEditor(markdown: string) {
     return `${prefix}\n${stash(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`)}\n`;
   });
 
-  next = next.replace(/```[\s\S]*?```|`[^`\n]*`/g, (code) => stash(code));
+  next = next.replace(/```[\s\S]*?```/g, (code) => stash(code));
+  next = next.replace(/`([^`\n]*)`/g, (_match, code) => {
+    return stash(`<code>${escapeHtml(code)}</code>`);
+  });
 
   next = next.replace(/(^|[^$\\])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
     return `${prefix}<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`;
