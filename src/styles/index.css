@@ -117,12 +117,96 @@ body {
 .ProseMirror h1,
 .ProseMirror h2,
 .ProseMirror h3,
+.ProseMirror .markdown-heading,
 .markdown-preview h1,
 .markdown-preview h2,
 .markdown-preview h3 {
   color: inherit;
   font-weight: 600;
   letter-spacing: 0;
+}
+
+.ProseMirror .markdown-heading {
+  margin: 1.4em 0 0.65em;
+  line-height: 1.25;
+}
+
+.ProseMirror .markdown-heading-1 {
+  font-size: 2.25em;
+}
+
+.ProseMirror .markdown-heading-2 {
+  font-size: 1.55em;
+}
+
+.ProseMirror .markdown-heading-3 {
+  font-size: 1.25em;
+}
+
+.md-marker,
+.math-delimiter {
+  color: #b9b3a8;
+  font-weight: 400;
+}
+
+.md-source-hidden,
+.math-source-hidden {
+  display: none;
+}
+
+.heading-level-hint {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.45rem;
+  transform: translateY(-0.15em);
+  border: 1px solid #d5d0c6;
+  border-radius: 4px;
+  color: #8d867c;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.65rem;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0.12rem 0.25rem;
+}
+
+.dark .md-marker,
+.dark .math-delimiter {
+  color: #756f66;
+}
+
+.dark .heading-level-hint {
+  border-color: #3b3833;
+  color: #8d867c;
+}
+
+.math-inline-source,
+.math-block-source {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.math-render {
+  color: inherit;
+  cursor: text;
+  user-select: none;
+}
+
+.math-render-inline {
+  display: inline;
+  align-items: baseline;
+  vertical-align: baseline;
+}
+
+.math-render-block {
+  display: flex;
+  justify-content: center;
+  margin: 0.85rem 0;
+  overflow-x: auto;
+}
+
+.math-render-error {
+  color: #756f66;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
 }
 
 .ProseMirror blockquote,

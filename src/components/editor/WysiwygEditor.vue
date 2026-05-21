@@ -2,11 +2,20 @@
 import { onBeforeUnmount, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
+import Heading from "@tiptap/extension-heading";
 import Link from "@tiptap/extension-link";
 import Image from "@tiptap/extension-image";
 import TurndownService from "turndown";
 import { appStore, setContent } from "../../stores/appStore";
-import { renderMarkdown } from "../../utils/markdown";
+import { renderMarkdownForEditor } from "../../utils/markdown";
+import { MarkdownHeading } from "../../extensions/MarkdownHeading";
+import { MathPreview } from "../../extensions/MathPreview";
+
+const TyporaHeading = Heading.extend({
+  addInputRules() {
+    return [];
+  },
+});
 
 const turndown = new TurndownService({
   headingStyle: "atx",
@@ -16,11 +25,18 @@ const turndown = new TurndownService({
 
 const editor = useEditor({
   extensions: [
-    StarterKit,
+    StarterKit.configure({
+      heading: false,
+    }),
+    TyporaHeading.configure({
+      levels: [1, 2, 3],
+    }),
     Link.configure({ openOnClick: false }),
     Image,
+    MarkdownHeading,
+    MathPreview,
   ],
-  content: renderMarkdown(appStore.currentContent),
+  content: renderMarkdownForEditor(appStore.currentContent),
   editorProps: {
     attributes: {
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 py-12 focus:outline-none",
@@ -34,7 +50,7 @@ const editor = useEditor({
 watch(
   () => appStore.currentFilePath,
   () => {
-    editor.value?.commands.setContent(renderMarkdown(appStore.currentContent), { emitUpdate: false });
+    editor.value?.commands.setContent(renderMarkdownForEditor(appStore.currentContent), { emitUpdate: false });
   },
 );
 
@@ -42,7 +58,7 @@ watch(
   () => appStore.editorMode,
   () => {
     if (appStore.editorMode === "wysiwyg") {
-      editor.value?.commands.setContent(renderMarkdown(appStore.currentContent), { emitUpdate: false });
+      editor.value?.commands.setContent(renderMarkdownForEditor(appStore.currentContent), { emitUpdate: false });
     }
   },
 );

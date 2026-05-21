@@ -15,6 +15,12 @@ const md = new MarkdownIt({
 
 md.use(markdownItKatex);
 
+const editorMd = new MarkdownIt({
+  html: false,
+  linkify: true,
+  typographer: true,
+});
+
 const defaultFence = md.renderer.rules.fence;
 
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
@@ -31,6 +37,10 @@ export function renderMarkdown(markdown: string) {
   return md.render(markdown);
 }
 
+export function renderMarkdownForEditor(markdown: string) {
+  return editorMd.render(markdown);
+}
+
 export function buildExportHtml(title: string, body: string) {
   return `<!doctype html>
 <html>
@@ -39,13 +49,13 @@ export function buildExportHtml(title: string, body: string) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)}</title>
   <style>
-    body { margin: 0; background: #f8fafc; color: #111827; font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; background: #fff; min-height: 100vh; }
-    pre { overflow: auto; padding: 16px; border-radius: 8px; background: #0f172a; color: #e5e7eb; }
+    body { margin: 0; background: #fbfaf7; color: #1f1e1b; font: 16px/1.78 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 860px; margin: 0 auto; padding: 56px 24px; min-height: 100vh; }
+    pre { overflow: auto; padding: 16px; border-radius: 8px; background: #1b1a18; color: #e8e5df; }
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-    blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid #94a3b8; color: #475569; }
+    blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid #d5d0c6; color: #756f66; }
     img { max-width: 100%; }
-    a { color: #2563eb; }
+    a { color: inherit; text-decoration-color: #b9b3a8; text-underline-offset: 3px; }
   </style>
 </head>
 <body><main>${body}</main></body>
