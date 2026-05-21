@@ -38,7 +38,7 @@ export function renderMarkdown(markdown: string) {
 }
 
 export function renderMarkdownForEditor(markdown: string) {
-  return editorMd.render(markMathForEditor(markdown));
+  return editorMd.render(markSpecialBlocksForEditor(markdown));
 }
 
 export function buildExportHtml(title: string, body: string) {
@@ -75,20 +75,30 @@ function escapeHtml(value: string) {
   });
 }
 
-function markMathForEditor(markdown: string) {
-  const blocks: string[] = [];
-  let next = markdown.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    const id = blocks.length;
-    blocks.push(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`);
-    return `${prefix}\n@@LIGHTMARK_BLOCK_MATH_${id}@@\n`;
+function markSpecialBlocksForEditor(markdown: string) {
+  const placeholders: string[] = [];
+  const stash = (html: string) => {
+    const token = `@@LIGHTMARK_PLACEHOLDER_${placeholders.length}@@`;
+    placeholders.push(html);
+    return token;
+  };
+
+  let next = markdown.replace(/(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
+    return `${prefix}\n${stash(`<div data-type="mermaid" data-code="${escapeHtml(code.trim())}"></div>`)}\n`;
   });
 
-  next = next.replace(/(^|[^$])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
+  next = next.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    return `${prefix}\n${stash(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`)}\n`;
+  });
+
+  next = next.replace(/```[\s\S]*?```|`[^`\n]*`/g, (code) => stash(code));
+
+  next = next.replace(/(^|[^$\\])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
     return `${prefix}<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`;
   });
 
-  blocks.forEach((html, index) => {
-    next = next.replace(`@@LIGHTMARK_BLOCK_MATH_${index}@@`, html);
+  placeholders.forEach((html, index) => {
+    next = next.replace(`@@LIGHTMARK_PLACEHOLDER_${index}@@`, html);
   });
 
   return next;

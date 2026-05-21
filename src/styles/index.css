@@ -288,6 +288,12 @@ body {
   background: #f5f3ee;
 }
 
+.math-node.ProseMirror-selectednode,
+.mermaid-node.ProseMirror-selectednode {
+  outline: 2px solid #b9b3a8;
+  outline-offset: 2px;
+}
+
 .dark .math-node-inline:hover {
   background: #1b1a18;
 }
@@ -442,6 +448,46 @@ body {
   color: #8d867c;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.86rem;
+}
+
+.mermaid-node {
+  margin: 1rem 0;
+  overflow-x: auto;
+  border: 1px solid #e7eaed;
+  border-radius: 4px;
+  background: #f8f8f8;
+  padding: 1rem;
+}
+
+.mermaid-node-body {
+  display: flex;
+  justify-content: center;
+}
+
+.mermaid-node-body svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-node-empty,
+.mermaid-node-error {
+  color: #777777;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.dark .mermaid-node {
+  border-color: #3b3833;
+  background: #1b1a18;
+}
+
+.ProseMirror .tableWrapper {
+  overflow-x: auto;
+}
+
+.ProseMirror table p,
+.markdown-preview table p {
+  margin: 0;
 }
 
 .ProseMirror blockquote,

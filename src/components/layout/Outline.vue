@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick } from "vue";
-import { appStore } from "../../stores/appStore";
+import { appStore, switchMode } from "../../stores/appStore";
 import { extractOutline } from "../../utils/outline";
 
 const outline = computed(() => extractOutline(appStore.currentContent));
 
 async function jump(id: string) {
-  if (appStore.editorMode !== "preview") {
-    appStore.editorMode = "preview";
+  if (appStore.editorMode !== "wysiwyg") {
+    switchMode("wysiwyg");
     await nextTick();
   }
   document.querySelector(`[data-outline-id="${id}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
@@ -16,8 +16,8 @@ async function jump(id: string) {
 
 <template>
   <aside class="overflow-auto bg-paper-100/40 p-3 dark:bg-paper-900">
-    <h2 class="mb-3 text-xs font-medium uppercase tracking-wide text-ink-500 dark:text-ink-300">Outline</h2>
-    <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">No headings.</p>
+    <h2 class="mb-3 text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">大纲</h2>
+    <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">暂无标题。</p>
     <button
       v-for="item in outline"
       :key="item.id"

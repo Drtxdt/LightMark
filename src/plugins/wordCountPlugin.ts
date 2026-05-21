@@ -13,13 +13,13 @@ export function getWordStats(content: string) {
 export const wordCountPlugin: LightMarkPlugin = {
   manifest: {
     id: "word-count-plugin",
-    name: "Word Count",
+    name: "字数统计",
     version: "0.1.0",
-    description: "Shows word, character, and line counts for the current document.",
+    description: "显示当前文档的词数、字符数和行数。",
     author: "LightMark",
   },
   activate(context) {
-    context.registerCommand("Show Word Count", () => {
+    context.registerCommand("显示字数统计", () => {
       appStore.wordCountOpen = true;
     });
   },

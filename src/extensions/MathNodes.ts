@@ -25,16 +25,26 @@ export const InlineMath = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'span[data-type="inline-math"]' }];
+    return [
+      {
+        tag: 'span[data-type="inline-math"]',
+        getAttrs: (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          return { tex: element.dataset.tex || element.textContent || "" };
+        },
+      },
+    ];
   },
 
   renderHTML({ HTMLAttributes }) {
+    const tex = HTMLAttributes.tex || "";
     return [
       "span",
       mergeAttributes(HTMLAttributes, {
         "data-type": "inline-math",
-        "data-tex": HTMLAttributes.tex,
+        "data-tex": tex,
       }),
+      tex,
     ];
   },
 
@@ -100,16 +110,26 @@ export const BlockMath = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'div[data-type="block-math"]' }];
+    return [
+      {
+        tag: 'div[data-type="block-math"]',
+        getAttrs: (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          return { tex: element.dataset.tex || element.textContent || "" };
+        },
+      },
+    ];
   },
 
   renderHTML({ HTMLAttributes }) {
+    const tex = HTMLAttributes.tex || "";
     return [
       "div",
       mergeAttributes(HTMLAttributes, {
         "data-type": "block-math",
-        "data-tex": HTMLAttributes.tex,
+        "data-tex": tex,
       }),
+      tex,
     ];
   },
 
@@ -195,14 +215,14 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     preview.className = "math-live-preview math-live-preview-inline";
     const label = document.createElement("span");
     label.className = "math-live-preview-label";
-    label.textContent = "Preview";
+    label.textContent = "预览";
     const body = document.createElement("span");
     body.className = "math-live-preview-body";
     preview.append(label, body);
 
     const refresh = () => {
       tex = source.textContent || "";
-      renderKatex(body, tex, false, "Formula preview");
+      renderKatex(body, tex, false, "公式预览");
     };
 
     source.addEventListener("input", refresh);
@@ -229,7 +249,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     });
 
     dom.append(source, preview);
-    renderKatex(body, tex, false, "Formula preview");
+    renderKatex(body, tex, false, "公式预览");
     requestAnimationFrame(() => focusEditableAtEnd(source));
   };
 
@@ -323,7 +343,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     preview.className = "math-live-preview math-live-preview-block";
     const label = document.createElement("span");
     label.className = "math-live-preview-label";
-    label.textContent = "Preview";
+    label.textContent = "预览";
     const body = document.createElement("div");
     body.className = "math-live-preview-body math-live-preview-body-block";
     preview.append(label, body);
@@ -331,7 +351,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     const refresh = () => {
       tex = textarea.value;
       textarea.rows = Math.max(2, tex.split(/\r?\n/).length);
-      renderKatex(body, tex, true, "Formula preview");
+      renderKatex(body, tex, true, "公式预览");
       updateAttrs({ tex, editing: true });
     };
 
@@ -359,7 +379,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     });
 
     dom.append(textarea, preview);
-    renderKatex(body, tex, true, "Formula preview");
+    renderKatex(body, tex, true, "公式预览");
     requestAnimationFrame(() => textarea.focus());
   };
 

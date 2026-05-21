@@ -9,21 +9,20 @@ import { currentFileName } from "../../stores/appStore";
 const query = ref("");
 
 const coreCommands = [
-  { name: "Open File", handler: () => openFile() },
-  { name: "Open Folder", handler: () => openWorkspace() },
-  { name: "Save", handler: () => saveCurrentFile() },
+  { name: "打开文件", handler: () => openFile() },
+  { name: "打开文件夹", handler: () => openWorkspace() },
+  { name: "保存", handler: () => saveCurrentFile() },
   {
-    name: "Export HTML",
+    name: "导出 HTML",
     handler: async () => {
-      if (!appStore.currentFilePath) throw new Error("Open a Markdown file before exporting.");
+      if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
       await invoke("export_html", {
         path: appStore.currentFilePath,
         html: buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent)),
       });
     },
   },
-  { name: "Toggle Source Mode", handler: () => switchMode(appStore.editorMode === "source" ? "wysiwyg" : "source") },
-  { name: "Toggle Preview Mode", handler: () => switchMode(appStore.editorMode === "preview" ? "wysiwyg" : "preview") },
+  { name: "切换编辑/源代码", handler: () => switchMode(appStore.editorMode === "source" ? "wysiwyg" : "source") },
 ];
 
 const commands = computed(() => {
@@ -50,7 +49,7 @@ async function execute(command: { name: string; handler: () => void | Promise<vo
         v-model="query"
         autofocus
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
-        placeholder="Search commands"
+        placeholder="搜索命令"
         @keydown.esc="appStore.commandPaletteOpen = false"
       />
       <div class="max-h-80 overflow-auto p-2">

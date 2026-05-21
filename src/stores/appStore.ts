@@ -17,7 +17,7 @@ export const appStore = reactive({
 });
 
 export const currentFileName = computed(() => {
-  if (!appStore.currentFilePath) return "Untitled";
+  if (!appStore.currentFilePath) return "未命名";
   return appStore.currentFilePath.split(/[\\/]/).pop() || appStore.currentFilePath;
 });
 
@@ -77,10 +77,10 @@ export async function openFile(path?: string) {
 
 export async function saveCurrentFile() {
   if (!appStore.currentFilePath) {
-    if (!appStore.currentWorkspace) throw new Error("Open a workspace before creating a file.");
+    if (!appStore.currentWorkspace) throw new Error("请先打开一个工作区，再创建文件。");
     const created = await invoke<string>("create_markdown_file", {
       folder: appStore.currentWorkspace,
-      name: "Untitled.md",
+      name: "未命名.md",
     });
     appStore.currentFilePath = created;
   }
@@ -99,7 +99,7 @@ export async function createNewFile() {
     await openWorkspace();
     if (!appStore.currentWorkspace) return;
   }
-  const base = `Untitled-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.md`;
+  const base = `未命名-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.md`;
   const path = await invoke<string>("create_markdown_file", {
     folder: appStore.currentWorkspace,
     name: base,
@@ -131,10 +131,10 @@ function rememberRecentFile(path: string) {
 
 async function confirmDiscardOrSave() {
   if (!appStore.isDirty) return true;
-  const save = window.confirm("The current file has unsaved changes. Save before switching?");
+  const save = window.confirm("当前文件有未保存的修改，切换前是否保存？");
   if (save) {
     await saveCurrentFile();
     return true;
   }
-  return window.confirm("Switch without saving changes?");
+  return window.confirm("不保存并继续切换？");
 }

@@ -1,4 +1,4 @@
-export type EditorMode = "wysiwyg" | "source" | "preview";
+export type EditorMode = "wysiwyg" | "source";
 export type ThemeMode = "light" | "dark" | "system";
 
 export interface FileNode {
