@@ -143,14 +143,12 @@ body {
   font-size: 1.25em;
 }
 
-.md-marker,
-.math-delimiter {
+.md-marker {
   color: #b9b3a8;
   font-weight: 400;
 }
 
-.md-source-hidden,
-.math-source-hidden {
+.md-source-hidden {
   display: none;
 }
 
@@ -169,8 +167,7 @@ body {
   padding: 0.12rem 0.25rem;
 }
 
-.dark .md-marker,
-.dark .math-delimiter {
+.dark .md-marker {
   color: #756f66;
 }
 
@@ -179,14 +176,9 @@ body {
   color: #8d867c;
 }
 
-.math-inline-source,
-.math-block-source {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
 .math-render {
   color: inherit;
-  cursor: text;
+  cursor: pointer;
   user-select: none;
 }
 
@@ -203,10 +195,170 @@ body {
   overflow-x: auto;
 }
 
+.math-node-inline {
+  display: inline;
+  border-radius: 4px;
+  padding: 0 0.08rem;
+}
+
+.math-node-inline:hover {
+  background: #f5f3ee;
+}
+
+.dark .math-node-inline:hover {
+  background: #1b1a18;
+}
+
+.math-node-inline-editing {
+  display: inline-block;
+  position: relative;
+  vertical-align: baseline;
+}
+
+.math-block-editor {
+  width: 100%;
+  border: 1px solid #d5d0c6;
+  border-radius: 6px;
+  background: #fbfaf7;
+  color: inherit;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  outline: none;
+}
+
+.math-inline-source-editor {
+  display: inline;
+  min-width: 1ch;
+  border: 1px solid #d5d0c6;
+  border-radius: 4px;
+  background: #fbfaf7;
+  color: inherit;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  outline: none;
+  padding: 0.18rem 0.38rem;
+  font-size: 0.92em;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.math-block-editor {
+  min-height: 5.5rem;
+  resize: vertical;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.math-inline-source-editor:focus,
+.math-block-editor:focus {
+  border-color: #8d867c;
+  box-shadow: 0 0 0 2px rgb(141 134 124 / 12%);
+}
+
+.dark .math-inline-source-editor,
+.dark .math-block-editor {
+  border-color: #3b3833;
+  background: #11100f;
+}
+
+.math-node-block {
+  display: block;
+  margin: 1.2rem 0;
+  border-radius: 6px;
+}
+
+.math-node-block:hover {
+  background: #f8f6f1;
+}
+
+.math-node-block-editing {
+  border: 1px solid #d5d0c6;
+  background: #f5f3ee;
+  padding: 0.8rem;
+}
+
+.dark .math-node-block:hover {
+  background: #171615;
+}
+
+.dark .math-node-block-editing {
+  border-color: #3b3833;
+  background: #1b1a18;
+}
+
 .math-render-error {
   color: #756f66;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;
+}
+
+.math-live-preview {
+  color: inherit;
+  pointer-events: none;
+}
+
+.math-live-preview-inline {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 20;
+  display: block;
+  margin: 0;
+  max-width: 420px;
+  min-width: 14rem;
+  border: 1px solid #d5d0c6;
+  border-left: 2px solid #d5d0c6;
+  border-radius: 6px;
+  background: #fbfaf7;
+  box-shadow: 0 10px 24px rgb(31 30 27 / 10%);
+  padding: 0.5rem 0.65rem;
+  padding-left: 0.65rem;
+  font-size: 0.9em;
+}
+
+.dark .math-live-preview-inline {
+  background: #11100f;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 25%);
+}
+
+.math-live-preview-block {
+  display: block;
+  margin: 0.85rem 0 0.15rem;
+  border-top: 1px solid #d5d0c6;
+  padding-top: 0.85rem;
+}
+
+.dark .math-live-preview-inline,
+.dark .math-live-preview-block {
+  border-color: #3b3833;
+}
+
+.math-live-preview-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: #8d867c;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.math-live-preview-body {
+  color: inherit;
+}
+
+.math-live-preview-body-block {
+  display: flex;
+  min-height: 4.5rem;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  font-size: 1.12em;
+}
+
+.math-live-preview-empty {
+  color: #8d867c;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.86rem;
 }
 
 .ProseMirror blockquote,

@@ -9,7 +9,7 @@ import TurndownService from "turndown";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
-import { MathPreview } from "../../extensions/MathPreview";
+import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
@@ -23,6 +23,22 @@ const turndown = new TurndownService({
   bulletListMarker: "-",
 });
 
+turndown.addRule("inlineMath", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-math",
+  replacement: (_content, node) => {
+    const tex = node instanceof HTMLElement ? node.dataset.tex || "" : "";
+    return `$${tex}$`;
+  },
+});
+
+turndown.addRule("blockMath", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "block-math",
+  replacement: (_content, node) => {
+    const tex = node instanceof HTMLElement ? node.dataset.tex || "" : "";
+    return `\n\n$$\n${tex}\n$$\n\n`;
+  },
+});
+
 const editor = useEditor({
   extensions: [
     StarterKit.configure({
@@ -34,7 +50,8 @@ const editor = useEditor({
     Link.configure({ openOnClick: false }),
     Image,
     MarkdownHeading,
-    MathPreview,
+    InlineMath,
+    BlockMath,
   ],
   content: renderMarkdownForEditor(appStore.currentContent),
   editorProps: {

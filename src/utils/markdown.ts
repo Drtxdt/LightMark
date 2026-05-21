@@ -16,7 +16,7 @@ const md = new MarkdownIt({
 md.use(markdownItKatex);
 
 const editorMd = new MarkdownIt({
-  html: false,
+  html: true,
   linkify: true,
   typographer: true,
 });
@@ -38,7 +38,7 @@ export function renderMarkdown(markdown: string) {
 }
 
 export function renderMarkdownForEditor(markdown: string) {
-  return editorMd.render(markdown);
+  return editorMd.render(markMathForEditor(markdown));
 }
 
 export function buildExportHtml(title: string, body: string) {
@@ -73,4 +73,23 @@ function escapeHtml(value: string) {
     };
     return entities[char];
   });
+}
+
+function markMathForEditor(markdown: string) {
+  const blocks: string[] = [];
+  let next = markdown.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    const id = blocks.length;
+    blocks.push(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`);
+    return `${prefix}\n@@LIGHTMARK_BLOCK_MATH_${id}@@\n`;
+  });
+
+  next = next.replace(/(^|[^$])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
+    return `${prefix}<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`;
+  });
+
+  blocks.forEach((html, index) => {
+    next = next.replace(`@@LIGHTMARK_BLOCK_MATH_${index}@@`, html);
+  });
+
+  return next;
 }
