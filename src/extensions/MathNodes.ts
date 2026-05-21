@@ -1,5 +1,5 @@
 import { mergeAttributes, Node } from "@tiptap/core";
-import { Plugin, TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
 import katex from "katex";
 
 type MathAttrs = {
@@ -65,7 +65,8 @@ export const InlineMath = Node.create({
 
             const from = pos + 1 + match.index + leadingLength;
             const to = pos + 1 + match.index + full.length;
-            tr = tr.replaceWith(from, to, this.type.create({ tex }));
+            tr = tr.replaceWith(from, to, this.type.create({ tex, editing: true }));
+            tr = tr.setSelection(NodeSelection.create(tr.doc, from));
             converted = true;
             return false;
           });
@@ -202,7 +203,6 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     const refresh = () => {
       tex = source.textContent || "";
       renderKatex(body, tex, false, "Formula preview");
-      updateAttrs({ tex, editing: true });
     };
 
     source.addEventListener("input", refresh);
@@ -293,6 +293,13 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     setBlockSelectionAfter(editor, getPos);
   };
 
+  const exitToPreviousParagraph = () => {
+    editing = false;
+    updateAttrs({ tex, editing: false });
+    if (tex.trim()) renderDisplay();
+    setBlockSelectionBefore(editor, getPos);
+  };
+
   const renderDisplay = () => {
     dom.innerHTML = "";
     dom.className = "math-node math-node-block";
@@ -338,6 +345,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       if (event.key === "ArrowRight" && textarea.selectionStart === textarea.value.length && textarea.selectionEnd === textarea.value.length) {
         event.preventDefault();
         exitToNextParagraph();
+        return;
+      }
+      if (event.key === "ArrowLeft" && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+        event.preventDefault();
+        exitToPreviousParagraph();
       }
     });
     textarea.addEventListener("blur", () => {
@@ -440,6 +452,26 @@ function setBlockSelectionAfter(editor: any, getPos: NodeViewPosition) {
     tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
   } else {
     tr = tr.setSelection(TextSelection.near(tr.doc.resolve(after), 1));
+  }
+
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.view.focus();
+}
+
+function setBlockSelectionBefore(editor: any, getPos: NodeViewPosition) {
+  if (typeof getPos !== "function") return;
+  const pos = getPos();
+  if (typeof pos !== "number") return;
+
+  const { state } = editor.view;
+  const paragraph = state.schema.nodes.paragraph;
+  let tr = state.tr;
+
+  if (paragraph && pos <= 0) {
+    tr = tr.insert(0, paragraph.create());
+    tr = tr.setSelection(TextSelection.create(tr.doc, 1));
+  } else {
+    tr = tr.setSelection(TextSelection.near(tr.doc.resolve(pos), -1));
   }
 
   editor.view.dispatch(tr.scrollIntoView());
