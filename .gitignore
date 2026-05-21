@@ -1,0 +1,63 @@
+# Node / Package managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnp/
+.pnp.js
+.pnp.cjs
+
+# pnpm store (optional local cache)
+.pnpm-store/
+
+# Build output
+dist/
+build/
+bundle/
+.vite/
+.cache/
+.turbo/
+
+# Vite
+.vite
+
+# TypeScript
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.*.local
+.env.local
+
+# Logs
+*.log
+/logs/
+/.nyc_output/
+coverage/
+
+# Tauri / Rust
+/target/
+/src-tauri/target/
+**/target/
+
+# Tauri bundles and installers
+/src-tauri/target/release/bundle/
+/src-tauri/target/debug/bundle/
+
+# Editor directories
+.vscode/
+.idea/
+.history/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.temp
+*.bak
