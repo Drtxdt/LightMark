@@ -31,7 +31,7 @@ watch(html, renderMermaid, { immediate: true });
 </script>
 
 <template>
-  <div class="h-full overflow-auto bg-white dark:bg-zinc-950">
-    <article class="markdown-preview prose prose-slate dark:prose-invert mx-auto max-w-[860px] px-8 py-10" v-html="html" />
+  <div class="h-full overflow-auto bg-paper-50 dark:bg-paper-950">
+    <article class="markdown-preview prose prose-stone dark:prose-invert mx-auto max-w-[860px] px-8 py-12" v-html="html" />
   </div>
 </template>

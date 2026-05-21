@@ -7,11 +7,11 @@ import EditorShell from "../editor/EditorShell.vue";
 </script>
 
 <template>
-  <div class="flex h-screen flex-col bg-slate-50 text-slate-900 dark:bg-zinc-950 dark:text-zinc-100">
+  <div class="flex h-screen flex-col bg-paper-50 text-ink-900 dark:bg-paper-950 dark:text-ink-100">
     <Toolbar />
     <div class="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_240px]">
       <Sidebar />
-      <main class="min-w-0 overflow-hidden border-x border-slate-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+      <main class="min-w-0 overflow-hidden border-x border-paper-200 bg-paper-50 dark:border-paper-800 dark:bg-paper-950">
         <EditorShell />
       </main>
       <Outline />

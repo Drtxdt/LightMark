@@ -23,7 +23,7 @@ const open = ref(true);
     >
       {{ node.isDir ? (open ? "▾" : "▸") : "•" }} {{ node.name }}<span v-if="node.path === appStore.currentFilePath && appStore.isDirty"> *</span>
     </button>
-    <div v-if="node.isDir && open" class="ml-3 border-l border-slate-200 pl-2 dark:border-zinc-800">
+    <div v-if="node.isDir && open" class="ml-3 border-l border-paper-200 pl-2 dark:border-paper-800">
       <FileTreeNode v-for="child in node.children" :key="child.path" :node="child" @select="emit('select', $event)" />
     </div>
   </div>

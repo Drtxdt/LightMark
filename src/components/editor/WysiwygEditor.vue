@@ -23,7 +23,7 @@ const editor = useEditor({
   content: renderMarkdown(appStore.currentContent),
   editorProps: {
     attributes: {
-      class: "prose prose-slate dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 py-10 focus:outline-none",
+      class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 py-12 focus:outline-none",
     },
   },
   onUpdate({ editor }) {
@@ -51,7 +51,7 @@ onBeforeUnmount(() => editor.value?.destroy());
 </script>
 
 <template>
-  <div class="h-full overflow-auto bg-white dark:bg-zinc-950">
+  <div class="h-full overflow-auto bg-paper-50 dark:bg-paper-950">
     <EditorContent :editor="editor" />
   </div>
 </template>

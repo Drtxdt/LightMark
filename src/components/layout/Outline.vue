@@ -15,13 +15,13 @@ async function jump(id: string) {
 </script>
 
 <template>
-  <aside class="overflow-auto bg-slate-50 p-3 dark:bg-zinc-900">
-    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-zinc-400">Outline</h2>
-    <p v-if="outline.length === 0" class="text-sm text-slate-500 dark:text-zinc-400">No headings.</p>
+  <aside class="overflow-auto bg-paper-100/40 p-3 dark:bg-paper-900">
+    <h2 class="mb-3 text-xs font-medium uppercase tracking-wide text-ink-500 dark:text-ink-300">Outline</h2>
+    <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">No headings.</p>
     <button
       v-for="item in outline"
       :key="item.id"
-      class="block w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-slate-200 dark:hover:bg-zinc-800"
+      class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
       :class="{ 'pl-5': item.level === 2, 'pl-8': item.level === 3 }"
       @click="jump(item.id)"
     >

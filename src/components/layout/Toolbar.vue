@@ -33,12 +33,12 @@ async function exportHtml() {
 </script>
 
 <template>
-  <header class="flex h-12 items-center gap-2 border-b border-slate-200 bg-white px-3 dark:border-zinc-800 dark:bg-zinc-950">
+  <header class="flex h-11 items-center gap-1.5 border-b border-paper-200 bg-paper-50 px-3 dark:border-paper-800 dark:bg-paper-950">
     <button class="btn" @click="run(createNewFile)">New</button>
     <button class="btn" @click="run(() => openFile())">Open File</button>
     <button class="btn" @click="run(() => openWorkspace())">Open Folder</button>
     <button class="btn-primary" @click="run(saveCurrentFile)">Save</button>
-    <div class="mx-2 h-5 w-px bg-slate-200 dark:bg-zinc-800" />
+    <div class="mx-2 h-5 w-px bg-paper-200 dark:bg-paper-800" />
     <div class="segmented">
       <button :class="{ active: appStore.editorMode === 'wysiwyg' }" @click="switchMode('wysiwyg')">Write</button>
       <button :class="{ active: appStore.editorMode === 'source' }" @click="switchMode('source')">Source</button>
@@ -46,7 +46,7 @@ async function exportHtml() {
     </div>
     <button class="btn" @click="run(exportHtml)">Export HTML</button>
     <div class="ml-auto flex items-center gap-2">
-      <span class="max-w-[360px] truncate text-sm text-slate-500 dark:text-zinc-400">
+      <span class="max-w-[360px] truncate text-sm text-ink-500 dark:text-ink-300">
         {{ currentFileName }}<span v-if="appStore.isDirty"> *</span>
       </span>
       <select class="select" :value="appStore.theme" @change="setTheme(($event.target as HTMLSelectElement).value as any)">

@@ -18,53 +18,72 @@ body,
 
 body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #fbfaf7;
+  color: #1f1e1b;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 @layer components {
   .btn {
-    @apply rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800;
+    @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm text-ink-700 transition-colors hover:bg-paper-100 hover:text-ink-900 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .btn-primary {
-    @apply rounded-md border border-blue-600 bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700;
+    @apply rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 text-sm text-paper-50 transition-colors hover:bg-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:border-ink-300 dark:bg-ink-100 dark:text-paper-950 dark:hover:bg-paper-200;
   }
 
   .btn-small {
-    @apply rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800;
+    @apply rounded border border-transparent bg-transparent px-2 py-1 text-xs text-ink-500 transition-colors hover:bg-paper-100 hover:text-ink-900 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .select {
-    @apply rounded-md border border-slate-200 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900;
+    @apply rounded-md border border-paper-200 bg-paper-50 px-2 py-1 text-sm text-ink-700 outline-none focus:ring-1 focus:ring-ink-300 dark:border-paper-800 dark:bg-paper-900 dark:text-ink-100;
   }
 
   .segmented {
-    @apply inline-flex overflow-hidden rounded-md border border-slate-200 dark:border-zinc-700;
+    @apply inline-flex overflow-hidden rounded-md border border-paper-200 bg-paper-50 dark:border-paper-800 dark:bg-paper-900;
   }
 
   .segmented button {
-    @apply px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-zinc-800;
+    @apply px-3 py-1.5 text-sm text-ink-500 transition-colors hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .segmented button.active {
-    @apply bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-950;
+    @apply bg-ink-900 text-paper-50 dark:bg-ink-100 dark:text-paper-950;
   }
 
   .file-node {
-    @apply mb-0.5 block w-full truncate rounded px-2 py-1 text-left text-sm text-slate-700 hover:bg-slate-200 dark:text-zinc-300 dark:hover:bg-zinc-800;
+    @apply mb-0.5 block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .file-node-active {
-    @apply bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-200;
+    @apply bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100;
   }
 }
 
 .cm-editor {
   height: 100%;
   font-size: 15px;
+  background: transparent;
 }
 
 .cm-scroller {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.75;
+  padding: 32px 0;
+}
+
+.cm-content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+.cm-gutters {
+  background: transparent !important;
+  border-right: 0 !important;
+  color: #b9b3a8 !important;
 }
 
 .ProseMirror {
@@ -81,4 +100,103 @@ body {
 
 .markdown-preview pre {
   border-radius: 8px;
+}
+
+.ProseMirror,
+.markdown-preview {
+  color: #1f1e1b;
+  font-size: 16px;
+  line-height: 1.78;
+}
+
+.dark .ProseMirror,
+.dark .markdown-preview {
+  color: #e8e5df;
+}
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3,
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3 {
+  color: inherit;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.ProseMirror blockquote,
+.markdown-preview blockquote {
+  border-left-color: #d5d0c6;
+  color: #756f66;
+}
+
+.dark .ProseMirror blockquote,
+.dark .markdown-preview blockquote {
+  border-left-color: #3b3833;
+  color: #b9b3a8;
+}
+
+.ProseMirror a,
+.markdown-preview a {
+  color: inherit;
+  text-decoration-color: #b9b3a8;
+  text-underline-offset: 3px;
+}
+
+.ProseMirror code:not(pre code),
+.markdown-preview code:not(pre code) {
+  background: #f5f3ee;
+  border-radius: 4px;
+  color: #3b3833;
+  padding: 0.1rem 0.3rem;
+}
+
+.dark .ProseMirror code:not(pre code),
+.dark .markdown-preview code:not(pre code) {
+  background: #1b1a18;
+  color: #e8e5df;
+}
+
+.ProseMirror pre,
+.markdown-preview pre {
+  background: #1b1a18;
+  border: 1px solid #2a2926;
+  color: #e8e5df;
+}
+
+.hljs {
+  background: transparent;
+  color: #e8e5df;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: #f5f3ee;
+}
+
+.hljs-string,
+.hljs-title,
+.hljs-section,
+.hljs-attribute,
+.hljs-literal,
+.hljs-template-variable,
+.hljs-variable {
+  color: #d5d0c6;
+}
+
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: #8d867c;
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: #b9b3a8;
 }

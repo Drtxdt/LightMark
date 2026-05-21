@@ -7,8 +7,8 @@ const stats = computed(() => getWordStats(appStore.currentContent));
 </script>
 
 <template>
-  <div class="fixed inset-0 z-40 bg-slate-950/20 p-8" @click.self="appStore.wordCountOpen = false">
-    <section class="ml-auto w-72 rounded-lg border border-slate-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
+  <div class="fixed inset-0 z-40 bg-ink-900/15 p-8" @click.self="appStore.wordCountOpen = false">
+    <section class="ml-auto w-72 rounded-md border border-paper-200 bg-paper-50 p-4 shadow-[0_18px_50px_rgba(31,30,27,0.12)] dark:border-paper-800 dark:bg-paper-900">
       <div class="mb-4 flex items-center justify-between">
         <h2 class="text-sm font-semibold">Word Count</h2>
         <button class="btn-small" @click="appStore.wordCountOpen = false">Close</button>
