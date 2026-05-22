@@ -140,6 +140,38 @@ body {
   margin: 0;
 }
 
+.ProseMirror li > p,
+.markdown-preview li > p {
+  margin: 0;
+}
+
+.ProseMirror li > p + ul,
+.ProseMirror li > p + ol,
+.markdown-preview li > p + ul,
+.markdown-preview li > p + ol {
+  margin-top: 0;
+}
+
+.ProseMirror.prose li,
+.markdown-preview.prose li {
+  margin-top: 0.2em !important;
+  margin-bottom: 0.2em !important;
+}
+
+.ProseMirror.prose li > p,
+.markdown-preview.prose li > p {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+.ProseMirror.prose li > ul,
+.ProseMirror.prose li > ol,
+.markdown-preview.prose li > ul,
+.markdown-preview.prose li > ol {
+  margin-top: 0.15em !important;
+  margin-bottom: 0 !important;
+}
+
 .ProseMirror h1,
 .ProseMirror h2,
 .ProseMirror h3,
@@ -682,6 +714,22 @@ body {
 .markdown-preview table td {
   border: 1px solid #dfe2e5;
   padding: 6px 13px;
+}
+
+.ProseMirror .column-resize-handle,
+.ProseMirror .tableWrapper .column-resize-handle,
+.ProseMirror.resize-cursor,
+.ProseMirror .resize-cursor {
+  cursor: col-resize;
+}
+
+.ProseMirror .column-resize-handle {
+  bottom: -2px;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 4px;
+  z-index: 20;
 }
 
 .ProseMirror table th,

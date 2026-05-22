@@ -180,9 +180,12 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
       }
     });
     textarea.addEventListener("blur", () => {
-      editing = false;
-      updateAttrs({ code, editing: false });
-      if (code.trim()) void renderDisplay();
+      window.setTimeout(() => {
+        if (document.activeElement === textarea) return;
+        editing = false;
+        updateAttrs({ code, editing: false });
+        if (code.trim()) void renderDisplay();
+      }, 120);
     });
 
     dom.append(open, textarea, close, preview);
