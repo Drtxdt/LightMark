@@ -3,14 +3,14 @@ import type { OutlineItem } from "../types";
 export function extractOutline(markdown: string): OutlineItem[] {
   return markdown
     .split(/\r?\n/)
-    .map((line) => line.match(/^(#{1,3})\s+(.+)$/))
+    .map((line) => line.match(/^(#{1,6})\s+(.+)$/))
     .filter((match): match is RegExpMatchArray => Boolean(match))
     .map((match, index) => {
       const text = match[2].replace(/[#*_`[\]()]/g, "").trim();
       return {
         id: `heading-${index}-${slugify(text)}`,
         text,
-        level: match[1].length as 1 | 2 | 3,
+        level: match[1].length as any,
       };
     });
 }

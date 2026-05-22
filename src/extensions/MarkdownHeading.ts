@@ -11,48 +11,39 @@ export const MarkdownHeading = Extension.create({
         props: {
           decorations(state) {
             const decorations: Decoration[] = [];
-            const selectionFrom = state.selection.from;
-            const selectionTo = state.selection.to;
 
             state.doc.descendants((node, pos) => {
-              if (!node.isTextblock || node.type.name !== "paragraph") return;
+              if (!node.isTextblock || node.type.name === "codeBlock") return true;
 
-              const match = node.textContent.match(/^(#{1,3})(?=\s|[^#]|$)/);
-              if (!match) return;
+              const text = node.textContent;
+              const match = text.match(/^(#{1,6})(\s+)/);
+              if (!match) return true;
 
               const level = match[1].length;
-              const start = pos + 1;
-              const markerEnd = start + level;
-              const hasSpace = node.textContent[level] === " ";
-              const hiddenEnd = markerEnd + (hasSpace ? 1 : 0);
-              const active = selectionFrom <= pos + node.nodeSize && selectionTo >= start;
+              const markerStart = pos + 1;
+              const markerEnd = markerStart + match[1].length;
+              const hiddenEnd = markerEnd + match[2].length;
 
               decorations.push(
-                Decoration.node(pos, pos + node.nodeSize, {
-                  class: `markdown-heading markdown-heading-${level}`,
+                Decoration.inline(markerStart, markerEnd, {
+                  class: "md-marker",
                 }),
               );
-              if (active) {
-                decorations.push(
-                  Decoration.inline(start, markerEnd, {
-                    class: "md-marker",
-                  }),
-                );
-                decorations.push(
-                  Decoration.widget(markerEnd, () => {
-                    const hint = document.createElement("span");
-                    hint.className = "heading-level-hint";
-                    hint.textContent = `H${level}`;
-                    return hint;
-                  }),
-                );
-              } else {
-                decorations.push(
-                  Decoration.inline(start, hiddenEnd, {
-                    class: "md-source-hidden",
-                  }),
-                );
-              }
+              decorations.push(
+                Decoration.inline(markerEnd, hiddenEnd, {
+                  class: "md-source-hidden",
+                }),
+              );
+              decorations.push(
+                Decoration.widget(hiddenEnd, () => {
+                  const hint = document.createElement("span");
+                  hint.className = "heading-level-hint";
+                  hint.textContent = `H${level}`;
+                  return hint;
+                }),
+              );
+
+              return true;
             });
 
             return DecorationSet.create(state.doc, decorations);

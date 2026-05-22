@@ -290,6 +290,138 @@ body {
   color: #8d867c;
 }
 
+mark,
+.ProseMirror mark,
+.markdown-preview mark {
+  border-radius: 2px;
+  background: #fff2a8;
+  color: inherit;
+  padding: 0 0.08em;
+}
+
+sup,
+sub {
+  line-height: 0;
+}
+
+.ProseMirror [data-task-item],
+.markdown-preview [data-task-item] {
+  color: inherit;
+}
+
+.front-matter-node {
+  margin: 0.9rem 0;
+  border: 1px solid #e7e1d7;
+  border-radius: 4px;
+  background: #f8f8f8;
+  color: #756f66;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.86rem;
+  padding: 0.65rem 0.8rem;
+}
+
+.html-block-node {
+  margin: 1rem 0;
+  border: 1px solid #e7e1d7;
+  border-radius: 4px;
+  background: #f8f8f8;
+  color: #4d4942;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.88rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.html-block-node pre {
+  margin: 0.35rem 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  white-space: pre-wrap;
+}
+
+.html-block-label {
+  color: #b9b3a8;
+  font-size: 0.75rem;
+  letter-spacing: 0;
+}
+
+.front-matter-node pre {
+  margin: 0.25rem 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  white-space: pre-wrap;
+}
+
+.front-matter-fence,
+.toc-node-label,
+.footnote-id {
+  color: #b9b3a8;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.toc-node {
+  margin: 1rem 0;
+  border: 1px solid #e7e1d7;
+  border-radius: 4px;
+  background: #fbfaf7;
+  padding: 0.8rem 1rem;
+}
+
+.toc-node-label {
+  margin-bottom: 0.45rem;
+  font-size: 0.86rem;
+}
+
+.toc-node-item {
+  line-height: 1.65;
+  color: #4d4942;
+}
+
+.toc-node-item-2 {
+  padding-left: 1rem;
+}
+
+.toc-node-item-3 {
+  padding-left: 2rem;
+}
+
+.toc-node-item-4 {
+  padding-left: 3rem;
+}
+
+.toc-node-item-5 {
+  padding-left: 4rem;
+}
+
+.toc-node-item-6 {
+  padding-left: 5rem;
+  color: #756f66;
+}
+
+.footnotes {
+  margin-top: 2rem;
+  border-top: 1px solid #e7e1d7;
+  color: #756f66;
+  font-size: 0.92em;
+}
+
+.dark mark,
+.dark .ProseMirror mark,
+.dark .markdown-preview mark {
+  background: #5b4f20;
+  color: #f5f1e8;
+}
+
+.dark .front-matter-node,
+.dark .toc-node,
+.dark .html-block-node {
+  border-color: #3b3833;
+  background: #1b1a18;
+}
+
 .md-live-marker {
   color: #b9b3a8;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;

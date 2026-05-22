@@ -3,7 +3,7 @@ import markdownItKatex from "markdown-it-katex";
 import hljs from "highlight.js";
 
 const md = new MarkdownIt({
-  html: false,
+  html: true,
   linkify: true,
   typographer: true,
   highlight(code, language) {
@@ -14,27 +14,17 @@ const md = new MarkdownIt({
 });
 
 md.use(markdownItKatex);
+installLightMarkMarkdown(md);
 
 const editorMd = new MarkdownIt({
   html: true,
   linkify: true,
   typographer: true,
 });
-
-const defaultFence = md.renderer.rules.fence;
-
-md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
-  const language = token.info.trim().split(/\s+/)[0];
-  if (language === "mermaid") {
-    const content = md.utils.escapeHtml(token.content);
-    return `<pre class="mermaid">${content}</pre>`;
-  }
-  return defaultFence ? defaultFence(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
-};
+installLightMarkMarkdown(editorMd);
 
 export function renderMarkdown(markdown: string) {
-  return md.render(markdown);
+  return md.render(enhanceMarkdownForRender(markdown));
 }
 
 export function renderMarkdownForEditor(markdown: string) {
@@ -83,7 +73,15 @@ function markSpecialBlocksForEditor(markdown: string) {
     return token;
   };
 
-  let next = markdown.replace(/(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
+  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+    return `${stash(`<section data-type="front-matter" data-yaml="${escapeHtml(yaml.trim())}"></section>`)}\n`;
+  });
+
+  next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => {
+    return `${prefix}\n${stash(buildTocHtml(markdown).replace("class=\"toc-node\" ", ""))}\n`;
+  });
+
+  next = next.replace(/(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
     return `${prefix}\n${stash(`<div data-type="mermaid" data-code="${escapeHtml(code.trim())}"></div>`)}\n`;
   });
 
@@ -96,9 +94,23 @@ function markSpecialBlocksForEditor(markdown: string) {
     return stash(`<code>${escapeHtml(code)}</code>`);
   });
 
-  next = next.replace(/(^|[^$\\])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
-    return `${prefix}<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`;
+  next = protectInlineMath(next, stash);
+  next = protectHtmlBlocks(next, stash);
+  next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
+    return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
   });
+
+  next = next.replace(/(^|[A-Za-z0-9)\]])\^([A-Za-z0-9+\-=().]+)\^/g, (_match, prefix, text) => {
+    return `${prefix}<sup>${escapeHtml(text)}</sup>`;
+  });
+
+  next = next.replace(/(^|[A-Za-z0-9)\]])~([A-Za-z0-9+\-=().]+)~/g, (_match, prefix, text) => {
+    return `${prefix}<sub>${escapeHtml(text)}</sub>`;
+  });
+
+  next = convertFootnotes(next);
+  next = convertTaskItems(next);
+  next = convertDefinitionLists(next);
 
   placeholders.forEach((html, index) => {
     next = next.replace(`@@LIGHTMARK_PLACEHOLDER_${index}@@`, html);
@@ -106,3 +118,140 @@ function markSpecialBlocksForEditor(markdown: string) {
 
   return next;
 }
+
+function enhanceMarkdownForRender(markdown: string) {
+  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+    return `<section class="front-matter-node"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
+  });
+  next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
+  next = convertFootnotes(next);
+  next = convertTaskItems(next);
+  next = convertDefinitionLists(next);
+  return next;
+}
+
+function installLightMarkMarkdown(instance: MarkdownIt) {
+  instance.linkify.set({ fuzzyLink: true });
+
+  instance.renderer.rules.text = (tokens, idx) => renderInlineEnhancements(instance.utils.escapeHtml(tokens[idx].content));
+
+  const defaultFenceRenderer = instance.renderer.rules.fence;
+  instance.renderer.rules.fence = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    const language = token.info.trim().split(/\s+/)[0];
+    if (language === "mermaid") {
+      const content = instance.utils.escapeHtml(token.content);
+      return `<pre class="mermaid">${content}</pre>`;
+    }
+    return defaultFenceRenderer ? defaultFenceRenderer(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+  };
+}
+
+function renderInlineEnhancements(html: string) {
+  return html
+    .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
+    .replace(/(^|[A-Za-z0-9)\]])\^([A-Za-z0-9+\-=().]+)\^/g, "$1<sup>$2</sup>")
+    .replace(/(^|[A-Za-z0-9)\]])~([A-Za-z0-9+\-=().]+)~/g, "$1<sub>$2</sub>")
+    .replace(/:([a-z0-9_+-]+):/gi, (_match, name) => emojiMap[name] || `:${name}:`);
+}
+
+function convertTaskItems(markdown: string) {
+  return markdown.replace(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.+)$/gm, (_match, indent, checked, text) => {
+    const isChecked = checked.toLowerCase() === "x";
+    return `${indent}- <span data-task-item="${isChecked ? "checked" : "unchecked"}">${isChecked ? "☑" : "☐"} ${text}</span>`;
+  });
+}
+
+function convertDefinitionLists(markdown: string) {
+  return markdown.replace(/(^|\n)([^\n:][^\n]+)\n:\s+([^\n]+)(?=\n|$)/g, (_match, prefix, term, definition) => {
+    return `${prefix}<dl><dt>${escapeHtml(term.trim())}</dt><dd>${escapeHtml(definition.trim())}</dd></dl>`;
+  });
+}
+
+function convertFootnotes(markdown: string) {
+  const definitions = new Map<string, string>();
+  const lines = markdown.split(/\r?\n/);
+  const bodyLines: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const definition = lines[index].match(/^\[\^([^\]]+)\]:\s*(.*)$/);
+    if (!definition) {
+      bodyLines.push(lines[index]);
+      continue;
+    }
+
+    const id = definition[1];
+    const chunks = [definition[2]];
+    while (index + 1 < lines.length && /^( {2,}|\t)/.test(lines[index + 1])) {
+      index += 1;
+      chunks.push(lines[index].trim());
+    }
+    definitions.set(id, chunks.join("\n"));
+  }
+
+  let next = bodyLines.join("\n");
+
+  next = next.replace(/\[\^([^\]]+)\]/g, (_match, id) => {
+    const safeId = escapeHtml(id);
+    return `<sup data-footnote-ref="${safeId}"><a href="#fn-${safeId}" id="fnref-${safeId}">[${safeId}]</a></sup>`;
+  });
+
+  if (definitions.size === 0) return next;
+
+  const items = Array.from(definitions.entries())
+    .map(([id, text]) => {
+      const safeId = escapeHtml(id);
+      return `<li id="fn-${safeId}"><span class="footnote-id">[${safeId}]</span> ${escapeHtml(text).replace(/\n/g, "<br>")} <a href="#fnref-${safeId}" class="footnote-backref">↩</a></li>`;
+    })
+    .join("");
+  return `${next}\n\n<section class="footnotes"><ol>${items}</ol></section>`;
+}
+
+function buildTocHtml(markdown: string) {
+  const items = markdown
+    .split(/\r?\n/)
+    .map((line) => line.match(/^(#{1,6})\s+(.+)$/))
+    .filter((match): match is RegExpMatchArray => Boolean(match))
+    .map((match) => {
+      const level = match[1].length;
+      const text = escapeHtml(match[2].replace(/[#*_`[\]()]/g, "").trim());
+      return `<div class="toc-node-item toc-node-item-${level}">${text}</div>`;
+    })
+    .join("");
+  return `<nav class="toc-node" data-type="table-of-contents"><div class="toc-node-label">[TOC]</div>${items}</nav>`;
+}
+
+function protectInlineMath(markdown: string, stash: (html: string) => string) {
+  return markdown.replace(/(^|[^$\\])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
+    return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
+  });
+}
+
+function protectHtmlBlocks(markdown: string, stash: (html: string) => string) {
+  return markdown.replace(/(^|\n)<([a-z][\w-]*)(\s[^>]*)?>[\s\S]*?<\/\2>\s*(?=\n|$)/gi, (_match) => {
+    return stash(`<div data-type="html-block" data-html="${escapeHtml(_match.trim())}"></div>`);
+  });
+}
+
+function renderInlineMarkdownInsideMark(value: string) {
+  return escapeHtml(value).replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
+    return `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+  });
+}
+
+const emojiMap: Record<string, string> = {
+  smile: "😄",
+  grin: "😁",
+  joy: "😂",
+  wink: "😉",
+  heart: "❤️",
+  thumbsup: "👍",
+  thumbs_up: "👍",
+  fire: "🔥",
+  rocket: "🚀",
+  warning: "⚠️",
+  check: "✅",
+  x: "❌",
+  star: "⭐",
+  bulb: "💡",
+  memo: "📝",
+};

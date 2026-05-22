@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
-import { Extension, mergeAttributes, Node } from "@tiptap/core";
+import { Extension, Mark, mergeAttributes, Node } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import Heading from "@tiptap/extension-heading";
@@ -29,6 +29,189 @@ const TyporaHeading = Heading.extend({
   },
 });
 
+const HighlightMark = Mark.create({
+  name: "highlight",
+  parseHTML() {
+    return [{ tag: "mark" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["mark", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
+const SuperscriptMark = Mark.create({
+  name: "superscript",
+  parseHTML() {
+    return [{ tag: "sup" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["sup", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
+const SubscriptMark = Mark.create({
+  name: "subscript",
+  parseHTML() {
+    return [{ tag: "sub" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["sub", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
+const TaskStateMark = Mark.create({
+  name: "taskState",
+  addAttributes() {
+    return {
+      state: {
+        default: "unchecked",
+        parseHTML: (element) => element.getAttribute("data-task-item") || "unchecked",
+        renderHTML: (attributes) => ({ "data-task-item": attributes.state }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "span[data-task-item]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["span", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
+const FrontMatterNode = Node.create({
+  name: "frontMatter",
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      yaml: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-yaml") || element.textContent || "",
+        renderHTML: (attributes) => ({
+          "data-type": "front-matter",
+          "data-yaml": attributes.yaml,
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: 'section[data-type="front-matter"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["section", mergeAttributes(HTMLAttributes), HTMLAttributes.yaml || ""];
+  },
+
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement("section");
+      dom.className = "front-matter-node";
+      dom.contentEditable = "false";
+      const open = document.createElement("div");
+      open.className = "front-matter-fence";
+      open.textContent = "---";
+      const pre = document.createElement("pre");
+      pre.textContent = node.attrs.yaml || "";
+      const close = document.createElement("div");
+      close.className = "front-matter-fence";
+      close.textContent = "---";
+      dom.append(open, pre, close);
+      return { dom, ignoreMutation: () => true };
+    };
+  },
+});
+
+const TableOfContentsNode = Node.create({
+  name: "tableOfContents",
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  parseHTML() {
+    return [{ tag: 'nav[data-type="table-of-contents"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["nav", mergeAttributes(HTMLAttributes, { "data-type": "table-of-contents" }), "[TOC]"];
+  },
+
+  addNodeView() {
+    return ({ editor }) => {
+      const dom = document.createElement("nav");
+      dom.className = "toc-node";
+      dom.contentEditable = "false";
+      const render = () => {
+        const headings: Array<{ level: number; text: string }> = [];
+        editor.state.doc.descendants((node: any) => {
+          if (node.type.name === "heading" || node.type.name === "markdownHeading") {
+            headings.push({ level: node.attrs.level || 1, text: node.textContent });
+          }
+          return true;
+        });
+        dom.innerHTML = "";
+        const label = document.createElement("div");
+        label.className = "toc-node-label";
+        label.textContent = "[TOC]";
+        dom.appendChild(label);
+        headings.forEach((heading) => {
+          const item = document.createElement("div");
+          item.className = `toc-node-item toc-node-item-${heading.level}`;
+          item.textContent = heading.text;
+          dom.appendChild(item);
+        });
+      };
+      render();
+      return { dom, update: () => (render(), true), ignoreMutation: () => true };
+    };
+  },
+});
+
+const HtmlBlockNode = Node.create({
+  name: "htmlBlock",
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      html: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-html") || "",
+        renderHTML: (attributes) => ({
+          "data-type": "html-block",
+          "data-html": attributes.html,
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-type="html-block"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes), HTMLAttributes.html || ""];
+  },
+
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement("section");
+      dom.className = "html-block-node";
+      dom.contentEditable = "false";
+      const label = document.createElement("div");
+      label.className = "html-block-label";
+      label.textContent = "HTML";
+      const pre = document.createElement("pre");
+      pre.textContent = node.attrs.html || "";
+      dom.append(label, pre);
+      return { dom, ignoreMutation: () => true };
+    };
+  },
+});
+
 const TyporaSourceMarkers = Extension.create({
   name: "typoraSourceMarkers",
 
@@ -43,6 +226,9 @@ const TyporaSourceMarkers = Extension.create({
               ...createMarkDecorations(state, "bold", "**", "**"),
               ...createMarkDecorations(state, "italic", "*", "*"),
               ...createMarkDecorations(state, "code", "`", "`"),
+              ...createMarkDecorations(state, "highlight", "==", "=="),
+              ...createMarkDecorations(state, "superscript", "^", "^"),
+              ...createMarkDecorations(state, "subscript", "~", "~"),
               ...createLinkDecorations(state),
             ];
 
@@ -51,7 +237,7 @@ const TyporaSourceMarkers = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-          return convertMarkdownLink(newState);
+          return convertMarkdownHeading(newState) || convertInlineMarkdownSyntax(newState);
         },
       }),
     ];
@@ -185,6 +371,50 @@ turndown.addRule("horizontalRule", {
   replacement: () => "\n\n---\n\n",
 });
 
+turndown.addRule("highlight", {
+  filter: "mark",
+  replacement: (content) => `==${content}==`,
+});
+
+turndown.addRule("superscript", {
+  filter: "sup",
+  replacement: (content) => `^${content}^`,
+});
+
+turndown.addRule("subscript", {
+  filter: "sub",
+  replacement: (content) => `~${content}~`,
+});
+
+turndown.addRule("taskState", {
+  filter: (node) => node instanceof HTMLElement && node.hasAttribute("data-task-item"),
+  replacement: (content, node) => {
+    const checked = node instanceof HTMLElement && node.dataset.taskItem === "checked";
+    return `${checked ? "[x]" : "[ ]"} ${content.replace(/^[☐☑]\s*/, "")}`;
+  },
+});
+
+turndown.addRule("frontMatter", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "front-matter",
+  replacement: (_content, node) => {
+    const yaml = node instanceof HTMLElement ? node.dataset.yaml || node.textContent || "" : "";
+    return `---\n${yaml.trim()}\n---\n\n`;
+  },
+});
+
+turndown.addRule("tableOfContents", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "table-of-contents",
+  replacement: () => "\n\n[TOC]\n\n",
+});
+
+turndown.addRule("htmlBlock", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "html-block",
+  replacement: (_content, node) => {
+    const html = node instanceof HTMLElement ? node.dataset.html || node.textContent || "" : "";
+    return `\n\n${html.trim()}\n\n`;
+  },
+});
+
 turndown.addRule("fencedCodeBlock", {
   filter: (node) => node.nodeName === "PRE" && node.firstChild?.nodeName === "CODE",
   replacement: (_content, node) => {
@@ -250,7 +480,7 @@ const editor = useEditor({
       defaultLanguage: "plaintext",
     }),
     TyporaHeading.configure({
-      levels: [1, 2, 3],
+      levels: [1, 2, 3, 4, 5, 6],
     }),
     Link.configure({ openOnClick: false }),
     Image,
@@ -262,6 +492,13 @@ const editor = useEditor({
     InlineMath,
     BlockMath,
     MermaidNode,
+    HighlightMark,
+    SuperscriptMark,
+    SubscriptMark,
+    TaskStateMark,
+    FrontMatterNode,
+    TableOfContentsNode,
+    HtmlBlockNode,
     TyporaInlineCode,
     TyporaHorizontalRule,
     TyporaSourceMarkers,
@@ -416,32 +653,85 @@ function createSourceMarker(text: string) {
   return marker;
 }
 
-function convertMarkdownLink(state: any) {
+function convertInlineMarkdownSyntax(state: any) {
   const linkMark = state.schema.marks.link;
-  if (!linkMark) return null;
+  const converters = [
+    {
+      mark: state.schema.marks.highlight,
+      pattern: /(^|[\s(])==([^=\n]+)==/g,
+      attrs: () => ({}),
+    },
+    {
+      mark: state.schema.marks.superscript,
+      pattern: /(^|[\s(])\^([^^\n]+)\^/g,
+      attrs: () => ({}),
+    },
+    {
+      mark: state.schema.marks.subscript,
+      pattern: /(^|[\s(])~([^~\n]+)~/g,
+      attrs: () => ({}),
+    },
+    {
+      mark: linkMark,
+      pattern: /(^|[\s(])\[([^\]\n]+)\]\(([^)\s]+)\)/g,
+      attrs: (match: RegExpExecArray) => ({ href: match[3] }),
+    },
+  ];
 
   let tr = state.tr;
   let converted = false;
-  const linkPattern = /(^|[\s(])\[([^\]\n]+)\]\(([^)\s]+)\)/g;
 
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock || node.type.name === "codeBlock") return true;
 
     const text = node.textContent;
-    linkPattern.lastIndex = 0;
-    const match = linkPattern.exec(text);
+    for (const converter of converters) {
+      if (!converter.mark) continue;
+      converter.pattern.lastIndex = 0;
+      const match = converter.pattern.exec(text);
+      if (!match) continue;
+
+      const full = match[0];
+      const leadingLength = match[1].length;
+      const label = match[2];
+      const from = pos + 1 + match.index + leadingLength;
+      const to = pos + 1 + match.index + full.length;
+
+      tr = tr.insertText(label, from, to);
+      tr = tr.addMark(from, from + label.length, converter.mark.create(converter.attrs(match)));
+      converted = true;
+      return false;
+    }
+    return true;
+  });
+
+  return converted ? tr : null;
+}
+
+function convertMarkdownHeading(state: any) {
+  const heading = state.schema.nodes.heading;
+  if (!heading) return null;
+
+  let tr = state.tr;
+  let converted = false;
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (converted) return false;
+    if (!node.isTextblock || node.type.name === "codeBlock") return true;
+
+    const match = node.textContent.match(/^(#{1,6})\s+(.+)$/);
     if (!match) return true;
 
-    const full = match[0];
-    const leadingLength = match[1].length;
-    const label = match[2];
-    const href = match[3];
-    const from = pos + 1 + match.index + leadingLength;
-    const to = pos + 1 + match.index + full.length;
-
-    tr = tr.insertText(label, from, to);
-    tr = tr.addMark(from, from + label.length, linkMark.create({ href }));
+    const level = match[1].length;
+    const textStart = pos + 1 + match[1].length + 1;
+    const textEnd = pos + node.nodeSize - 1;
+    tr = tr.delete(pos + 1, textStart);
+    tr = tr.setNodeMarkup(pos, heading, { level }, node.marks);
+    if (textEnd >= textStart) {
+      const mapped = tr.mapping.map(textEnd);
+      tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(mapped, tr.doc.content.size)));
+    }
     converted = true;
     return false;
   });
