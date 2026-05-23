@@ -9,7 +9,7 @@ const html = computed(() => {
   const rendered = renderMarkdown(appStore.currentContent);
   const outline = extractOutline(appStore.currentContent);
   let index = 0;
-  return rendered.replace(/<h([123])>/g, (match) => {
+  return rendered.replace(/<h([1-6])>/g, (match) => {
     const item = outline[index++];
     return item ? `<h${item.level} data-outline-id="${item.id}">` : match;
   });

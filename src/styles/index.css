@@ -306,7 +306,31 @@ sub {
 
 .ProseMirror [data-task-item],
 .markdown-preview [data-task-item] {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
   color: inherit;
+  cursor: pointer;
+}
+
+.ProseMirror [data-task-item="checked"],
+.markdown-preview [data-task-item="checked"] {
+  color: #8d867c;
+  text-decoration: line-through;
+}
+
+.ProseMirror [data-task-item] input,
+.markdown-preview [data-task-item] input {
+  width: 0.95em;
+  height: 0.95em;
+  margin: 0;
+  accent-color: #333333;
+  pointer-events: none;
+  transform: translateY(0.08em);
+}
+
+.task-state-content {
+  min-width: 0;
 }
 
 .front-matter-node {
@@ -346,6 +370,32 @@ sub {
   letter-spacing: 0;
 }
 
+.html-block-rendered {
+  font-family: inherit;
+  font-size: 1rem;
+  color: inherit;
+}
+
+.html-block-editor {
+  width: 100%;
+  min-height: 5rem;
+  resize: vertical;
+  border: 1px solid #d5d0c6;
+  border-radius: 4px;
+  background: #fbfaf7;
+  color: inherit;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  outline: none;
+  padding: 0.65rem 0.75rem;
+}
+
+.dark .html-block-editor {
+  border-color: #3b3833;
+  background: #12110f;
+}
+
 .front-matter-node pre {
   margin: 0.25rem 0;
   border: 0;
@@ -373,6 +423,20 @@ sub {
 .toc-node-label {
   margin-bottom: 0.45rem;
   font-size: 0.86rem;
+}
+
+.toc-node-editing .toc-node-label {
+  display: none;
+}
+
+.toc-node-editor {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #8d867c;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.92rem;
+  outline: none;
 }
 
 .toc-node-item {

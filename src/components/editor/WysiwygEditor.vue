@@ -11,6 +11,7 @@ import { Table } from "@tiptap/extension-table";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TableRow } from "@tiptap/extension-table-row";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
@@ -74,7 +75,13 @@ const TaskStateMark = Mark.create({
     return [{ tag: "span[data-task-item]" }];
   },
   renderHTML({ HTMLAttributes }) {
-    return ["span", mergeAttributes(HTMLAttributes), 0];
+    const checked = HTMLAttributes["data-task-item"] === "checked";
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, { class: "task-state" }),
+      ["input", { type: "checkbox", checked: checked ? "checked" : null, contenteditable: "false" }],
+      ["span", { class: "task-state-content" }, 0],
+    ];
   },
 });
 
@@ -129,6 +136,16 @@ const TableOfContentsNode = Node.create({
   group: "block",
   atom: true,
   selectable: true,
+  draggable: false,
+
+  addAttributes() {
+    return {
+      editing: {
+        default: false,
+        rendered: false,
+      },
+    };
+  },
 
   parseHTML() {
     return [{ tag: 'nav[data-type="table-of-contents"]' }];
@@ -139,11 +156,21 @@ const TableOfContentsNode = Node.create({
   },
 
   addNodeView() {
-    return ({ editor }) => {
+    return ({ node, editor, getPos }) => {
       const dom = document.createElement("nav");
       dom.className = "toc-node";
       dom.contentEditable = "false";
+      let editing = Boolean(node.attrs.editing);
+
+      const updateAttrs = (nextEditing: boolean) => {
+        if (typeof getPos !== "function") return;
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { editing: nextEditing }));
+      };
+
       const render = () => {
+        dom.className = editing ? "toc-node toc-node-editing" : "toc-node";
         const headings: Array<{ level: number; text: string }> = [];
         editor.state.doc.descendants((node: any) => {
           if (node.type.name === "heading" || node.type.name === "markdownHeading") {
@@ -156,6 +183,30 @@ const TableOfContentsNode = Node.create({
         label.className = "toc-node-label";
         label.textContent = "[TOC]";
         dom.appendChild(label);
+        if (editing) {
+          const input = document.createElement("input");
+          input.className = "toc-node-editor";
+          input.value = "[TOC]";
+          input.spellcheck = false;
+          input.addEventListener("blur", () => {
+            window.setTimeout(() => {
+              if (document.activeElement === input) return;
+              if (input.value.trim().toUpperCase() !== "[TOC]") {
+                replaceTocWithText(editor, getPos, input.value);
+                return;
+              }
+              editing = false;
+              updateAttrs(false);
+              render();
+            }, 100);
+          });
+          dom.appendChild(input);
+          requestAnimationFrame(() => {
+            input.focus();
+            input.select();
+          });
+          return;
+        }
         headings.forEach((heading) => {
           const item = document.createElement("div");
           item.className = `toc-node-item toc-node-item-${heading.level}`;
@@ -163,8 +214,42 @@ const TableOfContentsNode = Node.create({
           dom.appendChild(item);
         });
       };
+      const refresh = () => {
+        if (!editing) render();
+      };
+      editor.on?.("update", refresh);
+      dom.addEventListener("mousedown", (event) => {
+        if (editing) return;
+        event.preventDefault();
+        editing = true;
+        updateAttrs(true);
+        render();
+      });
       render();
-      return { dom, update: () => (render(), true), ignoreMutation: () => true };
+      return {
+        dom,
+        update: (nextNode: any) => {
+          editing = Boolean(nextNode.attrs.editing);
+          render();
+          return true;
+        },
+        selectNode() {
+          editing = true;
+          updateAttrs(true);
+          render();
+        },
+        deselectNode() {
+          if (!editing) return;
+          editing = false;
+          updateAttrs(false);
+          render();
+        },
+        destroy() {
+          editor.off?.("update", refresh);
+        },
+        ignoreMutation: () => true,
+        stopEvent: (event: Event) => event.target instanceof HTMLInputElement,
+      };
     };
   },
 });
@@ -185,6 +270,10 @@ const HtmlBlockNode = Node.create({
           "data-html": attributes.html,
         }),
       },
+      editing: {
+        default: false,
+        rendered: false,
+      },
     };
   },
 
@@ -197,17 +286,83 @@ const HtmlBlockNode = Node.create({
   },
 
   addNodeView() {
-    return ({ node }) => {
+    return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
-      dom.className = "html-block-node";
       dom.contentEditable = "false";
-      const label = document.createElement("div");
-      label.className = "html-block-label";
-      label.textContent = "HTML";
-      const pre = document.createElement("pre");
-      pre.textContent = node.attrs.html || "";
-      dom.append(label, pre);
-      return { dom, ignoreMutation: () => true };
+      let html = node.attrs.html || "";
+      let editing = Boolean(node.attrs.editing);
+
+      const updateAttrs = (next: { html?: string; editing?: boolean }) => {
+        if (typeof getPos !== "function") return;
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { html, editing, ...next }));
+      };
+
+      const renderDisplay = () => {
+        dom.innerHTML = "";
+        dom.className = "html-block-node";
+        const rendered = document.createElement("div");
+        rendered.className = "html-block-rendered";
+        rendered.innerHTML = html;
+        dom.appendChild(rendered);
+      };
+
+      const renderEditor = () => {
+        dom.innerHTML = "";
+        dom.className = "html-block-node html-block-node-editing";
+        const label = document.createElement("div");
+        label.className = "html-block-label";
+        label.textContent = "HTML";
+        const textarea = document.createElement("textarea");
+        textarea.className = "html-block-editor";
+        textarea.value = html;
+        textarea.rows = Math.max(3, html.split(/\r?\n/).length);
+        textarea.spellcheck = false;
+        textarea.addEventListener("input", () => {
+          html = textarea.value;
+          textarea.rows = Math.max(3, html.split(/\r?\n/).length);
+        });
+        textarea.addEventListener("blur", () => {
+          editing = false;
+          updateAttrs({ html, editing: false });
+          renderDisplay();
+        });
+        dom.append(label, textarea);
+        requestAnimationFrame(() => textarea.focus());
+      };
+
+      dom.addEventListener("mousedown", (event) => {
+        if (editing) return;
+        event.preventDefault();
+        editing = true;
+        updateAttrs({ editing: true });
+        renderEditor();
+      });
+
+      editing ? renderEditor() : renderDisplay();
+      return {
+        dom,
+        update(nextNode: any) {
+          html = nextNode.attrs.html || "";
+          editing = Boolean(nextNode.attrs.editing);
+          editing ? renderEditor() : renderDisplay();
+          return true;
+        },
+        selectNode() {
+          editing = true;
+          updateAttrs({ editing: true });
+          renderEditor();
+        },
+        deselectNode() {
+          if (!editing) return;
+          editing = false;
+          updateAttrs({ html, editing: false });
+          renderDisplay();
+        },
+        ignoreMutation: () => true,
+        stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
+      };
     };
   },
 });
@@ -230,14 +385,17 @@ const TyporaSourceMarkers = Extension.create({
               ...createMarkDecorations(state, "superscript", "^", "^"),
               ...createMarkDecorations(state, "subscript", "~", "~"),
               ...createLinkDecorations(state),
+              ...createHeadingDecorations(state),
+              ...createOutlineHeadingDecorations(state),
             ];
 
             return decorations.length ? DecorationSet.create(state.doc, decorations) : null;
           },
         },
         appendTransaction: (transactions, _oldState, newState) => {
+          if (transactions.some((transaction) => transaction.selectionSet)) return null;
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-          return convertMarkdownHeading(newState) || convertInlineMarkdownSyntax(newState);
+          return convertInlineMarkdownSyntax(newState);
         },
       }),
     ];
@@ -514,6 +672,61 @@ const editor = useEditor({
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
         return true;
       }
+      if (event.key === "Enter") {
+        const headingTr = convertMarkdownHeading(view.state, {
+          force: true,
+          onlySelectionBlock: true,
+          insertParagraph: true,
+        });
+        if (headingTr) {
+          event.preventDefault();
+          view.dispatch(headingTr.scrollIntoView());
+          return true;
+        }
+      }
+      return false;
+    },
+    handleDOMEvents: {
+      click(view, event) {
+        const mouseEvent = event as MouseEvent;
+        const target = getEventElement(mouseEvent);
+        const link = target?.closest<HTMLAnchorElement>("a[href]");
+        if (link) {
+          mouseEvent.preventDefault();
+          if (mouseEvent.ctrlKey || mouseEvent.metaKey) {
+            mouseEvent.stopPropagation();
+            void openExternalLink(link.href);
+            return true;
+          }
+          return false;
+        }
+        return false;
+      },
+      blur(view) {
+        window.setTimeout(() => {
+          if (view.hasFocus()) return;
+          const headingTr = convertMarkdownHeading(view.state, { force: true });
+          if (headingTr) view.dispatch(headingTr);
+        }, 0);
+        return false;
+      },
+    },
+    handleClick(view, _pos, event) {
+      const target = getEventElement(event);
+      const heading = target?.closest<HTMLElement>("h1,h2,h3,h4,h5,h6");
+      if (heading && view.dom.contains(heading)) {
+        event.preventDefault();
+        editHeadingAsMarkdown(view, heading);
+        return true;
+      }
+
+      const task = target?.closest<HTMLElement>("[data-task-item]");
+      if (task) {
+        event.preventDefault();
+        toggleTaskItem(view, task);
+        return true;
+      }
+
       return false;
     },
     handlePaste(view, event) {
@@ -604,6 +817,60 @@ function createLinkDecorations(state: any) {
     Decoration.widget(range.from, () => createSourceMarker("["), { side: -1, key: `link-open-${range.from}` }),
     Decoration.widget(range.to, () => createSourceMarker(`](${href})`), { side: 1, key: `link-close-${range.to}` }),
   ];
+}
+
+function createHeadingDecorations(state: any) {
+  if (!state.selection.empty) return [];
+  const { $from } = state.selection;
+  if ($from.parent.type.name !== "heading") return [];
+
+  const level = $from.parent.attrs.level || 1;
+  return [
+    Decoration.widget($from.start(), () => createSourceMarker(`${"#".repeat(level)} `), {
+      side: -1,
+      key: `heading-marker-${$from.before()}`,
+    }),
+  ];
+}
+
+function createOutlineHeadingDecorations(state: any) {
+  const decorations: any[] = [];
+  let index = 0;
+  state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name !== "heading") return true;
+    const text = sanitizeOutlineText(node.textContent);
+    decorations.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        "data-outline-id": `heading-${index}-${slugify(text)}`,
+      }),
+    );
+    index += 1;
+    return true;
+  });
+  return decorations;
+}
+
+function sanitizeOutlineText(value: string) {
+  return value.replace(/[#*_`[\]()]/g, "").trim();
+}
+
+function slugify(value: string) {
+  return value.toLowerCase().trim().replace(/[^\w\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function getEventElement(event: Event) {
+  const target = event.target;
+  if (target instanceof HTMLElement) return target;
+  if (target instanceof Text) return target.parentElement;
+  return null;
+}
+
+async function openExternalLink(href: string) {
+  try {
+    await openUrl(href);
+  } catch (error) {
+    console.error("打开链接失败", error);
+  }
 }
 
 function getActiveMarkRange(state: any, markName: string) {
@@ -709,34 +976,101 @@ function convertInlineMarkdownSyntax(state: any) {
   return converted ? tr : null;
 }
 
-function convertMarkdownHeading(state: any) {
+function convertMarkdownHeading(
+  state: any,
+  options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean } = {},
+) {
+  const { force = false, onlySelectionBlock = false, insertParagraph = false } = options;
   const heading = state.schema.nodes.heading;
   if (!heading) return null;
 
   let tr = state.tr;
   let converted = false;
+  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
+  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
 
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const match = node.textContent.match(/^(#{1,6})\s+(.+)$/);
     if (!match) return true;
+    if (!force && state.selection.from >= pos && state.selection.from <= pos + node.nodeSize) return true;
 
     const level = match[1].length;
-    const textStart = pos + 1 + match[1].length + 1;
-    const textEnd = pos + node.nodeSize - 1;
-    tr = tr.delete(pos + 1, textStart);
-    tr = tr.setNodeMarkup(pos, heading, { level }, node.marks);
-    if (textEnd >= textStart) {
-      const mapped = tr.mapping.map(textEnd);
-      tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(mapped, tr.doc.content.size)));
+    const text = match[2];
+    const headingNode = heading.create({ level }, state.schema.text(text), node.marks);
+    tr = tr.replaceWith(pos, pos + node.nodeSize, headingNode);
+    if (insertParagraph) {
+      const paragraph = state.schema.nodes.paragraph;
+      const after = pos + headingNode.nodeSize;
+      if (paragraph) {
+        tr = tr.insert(after, paragraph.create());
+        tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
+      }
     }
     converted = true;
     return false;
   });
 
   return converted ? tr : null;
+}
+
+function editHeadingAsMarkdown(view: any, element: HTMLElement) {
+  const pos = view.posAtDOM(element, 0);
+  const node = view.state.doc.nodeAt(pos);
+  if (!node || node.type.name !== "heading") return;
+
+  let tr = view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize - 1));
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+}
+
+function replaceTocWithText(editor: any, getPos: (() => number | undefined) | boolean, value: string) {
+  if (typeof getPos !== "function") return;
+  const pos = getPos();
+  if (typeof pos !== "number") return;
+  const { state } = editor.view;
+  const node = state.doc.nodeAt(pos);
+  const paragraph = state.schema.nodes.paragraph;
+  if (!node || !paragraph) return;
+
+  const text = value.trim();
+  const replacement = text ? paragraph.create(null, state.schema.text(text)) : paragraph.create();
+  const tr = state.tr.replaceWith(pos, pos + node.nodeSize, replacement);
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.view.focus();
+}
+
+function toggleTaskItem(view: any, element: HTMLElement) {
+  const state = view.state;
+  const taskMark = state.schema.marks.taskState;
+  if (!taskMark) return;
+
+  const pos = view.posAtDOM(element.firstChild || element, 0);
+  const from = Math.max(0, pos - 2);
+  const to = Math.min(state.doc.content.size, pos + element.textContent.length + 2);
+  let tr = state.tr;
+  let handled = false;
+
+  state.doc.nodesBetween(from, to, (node: any, nodePos: number) => {
+    if (handled || !node.isText) return true;
+    const mark = node.marks.find((candidate: any) => candidate.type === taskMark);
+    if (!mark) return true;
+
+    const checked = mark.attrs.state === "checked";
+    const nextState = checked ? "unchecked" : "checked";
+    const textFrom = nodePos;
+    const textTo = nodePos + node.nodeSize;
+    const nextText = node.text.replace(/^\s+/, "");
+    tr = tr.insertText(nextText, textFrom, textTo);
+    tr = tr.addMark(textFrom, textFrom + nextText.length, taskMark.create({ state: nextState }));
+    handled = true;
+    return false;
+  });
+
+  if (handled) view.dispatch(tr.scrollIntoView());
 }
 
 function createHorizontalRuleView(editing: boolean, editor: any, getPos: (() => number | undefined) | boolean) {

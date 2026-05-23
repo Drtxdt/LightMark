@@ -11,16 +11,19 @@ async function selectFile(path: string) {
   await openFile(path);
 }
 
-async function jumpToHeading(text: string) {
+async function jumpToHeading(id: string) {
   if (appStore.editorMode !== "wysiwyg") {
     switchMode("wysiwyg");
     await nextTick();
   }
 
   await nextTick();
-  const headings = Array.from(document.querySelectorAll<HTMLElement>(".ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror .markdown-heading"));
-  const target = headings.find((heading) => heading.textContent?.trim().includes(text));
+  const target = document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${id}"]`);
   target?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function outlineIndent(level: number) {
+  return `${Math.min(Math.max(level - 1, 0), 5) * 0.75 + 0.5}rem`;
 }
 </script>
 
@@ -60,8 +63,8 @@ async function jumpToHeading(text: string) {
         v-for="item in outline"
         :key="item.id"
         class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
-        :class="{ 'pl-5': item.level === 2, 'pl-8': item.level === 3 }"
-        @click="jumpToHeading(item.text)"
+        :style="{ paddingLeft: outlineIndent(item.level) }"
+        @click="jumpToHeading(item.id)"
       >
         {{ item.text }}
       </button>

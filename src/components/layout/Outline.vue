@@ -12,6 +12,10 @@ async function jump(id: string) {
   }
   document.querySelector(`[data-outline-id="${id}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
 }
+
+function outlineIndent(level: number) {
+  return `${Math.min(Math.max(level - 1, 0), 5) * 0.75 + 0.5}rem`;
+}
 </script>
 
 <template>
@@ -22,7 +26,7 @@ async function jump(id: string) {
       v-for="item in outline"
       :key="item.id"
       class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
-      :class="{ 'pl-5': item.level === 2, 'pl-8': item.level === 3 }"
+      :style="{ paddingLeft: outlineIndent(item.level) }"
       @click="jump(item.id)"
     >
       {{ item.text }}
