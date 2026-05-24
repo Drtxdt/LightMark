@@ -438,3 +438,20 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum vulputate ma
 - KaTeX 不闪烁
 
 如果以上全部通过，则说明 LightMark 已具备较完整的现代 Markdown 编辑器基础能力。
+
+**ddd**
+
+_ddd_
+
+`dddd`
+
+> dddd
+
+1.  222
+  
+2.  222
+  
+
+-   ddd
+  
+-   ddd

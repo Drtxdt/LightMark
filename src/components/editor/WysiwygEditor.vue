@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, watch } from "vue";
+import { computed, ref, onBeforeUnmount, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import { Extension, Mark, mergeAttributes, Node } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -15,6 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
+import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
@@ -23,6 +24,19 @@ import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { MermaidNode } from "../../extensions/MermaidNode";
 
 const lowlight = createLowlight(all);
+
+type ContextMenuMode = "default" | "code";
+
+const contextMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  mode: "default" as ContextMenuMode,
+  inTable: false,
+});
+const savedSelection = ref<{ from: number; to: number } | null>(null);
+const linkUrl = ref("");
+const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
@@ -979,7 +993,34 @@ const editor = useEditor({
       return false;
     },
     handleDOMEvents: {
+      contextmenu(view, event) {
+        const mouseEvent = event as MouseEvent;
+        const target = getEventElement(mouseEvent);
+        if (!target || !view.dom.contains(target)) return false;
+
+        mouseEvent.preventDefault();
+        const position = view.posAtCoords({ left: mouseEvent.clientX, top: mouseEvent.clientY });
+        if (position && !isPositionInsideSelection(view.state.selection, position.pos)) {
+          view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(position.pos))));
+        }
+          savedSelection.value = {
+            from: view.state.selection.from,
+            to: view.state.selection.to,
+          };
+        const mode: ContextMenuMode =
+          target.closest("pre, code") || view.state.selection.$from.parent.type.name === "codeBlock" ? "code" : "default";
+
+        contextMenu.value = {
+          visible: true,
+          x: Math.min(mouseEvent.clientX, window.innerWidth - 260),
+          y: Math.min(mouseEvent.clientY, window.innerHeight - 360),
+          mode,
+          inTable: Boolean(target.closest("table")),
+        };
+        return true;
+      },
       click(view, event) {
+        hideContextMenu();
         const mouseEvent = event as MouseEvent;
         const target = getEventElement(mouseEvent);
         const link = target?.closest<HTMLAnchorElement>("a[href]");
@@ -1002,6 +1043,12 @@ const editor = useEditor({
       blur(view) {
         window.setTimeout(() => {
           if (view.hasFocus()) return;
+          const inlineTr = convertInlineMarkdownSyntax(view.state);
+          if (inlineTr) {
+            view.dispatch(inlineTr);
+            return;
+          }
+
           const headingTr = convertMarkdownHeading(view.state, { force: true });
           if (headingTr) view.dispatch(headingTr);
         }, 0);
@@ -1057,6 +1104,363 @@ watch(
 );
 
 onBeforeUnmount(() => editor.value?.destroy());
+
+function hideContextMenu() {
+  contextMenu.value.visible = false;
+}
+
+function isPositionInsideSelection(selection: any, pos: number) {
+  return !selection.empty && pos >= selection.from && pos <= selection.to;
+}
+
+function restoreEditorSelection() {
+  const activeEditor = editor.value;
+  if (!activeEditor || !savedSelection.value) {
+    activeEditor?.view.focus();
+    return;
+  }
+
+  const { state, view } = activeEditor;
+  const docSize = state.doc.content.size;
+  const from = Math.max(0, Math.min(savedSelection.value.from, docSize));
+  const to = Math.max(from, Math.min(savedSelection.value.to, docSize));
+
+  try {
+    const selection = TextSelection.between(
+      state.doc.resolve(from),
+      state.doc.resolve(to),
+      -1,
+    );
+    view.dispatch(state.tr.setSelection(selection));
+  } catch {
+    view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(from))));
+  }
+
+  activeEditor.view.focus();
+}
+
+function runMenuCommand(command: () => void | Promise<void>, keepOpen = false) {
+  restoreEditorSelection();
+  void Promise.resolve(command()).finally(() => {
+    if (!keepOpen) hideContextMenu();
+  });
+}
+
+async function writeClipboard(text: string, html?: string) {
+  if (html && typeof ClipboardItem !== "undefined") {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Plain text fallback below.
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+}
+
+async function readClipboardText() {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return "";
+  }
+}
+
+function getSelectedHtml() {
+  const activeEditor = editor.value;
+  if (!activeEditor) return "";
+  const { state } = activeEditor.view;
+  const fragment = state.selection.content().content;
+  if (!fragment.size) return "";
+  const div = document.createElement("div");
+  const serializer = DOMSerializer.fromSchema(state.schema);
+  div.appendChild(serializer.serializeFragment(fragment));
+  return div.innerHTML;
+}
+
+function getSelectedMarkdown() {
+  const html = getSelectedHtml();
+  if (!html) return "";
+  return editorHtmlToMarkdown(html).trim();
+}
+
+function getSelectedPlainText() {
+  const activeEditor = editor.value;
+  if (!activeEditor) return "";
+  const { from, to } = activeEditor.state.selection;
+  return activeEditor.state.doc.textBetween(from, to, "\n", "\n");
+}
+
+async function cutSelection() {
+  await copySelectionAsMarkdown();
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const { state } = activeEditor.view;
+  if (state.selection.empty) return;
+  activeEditor.view.dispatch(state.tr.deleteSelection().scrollIntoView());
+}
+
+async function copySelectionAsMarkdown() {
+  const markdown = getSelectedMarkdown() || getSelectedPlainText();
+  await writeClipboard(markdown);
+}
+
+async function copySelectionClean() {
+  await copySelectionAsMarkdown();
+}
+
+async function copySelectionAsHtml() {
+  const html = getSelectedHtml();
+  const markdown = getSelectedMarkdown() || getSelectedPlainText();
+  await writeClipboard(markdown, html);
+}
+
+async function pasteFromClipboard(clean: boolean) {
+  const text = await readClipboardText();
+  if (!text) return;
+  if (clean) {
+    (editor.value as any)?.commands.insertContent(renderMarkdownForEditor(text));
+    return;
+  }
+  (editor.value as any)?.commands.insertContent(text);
+}
+
+function runFormatCommand(commandName: string) {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  const chain = activeEditor.chain().focus();
+  switch (commandName) {
+    case "bold":
+      chain.toggleBold().run();
+      break;
+    case "italic":
+      chain.toggleItalic().run();
+      break;
+    case "code":
+      chain.toggleCode().run();
+      break;
+    case "blockquote":
+      chain.toggleBlockquote().run();
+      break;
+    case "orderedList":
+      chain.toggleOrderedList().run();
+      break;
+    case "bulletList":
+      chain.toggleBulletList().run();
+      break;
+    default:
+      break;
+  }
+}
+
+function toggleLink() {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  const previous = activeEditor.getAttributes("link")?.href || linkUrl.value || "https://";
+  const href = window.prompt("链接地址", previous);
+  if (href === null) return;
+  if (!href.trim()) {
+    activeEditor.chain().focus().unsetLink().run();
+    return;
+  }
+  activeEditor.chain().focus().extendMarkRange("link").setLink({ href: href.trim() }).run();
+}
+
+function insertTaskItem() {
+  (editor.value as any)?.commands.insertContent("- [ ] ");
+}
+
+function setHeadingLevel(level: number | null) {
+  const chain = (editor.value as any)?.chain().focus();
+  if (!chain) return;
+  if (level === null) {
+    chain.setParagraph().run();
+    return;
+  }
+  chain.toggleHeading({ level }).run();
+}
+
+function insertImageByUrl() {
+  const src = window.prompt("图片地址", "https://");
+  if (!src?.trim()) return;
+  (editor.value as any)?.chain().focus().setImage({ src: src.trim() }).run();
+}
+
+function insertParagraphAround(position: "before" | "after") {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const { state } = activeEditor.view;
+  const paragraph = state.schema.nodes.paragraph;
+  if (!paragraph) return;
+  const { $from } = state.selection;
+  const insertAt = position === "before" ? $from.before() : $from.after();
+  const tr = state.tr.insert(insertAt, paragraph.create());
+  activeEditor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, insertAt + 1)).scrollIntoView());
+  activeEditor.view.focus();
+}
+
+function runTableCommand(commandName: string) {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  const chain = activeEditor.chain().focus();
+  switch (commandName) {
+    case "addRowBefore":
+      chain.addRowBefore().run();
+      break;
+    case "addRowAfter":
+      chain.addRowAfter().run();
+      break;
+    case "addColumnBefore":
+      chain.addColumnBefore().run();
+      break;
+    case "addColumnAfter":
+      chain.addColumnAfter().run();
+      break;
+    case "deleteRow":
+      chain.deleteRow().run();
+      break;
+    case "deleteColumn":
+      chain.deleteColumn().run();
+      break;
+    case "deleteTable":
+      chain.deleteTable().run();
+      break;
+    default:
+      break;
+  }
+}
+
+function copyCurrentTable() {
+  const table = getCurrentTableElement();
+  if (!table) return;
+  void writeClipboard(turndown.turndown(table.outerHTML).trim(), table.outerHTML);
+}
+
+function copyFormattedTableSource() {
+  const table = getCurrentTableElement();
+  if (!table) return;
+  void writeClipboard(formatMarkdownTable(table));
+}
+
+function getCurrentTableElement() {
+  const activeEditor = editor.value;
+  if (!activeEditor) return null;
+  const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
+  const element = dom instanceof HTMLElement ? dom : dom.parentElement;
+  return element?.closest("table");
+}
+
+function formatMarkdownTable(table: HTMLTableElement) {
+  const rows = Array.from(table.rows).map((row) =>
+    Array.from(row.cells).map((cell) => normalizeTableCell(cell.textContent || "")),
+  );
+  if (!rows.length) return "";
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, columnCount - row.length)).fill("")]);
+  const widths = Array.from({ length: columnCount }, (_item, index) =>
+    Math.max(3, ...normalized.map((row) => row[index].length)),
+  );
+  const renderRow = (row: string[]) => `| ${row.map((cell, index) => cell.padEnd(widths[index], " ")).join(" | ")} |`;
+  return [renderRow(normalized[0]), renderRow(widths.map((width) => "-".repeat(width))), ...normalized.slice(1).map(renderRow)].join("\n");
+}
+
+function moveCurrentTableRow(direction: -1 | 1) {
+  const table = getCurrentTableElement();
+  const activeCell = getCurrentTableCell();
+  if (!table || !activeCell) return;
+  const rowIndex = activeCell.parentElement ? Array.from(table.rows).indexOf(activeCell.parentElement as HTMLTableRowElement) : -1;
+  const targetIndex = rowIndex + direction;
+  if (rowIndex < 0 || targetIndex < 0 || targetIndex >= table.rows.length) return;
+  swapTableRowContent(table.rows[rowIndex], table.rows[targetIndex]);
+  replaceCurrentTableFromDom(table);
+}
+
+function moveCurrentTableColumn(direction: -1 | 1) {
+  const table = getCurrentTableElement();
+  const activeCell = getCurrentTableCell();
+  if (!table || !activeCell) return;
+  const columnIndex = activeCell.cellIndex;
+  const targetIndex = columnIndex + direction;
+  if (targetIndex < 0) return;
+  Array.from(table.rows).forEach((row) => {
+    if (targetIndex >= row.cells.length) return;
+    const left = row.cells[columnIndex];
+    const right = row.cells[targetIndex];
+    if (!left || !right) return;
+    const temp = left.innerHTML;
+    left.innerHTML = right.innerHTML;
+    right.innerHTML = temp;
+  });
+  replaceCurrentTableFromDom(table);
+}
+
+function swapTableRowContent(a: HTMLTableRowElement, b: HTMLTableRowElement) {
+  const valuesA = Array.from(a.cells).map((cell) => cell.innerHTML);
+  const valuesB = Array.from(b.cells).map((cell) => cell.innerHTML);
+  Array.from(a.cells).forEach((cell, index) => {
+    cell.innerHTML = valuesB[index] || "";
+  });
+  Array.from(b.cells).forEach((cell, index) => {
+    cell.innerHTML = valuesA[index] || "";
+  });
+}
+
+function getCurrentTableCell() {
+  const activeEditor = editor.value;
+  if (!activeEditor) return null;
+  const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
+  const element = dom instanceof HTMLElement ? dom : dom.parentElement;
+  return element?.closest("td,th") as HTMLTableCellElement | null;
+}
+
+function replaceCurrentTableFromDom(table: HTMLTableElement) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const pos = activeEditor.view.posAtDOM(table, 0);
+  const node = activeEditor.state.doc.nodeAt(pos);
+  if (!node) return;
+  (activeEditor as any).commands.insertContentAt({ from: pos, to: pos + node.nodeSize }, table.outerHTML);
+}
+
+function indentCode(scope: "selection" | "block", delta: 1 | -1) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const { state } = activeEditor.view;
+  const { from, to, $from } = state.selection;
+  const blockFrom = scope === "block" ? $from.before() + 1 : from;
+  const blockTo = scope === "block" ? $from.after() - 1 : to;
+  const text = state.doc.textBetween(blockFrom, blockTo, "\n", "\n");
+  const next = text
+    .split("\n")
+    .map((line) => (delta > 0 ? `  ${line}` : line.replace(/^ {1,2}/, "")))
+    .join("\n");
+  activeEditor.view.dispatch(state.tr.insertText(next, blockFrom, blockTo).scrollIntoView());
+}
+
+function deleteCodeBlock() {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const { state } = activeEditor.view;
+  const { $from } = state.selection;
+  if ($from.parent.type.name !== "codeBlock") return;
+  activeEditor.view.dispatch(state.tr.delete($from.before(), $from.after()).scrollIntoView());
+}
 
 function looksLikeMarkdown(text: string) {
   return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\[\^[^\]]+\]:|\$\$)/.test(text) || /\[\^[^\]]+\]|`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text);
@@ -1190,10 +1594,22 @@ function findInlineCodeOpener(text: string) {
 
 function createMarkDecorations(state: any, markName: string, open: string, close: string) {
   const range = getActiveMarkRange(state, markName);
-  if (!range) return [];
+  if (!range) return createStoredMarkDecorations(state, markName, open, close);
   return [
     Decoration.widget(range.from, () => createSourceMarker(open), { side: -1, key: `${markName}-open-${range.from}` }),
     Decoration.widget(range.to, () => createSourceMarker(close), { side: 1, key: `${markName}-close-${range.to}` }),
+  ];
+}
+
+function createStoredMarkDecorations(state: any, markName: string, open: string, close: string) {
+  if (!state.selection.empty) return [];
+  const markType = state.schema.marks[markName];
+  if (!markType || !(state.storedMarks || []).some((mark: any) => mark.type === markType)) return [];
+
+  const pos = state.selection.from;
+  return [
+    Decoration.widget(pos, () => createSourceMarker(open), { side: -1, key: `${markName}-stored-open-${pos}` }),
+    Decoration.widget(pos, () => createSourceMarker(close), { side: 1, key: `${markName}-stored-close-${pos}` }),
   ];
 }
 
@@ -1349,6 +1765,16 @@ function createSourceMarker(text: string) {
 function convertInlineMarkdownSyntax(state: any) {
   const linkMark = state.schema.marks.link;
   const converters = [
+    {
+      mark: state.schema.marks.bold,
+      pattern: /(^|[\s(])\*\*([^*\n]+)\*\*/g,
+      attrs: () => ({}),
+    },
+    {
+      mark: state.schema.marks.italic,
+      pattern: /(^|[\s(])\*([^*\n]+)\*/g,
+      attrs: () => ({}),
+    },
     {
       mark: state.schema.marks.strike,
       pattern: /(^|[\s(])~~([^~\n]+)~~/g,
@@ -1578,7 +2004,116 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
 </script>
 
 <template>
-  <div class="h-full overflow-auto bg-paper-50 dark:bg-paper-950">
+  <div class="relative h-full overflow-auto bg-paper-50 dark:bg-paper-950" @click="hideContextMenu">
     <EditorContent :editor="editor" />
+    <div
+      v-if="contextMenu.visible"
+      class="lm-context-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @click.stop
+      @mousedown.prevent
+      @contextmenu.prevent
+    >
+      <template v-if="contextMenu.mode === 'code'">
+        <button class="lm-menu-item" @click="runMenuCommand(cutSelection)">剪切</button>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">复制</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsMarkdown)">以 Markdown 复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">简化格式并复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsHtml)">以 HTML 复制</button>
+          </div>
+        </div>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">粘贴</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">普通粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">清洗格式并粘贴</button>
+          </div>
+        </div>
+        <div class="lm-menu-separator"></div>
+        <button class="lm-menu-item" @click="runMenuCommand(() => indentCode('selection', 1))">为选中内容增加缩进</button>
+        <button class="lm-menu-item" @click="runMenuCommand(() => indentCode('selection', -1))">为选中内容减少缩进</button>
+        <button class="lm-menu-item" @click="runMenuCommand(() => indentCode('block', 1))">为整个代码块增加缩进</button>
+        <button class="lm-menu-item" @click="runMenuCommand(() => indentCode('block', -1))">为整个代码块减少缩进</button>
+        <div class="lm-menu-separator"></div>
+        <button class="lm-menu-item lm-menu-danger" @click="runMenuCommand(deleteCodeBlock)">删除代码块</button>
+      </template>
+
+      <template v-else>
+        <button class="lm-menu-item" @click="runMenuCommand(cutSelection)">剪切</button>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">复制</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsMarkdown)">以 Markdown 复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">简化格式并复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsHtml)">以 HTML 复制</button>
+          </div>
+        </div>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">粘贴</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">普通粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">清洗格式并粘贴</button>
+          </div>
+        </div>
+
+        <div class="lm-menu-separator"></div>
+        <div class="lm-format-grid" aria-label="格式">
+          <button title="加粗" @click="runMenuCommand(() => runFormatCommand('bold'))"><span class="lm-ico lm-ico-bold">B</span></button>
+          <button title="斜体" @click="runMenuCommand(() => runFormatCommand('italic'))"><span class="lm-ico lm-ico-italic">I</span></button>
+          <button title="行内代码" @click="runMenuCommand(() => runFormatCommand('code'))"><span class="lm-ico lm-ico-code"></span></button>
+          <button title="链接" @click="runMenuCommand(toggleLink)"><span class="lm-ico lm-ico-link"></span></button>
+          <button title="引用" @click="runMenuCommand(() => runFormatCommand('blockquote'))"><span class="lm-ico lm-ico-quote"></span></button>
+          <button title="有序列表" @click="runMenuCommand(() => runFormatCommand('orderedList'))"><span class="lm-ico lm-ico-ol"></span></button>
+          <button title="无序列表" @click="runMenuCommand(() => runFormatCommand('bulletList'))"><span class="lm-ico lm-ico-ul"></span></button>
+          <button title="任务清单" @click="runMenuCommand(insertTaskItem)"><span class="lm-ico lm-ico-task"></span></button>
+        </div>
+
+        <div class="lm-menu-separator"></div>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item" :class="{ 'lm-menu-disabled': !canUseTableMenu }">表格</button>
+          <div class="lm-menu-pop lm-menu-pop-wide" v-if="canUseTableMenu">
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('addRowBefore'))">上方插入行</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('addRowAfter'))">下方插入行</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('addColumnBefore'))">左侧插入列</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('addColumnAfter'))">右侧插入列</button>
+            <div class="lm-menu-separator"></div>
+            <button class="lm-menu-item" @click="runMenuCommand(() => moveCurrentTableRow(-1))">上移该行</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => moveCurrentTableRow(1))">下移该行</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => moveCurrentTableColumn(-1))">左移该列</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => moveCurrentTableColumn(1))">右移该列</button>
+            <div class="lm-menu-separator"></div>
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('deleteRow'))">删除行</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => runTableCommand('deleteColumn'))">删除列</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copyCurrentTable)">复制表格</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copyFormattedTableSource)">格式化表格源码</button>
+            <button class="lm-menu-item lm-menu-danger" @click="runMenuCommand(() => runTableCommand('deleteTable'))">删除表格</button>
+          </div>
+        </div>
+
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">插入</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(insertImageByUrl)">图片</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => insertParagraphAround('before'))">上方段落</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => insertParagraphAround('after'))">下方段落</button>
+          </div>
+        </div>
+
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">标题</button>
+          <div class="lm-menu-pop">
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(1))">一级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(2))">二级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(3))">三级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(4))">四级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(5))">五级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(6))">六级标题</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => setHeadingLevel(null))">正文</button>
+          </div>
+        </div>
+      </template>
+    </div>
   </div>
 </template>
