@@ -3,6 +3,7 @@ import { computed, nextTick, ref } from "vue";
 import { appStore, openFile, openWorkspace, switchMode } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
+import type { OutlineItem } from "../../types";
 
 const activePane = ref<"files" | "outline">("files");
 const outline = computed(() => extractOutline(appStore.currentContent));
@@ -11,23 +12,23 @@ async function selectFile(path: string) {
   await openFile(path);
 }
 
-async function jumpToHeading(id: string) {
+async function jumpToHeading(item: OutlineItem) {
   if (appStore.editorMode !== "wysiwyg") {
     switchMode("wysiwyg");
     await nextTick();
   }
 
   await nextTick();
-  const target = await waitForHeadingTarget(id);
+  const target = await waitForHeadingTarget(item);
   target?.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
-function waitForHeadingTarget(id: string) {
-  const selector = `.ProseMirror [data-outline-id="${cssEscape(id)}"]`;
+function waitForHeadingTarget(item: OutlineItem) {
+  const selector = `.ProseMirror [data-outline-id="${cssEscape(item.id)}"]`;
   return new Promise<HTMLElement | null>((resolve) => {
     let attempts = 0;
     const find = () => {
-      const target = document.querySelector<HTMLElement>(selector);
+      const target = document.querySelector<HTMLElement>(selector) || findHeadingByOutlineItem(item);
       if (target || attempts >= 8) {
         resolve(target);
         return;
@@ -37,6 +38,23 @@ function waitForHeadingTarget(id: string) {
     };
     find();
   });
+}
+
+function findHeadingByOutlineItem(item: OutlineItem) {
+  const headings = Array.from(document.querySelectorAll<HTMLElement>(".ProseMirror h1,.ProseMirror h2,.ProseMirror h3,.ProseMirror h4,.ProseMirror h5,.ProseMirror h6"));
+  const index = outline.value.findIndex((candidate) => candidate.id === item.id);
+  const sameLevelBefore = outline.value.slice(0, Math.max(index, 0)).filter((candidate) => candidate.level === item.level).length;
+  const sameLevelHeadings = headings.filter((heading) => Number(heading.tagName.slice(1)) === item.level);
+  const indexed = sameLevelHeadings[sameLevelBefore];
+  if (indexed && normalizeHeadingText(indexed.textContent || "") === normalizeHeadingText(item.text)) return indexed;
+
+  return headings.find((heading) => {
+    return Number(heading.tagName.slice(1)) === item.level && normalizeHeadingText(heading.textContent || "") === normalizeHeadingText(item.text);
+  }) || null;
+}
+
+function normalizeHeadingText(value: string) {
+  return value.replace(/[#*_`[\]()]/g, "").replace(/\s+/g, " ").trim();
 }
 
 function cssEscape(value: string) {
@@ -86,7 +104,7 @@ function outlineIndent(level: number) {
         :key="item.id"
         class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
         :style="{ paddingLeft: outlineIndent(item.level) }"
-        @click="jumpToHeading(item.id)"
+        @click="jumpToHeading(item)"
       >
         {{ item.text }}
       </button>
