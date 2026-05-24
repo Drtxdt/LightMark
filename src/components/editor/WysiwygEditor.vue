@@ -1241,6 +1241,26 @@ async function pasteFromClipboard(clean: boolean) {
   (editor.value as any)?.commands.insertContent(text);
 }
 
+function insertMarkdownText(text: string, selectFromOffset?: number, selectToOffset?: number) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+
+  const view = activeEditor.view;
+  const { state } = view;
+  const from = state.selection.from;
+  const to = state.selection.to;
+  let tr = state.tr.insertText(text, from, to);
+
+  if (typeof selectFromOffset === "number" && typeof selectToOffset === "number") {
+    const selectFrom = from + selectFromOffset;
+    const selectTo = from + selectToOffset;
+    tr = tr.setSelection(TextSelection.create(tr.doc, selectFrom, selectTo));
+  }
+
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+}
+
 function runFormatCommand(commandName: string) {
   const activeEditor = editor.value as any;
   if (!activeEditor) return;
@@ -1270,20 +1290,20 @@ function runFormatCommand(commandName: string) {
 }
 
 function toggleLink() {
-  const activeEditor = editor.value as any;
+  const activeEditor = editor.value;
   if (!activeEditor) return;
-  const previous = activeEditor.getAttributes("link")?.href || linkUrl.value || "https://";
-  const href = window.prompt("链接地址", previous);
-  if (href === null) return;
-  if (!href.trim()) {
-    activeEditor.chain().focus().unsetLink().run();
-    return;
-  }
-  activeEditor.chain().focus().extendMarkRange("link").setLink({ href: href.trim() }).run();
+  const selectedText = getSelectedPlainText().trim();
+  const label = selectedText || "链接文本";
+  const snippet = `[${label}](https://example.com)`;
+  const labelStart = 1;
+  const labelEnd = labelStart + label.length;
+  insertMarkdownText(snippet, selectedText ? snippet.length - "https://example.com)".length : labelStart, selectedText ? snippet.length - 1 : labelEnd);
 }
 
 function insertTaskItem() {
-  (editor.value as any)?.commands.insertContent("- [ ] ");
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  activeEditor.commands.insertContent(renderMarkdownForEditor("- [ ] 任务"));
 }
 
 function setHeadingLevel(level: number | null) {
@@ -1297,9 +1317,7 @@ function setHeadingLevel(level: number | null) {
 }
 
 function insertImageByUrl() {
-  const src = window.prompt("图片地址", "https://");
-  if (!src?.trim()) return;
-  (editor.value as any)?.chain().focus().setImage({ src: src.trim() }).run();
+  insertMarkdownText("![图片描述](image-url)", 2, 6);
 }
 
 function insertParagraphAround(position: "before" | "after") {
@@ -1596,8 +1614,8 @@ function createMarkDecorations(state: any, markName: string, open: string, close
   const range = getActiveMarkRange(state, markName);
   if (!range) return createStoredMarkDecorations(state, markName, open, close);
   return [
-    Decoration.widget(range.from, () => createSourceMarker(open), { side: -1, key: `${markName}-open-${range.from}` }),
-    Decoration.widget(range.to, () => createSourceMarker(close), { side: 1, key: `${markName}-close-${range.to}` }),
+    Decoration.widget(range.from, () => createSourceMarker(open), createMarkerSpec(-1, `${markName}-open-${range.from}`)),
+    Decoration.widget(range.to, () => createSourceMarker(close), createMarkerSpec(1, `${markName}-close-${range.to}`)),
   ];
 }
 
@@ -1608,8 +1626,8 @@ function createStoredMarkDecorations(state: any, markName: string, open: string,
 
   const pos = state.selection.from;
   return [
-    Decoration.widget(pos, () => createSourceMarker(open), { side: -1, key: `${markName}-stored-open-${pos}` }),
-    Decoration.widget(pos, () => createSourceMarker(close), { side: 1, key: `${markName}-stored-close-${pos}` }),
+    Decoration.widget(pos, () => createSourceMarker(open), createMarkerSpec(-1, `${markName}-stored-open-${pos}`)),
+    Decoration.widget(pos, () => createSourceMarker(close), createMarkerSpec(1, `${markName}-stored-close-${pos}`)),
   ];
 }
 
@@ -1618,8 +1636,8 @@ function createLinkDecorations(state: any) {
   if (!range) return [];
   const href = range.mark.attrs.href || "";
   return [
-    Decoration.widget(range.from, () => createSourceMarker("["), { side: -1, key: `link-open-${range.from}` }),
-    Decoration.widget(range.to, () => createSourceMarker(`](${href})`), { side: 1, key: `link-close-${range.to}` }),
+    Decoration.widget(range.from, () => createSourceMarker("["), createMarkerSpec(-1, `link-open-${range.from}`)),
+    Decoration.widget(range.to, () => createSourceMarker(`](${href})`), createMarkerSpec(1, `link-close-${range.to}`)),
   ];
 }
 
@@ -1633,6 +1651,7 @@ function createHeadingDecorations(state: any) {
     Decoration.widget($from.start(), () => createSourceMarker(`${"#".repeat(level)} `), {
       side: -1,
       key: `heading-marker-${$from.before()}`,
+      ignoreSelection: true,
     }),
   ];
 }
@@ -1754,11 +1773,16 @@ function clearStoredMarks(view: any, markNames: string[]) {
   if (changed) view.dispatch(tr);
 }
 
+function createMarkerSpec(side: -1 | 1, key: string) {
+  return { side, key, ignoreSelection: true };
+}
+
 function createSourceMarker(text: string) {
   const marker = document.createElement("span");
   marker.className = "md-live-marker";
   marker.textContent = text;
   marker.contentEditable = "false";
+  marker.draggable = false;
   return marker;
 }
 
