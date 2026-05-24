@@ -161,9 +161,9 @@ function renderInlineEnhancements(html: string) {
 }
 
 function convertTaskItems(markdown: string) {
-  return markdown.replace(/^(\s*)([-*+]|\d+\.)\s+\[([ xX])\]\s+(.+)$/gm, (_match, indent, marker, checked, text) => {
+  return markdown.replace(/^(\s*)([-*+]|\d+\.)\s+\[([ xX])\](?:\s+(.*))?$/gm, (_match, indent, marker, checked, text = "") => {
     const isChecked = checked.toLowerCase() === "x";
-    return `${indent}${marker} <span data-task-item="${isChecked ? "checked" : "unchecked"}">${text}</span>`;
+    return `${indent}${marker} <span data-task-item="${isChecked ? "checked" : "unchecked"}">${text || "&nbsp;"}</span>`;
   });
 }
 

@@ -93,7 +93,7 @@ const TaskStateMark = Mark.create({
     return [
       "span",
       mergeAttributes(HTMLAttributes, { class: "task-state" }),
-      ["input", { type: "checkbox", checked: checked ? "checked" : null, contenteditable: "false" }],
+      ["input", { type: "checkbox", checked: checked ? "checked" : null, contenteditable: "false", "data-task-checkbox": "true" }],
       ["span", { class: "task-state-content" }, 0],
     ];
   },
@@ -844,7 +844,8 @@ turndown.addRule("taskState", {
   filter: (node) => node instanceof HTMLElement && node.hasAttribute("data-task-item"),
   replacement: (content, node) => {
     const checked = node instanceof HTMLElement && node.dataset.taskItem === "checked";
-    return `${checked ? "[x]" : "[ ]"} ${content.replace(/^[☐☑]\s*/, "")}`;
+    const text = content.replace(/^[☐☑]\s*/, "").trim();
+    return `${checked ? "[x]" : "[ ]"}${text ? ` ${text}` : ""}`;
   },
 });
 
@@ -978,6 +979,11 @@ const editor = useEditor({
         return true;
       }
       if (event.key === "Enter") {
+        if (continueTaskItem(view)) {
+          event.preventDefault();
+          return true;
+        }
+
         const headingTr = convertMarkdownHeading(view.state, {
           force: true,
           onlySelectionBlock: true,
@@ -1064,8 +1070,9 @@ const editor = useEditor({
         return true;
       }
 
-      const task = target?.closest<HTMLElement>("[data-task-item]");
-      if (task) {
+      const checkbox = target?.closest<HTMLInputElement>("input[data-task-checkbox]");
+      const task = checkbox?.closest<HTMLElement>("[data-task-item]");
+      if (checkbox && task) {
         event.preventDefault();
         toggleTaskItem(view, task);
         return true;
@@ -1303,7 +1310,7 @@ function toggleLink() {
 function insertTaskItem() {
   const activeEditor = editor.value as any;
   if (!activeEditor) return;
-  activeEditor.commands.insertContent(renderMarkdownForEditor("- [ ] 任务"));
+  activeEditor.commands.insertContent(renderMarkdownForEditor("- [ ] "));
 }
 
 function setHeadingLevel(level: number | null) {
@@ -1906,6 +1913,36 @@ function editHeadingAsMarkdown(view: any, element: HTMLElement) {
   let tr = view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize - 1));
   view.dispatch(tr.scrollIntoView());
   view.focus();
+}
+
+function getTaskMarkAtSelection(state: any) {
+  const taskMark = state.schema.marks.taskState;
+  if (!taskMark || !state.selection.empty) return null;
+  const { $from } = state.selection;
+  return (state.storedMarks || $from.marks()).find((mark: any) => mark.type === taskMark) || null;
+}
+
+function continueTaskItem(view: any) {
+  const taskMark = getTaskMarkAtSelection(view.state);
+  if (!taskMark) return false;
+
+  const listItem = view.state.schema.nodes.listItem;
+  if (!listItem) return false;
+
+  const splitCommand = (editor.value as any)?.commands?.splitListItem;
+  if (typeof splitCommand === "function" && splitCommand("listItem")) {
+    const { state } = view;
+    const mark = state.schema.marks.taskState.create({ state: "unchecked" });
+    const insertAt = state.selection.from;
+    let tr = state.tr
+      .insertText(" ", insertAt, insertAt)
+      .addMark(insertAt, insertAt + 1, mark);
+    tr = tr.setSelection(TextSelection.create(tr.doc, insertAt + 1));
+    view.dispatch(tr.scrollIntoView());
+    return true;
+  }
+
+  return false;
 }
 
 function replaceTocWithText(editor: any, getPos: (() => number | undefined) | boolean, value: string) {

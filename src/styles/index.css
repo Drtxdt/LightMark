@@ -159,6 +159,16 @@ body {
   margin: 0;
 }
 
+.ProseMirror li:has(> p [data-task-item]),
+.markdown-preview li:has(> p [data-task-item]) {
+  list-style: none;
+}
+
+.ProseMirror li:has(> p [data-task-item])::marker,
+.markdown-preview li:has(> p [data-task-item])::marker {
+  content: "";
+}
+
 .ProseMirror li > p + ul,
 .ProseMirror li > p + ol,
 .markdown-preview li > p + ul,
@@ -324,7 +334,7 @@ sub {
   align-items: baseline;
   gap: 0.4em;
   color: inherit;
-  cursor: pointer;
+  cursor: text;
 }
 
 .ProseMirror [data-task-item="checked"],
@@ -339,7 +349,8 @@ sub {
   height: 0.95em;
   margin: 0;
   accent-color: #333333;
-  pointer-events: none;
+  cursor: pointer;
+  pointer-events: auto;
   transform: translateY(0.08em);
 }
 
