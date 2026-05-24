@@ -65,6 +65,10 @@ function escapeHtml(value: string) {
   });
 }
 
+function escapeAttribute(value: string) {
+  return escapeHtml(value).replace(/\r?\n/g, "&#10;");
+}
+
 function markSpecialBlocksForEditor(markdown: string) {
   const placeholders: string[] = [];
   const stash = (html: string) => {
@@ -96,6 +100,8 @@ function markSpecialBlocksForEditor(markdown: string) {
 
   next = protectInlineMath(next, stash);
   next = protectHtmlBlocks(next, stash);
+  next = convertFootnotes(next, stash, true);
+
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
   });
@@ -108,7 +114,6 @@ function markSpecialBlocksForEditor(markdown: string) {
     return `${prefix}<sub>${escapeHtml(text)}</sub>`;
   });
 
-  next = convertFootnotes(next);
   next = convertTaskItems(next);
   next = convertDefinitionLists(next);
 
@@ -168,31 +173,45 @@ function convertDefinitionLists(markdown: string) {
   });
 }
 
-function convertFootnotes(markdown: string) {
+function convertFootnotes(markdown: string, stash?: (html: string) => string, forEditor = false) {
   const definitions = new Map<string, string>();
   const lines = markdown.split(/\r?\n/);
   const bodyLines: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    const definition = lines[index].match(/^\[\^([^\]]+)\]:\s*(.*)$/);
+    const definition = lines[index].match(/^ {0,3}\[\^([^\]]+)\]:\s*(.*)$/);
     if (!definition) {
       bodyLines.push(lines[index]);
       continue;
     }
 
     const id = definition[1];
-    const chunks = [definition[2]];
-    while (index + 1 < lines.length && /^( {2,}|\t)/.test(lines[index + 1])) {
+    const chunks = definition[2] ? [definition[2]] : [];
+    while (index + 1 < lines.length && (lines[index + 1].trim() === "" || /^( {4,}|\t)/.test(lines[index + 1]))) {
       index += 1;
-      chunks.push(lines[index].trim());
+      if (lines[index].trim() === "") {
+        chunks.push("");
+      } else {
+        chunks.push(lines[index].replace(/^( {4}|\t)/, ""));
+      }
     }
-    definitions.set(id, chunks.join("\n"));
+    definitions.set(id, chunks.join("\n").trim());
   }
 
+  const referenceOrder = new Map<string, number>();
+  const referenceCounts = new Map<string, number>();
   let next = bodyLines.join("\n");
 
   next = next.replace(/\[\^([^\]]+)\]/g, (_match, id) => {
     const safeId = escapeHtml(id);
-    return `<sup data-footnote-ref="${safeId}"><a href="#fn-${safeId}" id="fnref-${safeId}">[${safeId}]</a></sup>`;
+    if (!referenceOrder.has(id)) referenceOrder.set(id, referenceOrder.size + 1);
+    const order = referenceOrder.get(id) || 1;
+    const count = (referenceCounts.get(id) || 0) + 1;
+    referenceCounts.set(id, count);
+    const preview = definitions.get(id) || "";
+    if (forEditor) {
+      return `<span data-type="footnote-ref" data-footnote-ref="${safeId}" data-footnote-index="${order}" data-ref-id="fnref-${safeId}-${count}" data-preview="${escapeAttribute(preview)}"></span>`;
+    }
+    return `<sup data-footnote-ref="${safeId}" data-footnote-index="${order}" data-preview="${escapeAttribute(preview)}"><a href="#fn-${safeId}" id="fnref-${safeId}-${count}" data-footnote-link="ref">[${order}]</a></sup>`;
   });
 
   if (definitions.size === 0) return next;
@@ -200,10 +219,59 @@ function convertFootnotes(markdown: string) {
   const items = Array.from(definitions.entries())
     .map(([id, text]) => {
       const safeId = escapeHtml(id);
-      return `<li id="fn-${safeId}"><span class="footnote-id">[${safeId}]</span> ${escapeHtml(text).replace(/\n/g, "<br>")} <a href="#fnref-${safeId}" class="footnote-backref">↩</a></li>`;
+      const order = referenceOrder.get(id) || Array.from(definitions.keys()).indexOf(id) + 1;
+      const count = referenceCounts.get(id) || 0;
+      const backrefs = Array.from({ length: count }, (_item, index) => {
+        return `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${count > 1 ? index + 1 : ""}</a>`;
+      }).join(" ");
+      return `<li id="fn-${safeId}"><span class="footnote-id">[${order}]</span> ${renderFootnoteContent(text)} ${backrefs}</li>`;
     })
     .join("");
-  return `${next}\n\n<section class="footnotes"><ol>${items}</ol></section>`;
+  const source = Array.from(definitions.entries())
+    .map(([id, text]) => {
+      if (!text) return `[^${id}]:`;
+      if (!text.includes("\n")) return `[^${id}]: ${text}`;
+      const body = text
+        .split("\n")
+        .map((line) => (line ? `    ${line}` : ""))
+        .join("\n");
+      return `[^${id}]:\n\n${body}`;
+    })
+    .join("\n\n");
+  const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol>${items}</ol></section>`;
+  return `${next}\n\n${stash ? stash(section) : section}`;
+}
+
+function renderFootnoteContent(markdown: string) {
+  const escaped = escapeHtml(markdown.trim());
+  if (!escaped) return "";
+  const lines = escaped.split(/\n/);
+  let html = "";
+  let inList = false;
+  for (const line of lines) {
+    const item = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (item) {
+      if (!inList) {
+        html += "<ul>";
+        inList = true;
+      }
+      html += `<li>${renderInlineFootnoteMarkdown(item[1])}</li>`;
+      continue;
+    }
+    if (inList) {
+      html += "</ul>";
+      inList = false;
+    }
+    if (line.trim()) html += `<p>${renderInlineFootnoteMarkdown(line.trim())}</p>`;
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
+function renderInlineFootnoteMarkdown(value: string) {
+  return value
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
 }
 
 function buildTocHtml(markdown: string) {

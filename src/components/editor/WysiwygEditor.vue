@@ -43,7 +43,7 @@ const HighlightMark = Mark.create({
 const SuperscriptMark = Mark.create({
   name: "superscript",
   parseHTML() {
-    return [{ tag: "sup" }];
+    return [{ tag: "sup:not([data-footnote-ref])" }];
   },
   renderHTML({ HTMLAttributes }) {
     return ["sup", mergeAttributes(HTMLAttributes), 0];
@@ -367,6 +367,170 @@ const HtmlBlockNode = Node.create({
   },
 });
 
+const FootnoteRefNode = Node.create({
+  name: "footnoteRef",
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: false,
+  priority: 10000,
+
+  addAttributes() {
+    return {
+      id: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-footnote-ref") || "",
+        renderHTML: () => ({}),
+      },
+      index: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-footnote-index") || element.textContent?.replace(/\D/g, "") || "",
+        renderHTML: () => ({}),
+      },
+      refId: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-ref-id") || element.querySelector("a")?.getAttribute("id") || "",
+        renderHTML: () => ({}),
+      },
+      preview: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-preview") || "",
+        renderHTML: () => ({}),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: 'span[data-type="footnote-ref"]' }, { tag: "sup[data-footnote-ref]" }];
+  },
+
+  renderHTML({ node, HTMLAttributes }) {
+    const id = node.attrs.id || HTMLAttributes.id || "";
+    const index = node.attrs.index || HTMLAttributes.index || "";
+    const refId = node.attrs.refId || HTMLAttributes.refId || `fnref-${id}-1`;
+    const preview = node.attrs.preview || HTMLAttributes.preview || "";
+    return [
+      "span",
+      {
+        "data-type": "footnote-ref",
+        "data-footnote-ref": id,
+        "data-footnote-index": index,
+        "data-ref-id": refId,
+        "data-preview": preview,
+      },
+    ];
+  },
+
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement("sup");
+      const id = node.attrs.id || "";
+      const index = node.attrs.index || id;
+      const refId = node.attrs.refId || `fnref-${id}-1`;
+      let editing = false;
+      dom.dataset.footnoteRef = id;
+      dom.dataset.footnoteIndex = String(index);
+      dom.dataset.preview = node.attrs.preview || "";
+      dom.contentEditable = "false";
+      dom.className = "footnote-ref-node";
+
+      const link = document.createElement("a");
+      link.href = `#fn-${id}`;
+      link.id = refId;
+      link.dataset.footnoteLink = "ref";
+      link.title = formatFootnotePreview(node.attrs.preview || id);
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.ctrlKey || event.metaKey) {
+          scrollInternalLink(`#fn-${id}`);
+          return;
+        }
+        editing = !editing;
+        render();
+      });
+      dom.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        scrollInternalLink(`#fn-${id}`);
+      });
+
+      const preview = document.createElement("span");
+      preview.className = "footnote-ref-preview";
+      preview.textContent = formatFootnotePreview(node.attrs.preview || "");
+
+      const render = () => {
+        link.textContent = editing ? `[^${id}]` : `[${index}]`;
+        dom.classList.toggle("footnote-ref-node-editing", editing);
+      };
+      dom.appendChild(link);
+      if (node.attrs.preview) dom.appendChild(preview);
+      render();
+      return { dom, ignoreMutation: () => true };
+    };
+  },
+});
+
+const FootnotesNode = Node.create({
+  name: "footnotes",
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      markdown: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-markdown") || "",
+        renderHTML: (attributes) => ({
+          "data-type": "footnotes",
+          "data-markdown": attributes.markdown,
+        }),
+      },
+      html: {
+        default: "",
+        parseHTML: (element) => element.innerHTML || "",
+        rendered: false,
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: 'section[data-type="footnotes"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["section", mergeAttributes(HTMLAttributes), ""];
+  },
+
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement("section");
+      dom.className = "footnotes";
+      dom.dataset.type = "footnotes";
+      dom.dataset.markdown = node.attrs.markdown || "";
+      dom.contentEditable = "false";
+      renderFootnotesView(dom, node.attrs.markdown || "", node.attrs.html || "");
+      dom.addEventListener("click", (event) => {
+        const target = getEventElement(event);
+        const link = target?.closest<HTMLAnchorElement>("a[href^='#'],button[data-footnote-target]");
+        if (!link) return;
+        event.preventDefault();
+        const href = link instanceof HTMLButtonElement ? link.dataset.footnoteTarget || "" : link.getAttribute("href") || "";
+        scrollInternalLink(href);
+      });
+      return {
+        dom,
+        update(nextNode: any) {
+          dom.dataset.markdown = nextNode.attrs.markdown || "";
+          renderFootnotesView(dom, nextNode.attrs.markdown || "", nextNode.attrs.html || "");
+          return true;
+        },
+        ignoreMutation: () => true,
+      };
+    };
+  },
+});
+
 const TyporaSourceMarkers = Extension.create({
   name: "typoraSourceMarkers",
 
@@ -535,8 +699,26 @@ turndown.addRule("highlight", {
 });
 
 turndown.addRule("superscript", {
-  filter: "sup",
+  filter: (node) => node.nodeName === "SUP" && !(node instanceof HTMLElement && node.hasAttribute("data-footnote-ref")),
   replacement: (content) => `^${content}^`,
+});
+
+turndown.addRule("footnoteRef", {
+  filter: (node) =>
+    node instanceof HTMLElement &&
+    ((node.dataset.type === "footnote-ref" && node.hasAttribute("data-footnote-ref")) || node.hasAttribute("data-footnote-ref")),
+  replacement: (_content, node) => {
+    const id = node instanceof HTMLElement ? node.dataset.footnoteRef || "" : "";
+    return id ? `[^${id}]` : "";
+  },
+});
+
+turndown.addRule("footnotes", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "footnotes",
+  replacement: (_content, node) => {
+    const markdown = node instanceof HTMLElement ? node.dataset.markdown || "" : "";
+    return markdown ? `\n\n${markdown.trim()}\n\n` : "";
+  },
 });
 
 turndown.addRule("subscript", {
@@ -632,6 +814,7 @@ const editor = useEditor({
       heading: false,
       codeBlock: false,
       horizontalRule: false,
+      link: false,
     }),
     CodeBlockLowlight.configure({
       lowlight,
@@ -650,6 +833,7 @@ const editor = useEditor({
     InlineMath,
     BlockMath,
     MermaidNode,
+    FootnoteRefNode,
     HighlightMark,
     SuperscriptMark,
     SubscriptMark,
@@ -657,6 +841,7 @@ const editor = useEditor({
     FrontMatterNode,
     TableOfContentsNode,
     HtmlBlockNode,
+    FootnotesNode,
     TyporaInlineCode,
     TyporaHorizontalRule,
     TyporaSourceMarkers,
@@ -693,6 +878,11 @@ const editor = useEditor({
         const link = target?.closest<HTMLAnchorElement>("a[href]");
         if (link) {
           mouseEvent.preventDefault();
+          const href = link.getAttribute("href") || "";
+          if (href.startsWith("#")) {
+            scrollInternalLink(href);
+            return true;
+          }
           if (mouseEvent.ctrlKey || mouseEvent.metaKey) {
             mouseEvent.stopPropagation();
             void openExternalLink(link.href);
@@ -739,7 +929,7 @@ const editor = useEditor({
     },
   },
   onUpdate({ editor }) {
-    setContent(turndown.turndown(editor.getHTML()), true);
+    setContent(editorHtmlToMarkdown(editor.getHTML()), true);
   },
 });
 
@@ -762,11 +952,102 @@ watch(
 onBeforeUnmount(() => editor.value?.destroy());
 
 function looksLikeMarkdown(text: string) {
-  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\$\$)/.test(text) || /`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text);
+  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\[\^[^\]]+\]:|\$\$)/.test(text) || /\[\^[^\]]+\]|`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text);
 }
 
 function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function editorHtmlToMarkdown(html: string) {
+  const document = new DOMParser().parseFromString(html, "text/html");
+
+  document.querySelectorAll<HTMLElement>('span[data-type="footnote-ref"], sup[data-footnote-ref]').forEach((node) => {
+    const id = node.dataset.footnoteRef || "";
+    node.replaceWith(document.createTextNode(id ? `[^${id}]` : ""));
+  });
+
+  document.querySelectorAll<HTMLElement>('section[data-type="footnotes"]').forEach((node) => {
+    const markdown = node.dataset.markdown || "";
+    node.replaceWith(document.createTextNode(markdown ? `\n\n${markdown.trim()}\n\n` : ""));
+  });
+
+  return turndown.turndown(document.body.innerHTML);
+}
+
+function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: string) {
+  dom.innerHTML = "";
+  const source = markdown.trim();
+  if (!source) {
+    dom.innerHTML = fallbackHtml;
+    return;
+  }
+
+  const list = document.createElement("div");
+  list.className = "footnotes-source";
+  parseFootnoteSource(source).forEach((definition) => {
+    const block = document.createElement("div");
+    block.className = "footnote-source-item";
+    const sourceBlock = document.createElement("div");
+    sourceBlock.className = "footnote-source-text";
+    sourceBlock.title = definition.refs.length > 0 ? "点击返回正文引用" : "";
+    sourceBlock.addEventListener("click", () => {
+      const firstRef = definition.refs[0];
+      if (firstRef) scrollInternalLink(`#${firstRef}`);
+    });
+    renderFootnoteSourceLines(sourceBlock, definition.raw);
+    block.appendChild(sourceBlock);
+    definition.refs.forEach((refId, index) => {
+      const backref = document.createElement("button");
+      backref.type = "button";
+      backref.className = "footnote-backref";
+      backref.dataset.footnoteTarget = `#${refId}`;
+      backref.textContent = `返回${definition.refs.length > 1 ? index + 1 : ""}`;
+      backref.addEventListener("click", () => scrollInternalLink(`#${refId}`));
+      block.appendChild(backref);
+    });
+    list.appendChild(block);
+  });
+  dom.appendChild(list);
+}
+
+function parseFootnoteSource(markdown: string) {
+  const definitions = markdown.split(/\n{2,}(?= {0,3}\[\^[^\]]+\]:)/).map((item) => item.trim()).filter(Boolean);
+  return definitions.map((raw) => {
+    const id = raw.match(/^ {0,3}\[\^([^\]]+)\]:/)?.[1] || "";
+    const escapedId = cssEscape(id);
+    const refs = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        `sup[data-footnote-ref="${escapedId}"] a[id], span[data-type="footnote-ref"][data-footnote-ref="${escapedId}"][data-ref-id]`,
+      ),
+    )
+      .map((item) => item.id || item.dataset.refId || "")
+      .filter(Boolean);
+    return { id, raw, refs };
+  });
+}
+
+function renderFootnoteSourceLines(container: HTMLElement, raw: string) {
+  raw.split(/\r?\n/).forEach((line, index) => {
+    const row = document.createElement("div");
+    row.className = index === 0 ? "footnote-source-line footnote-source-heading" : "footnote-source-line";
+    row.textContent = line || " ";
+    container.appendChild(row);
+  });
+}
+
+function formatFootnotePreview(value: string) {
+  return value
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cssEscape(value: string) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 function convertInlineCodeBeforeCursor(view: any) {
@@ -863,6 +1144,13 @@ function getEventElement(event: Event) {
   if (target instanceof HTMLElement) return target;
   if (target instanceof Text) return target.parentElement;
   return null;
+}
+
+function scrollInternalLink(href: string) {
+  if (!href.startsWith("#")) return;
+  const id = decodeURIComponent(href.slice(1));
+  const target = document.getElementById(id);
+  target?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 async function openExternalLink(href: string) {

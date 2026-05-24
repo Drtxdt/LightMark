@@ -1008,3 +1008,108 @@ sub {
 .hljs-class .hljs-title {
   color: #4ec9b0;
 }
+.footnote-ref-node {
+  position: relative;
+  cursor: pointer;
+}
+
+.footnote-ref-node > a {
+  color: #7b6f5d;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(123, 111, 93, 0.35);
+}
+
+.footnote-ref-node-editing > a {
+  color: #8f6b3d;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  border-bottom-style: dashed;
+}
+
+.footnote-ref-preview {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  display: none;
+  width: max-content;
+  max-width: 320px;
+  transform: translateX(-50%);
+  padding: 8px 10px;
+  border: 1px solid rgba(120, 113, 108, 0.24);
+  border-radius: 6px;
+  background: #fffdf8;
+  box-shadow: 0 12px 28px rgba(41, 37, 36, 0.14);
+  color: #3b342b;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: normal;
+  pointer-events: none;
+}
+
+.footnote-ref-node:hover .footnote-ref-preview {
+  display: block;
+}
+
+.footnotes .footnotes-source {
+  margin-top: 28px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(120, 113, 108, 0.22);
+  color: #5e574d;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.footnote-source-item {
+  position: relative;
+  margin: 8px 0 12px;
+  padding-left: 18px;
+}
+
+.footnote-source-text {
+  cursor: pointer;
+  white-space: pre-wrap;
+}
+
+.footnote-source-line {
+  min-height: 1.4em;
+  font-family: inherit;
+}
+
+.footnote-source-heading {
+  color: #403a33;
+  font-weight: 500;
+}
+
+.footnote-backref {
+  margin-top: 4px;
+  margin-right: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8f6b3d;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dark .footnote-ref-node > a {
+  color: #c7bca8;
+  border-bottom-color: rgba(199, 188, 168, 0.32);
+}
+
+.dark .footnote-ref-preview {
+  border-color: rgba(214, 211, 209, 0.18);
+  background: #24211d;
+  color: #e7e0d3;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+}
+
+.dark .footnotes .footnotes-source {
+  border-top-color: rgba(214, 211, 209, 0.18);
+  color: #c9c0b3;
+}
+
+.dark .footnote-source-heading {
+  color: #eee7dc;
+}
