@@ -18,8 +18,30 @@ async function jumpToHeading(id: string) {
   }
 
   await nextTick();
-  const target = document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${id}"]`);
+  const target = await waitForHeadingTarget(id);
   target?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function waitForHeadingTarget(id: string) {
+  const selector = `.ProseMirror [data-outline-id="${cssEscape(id)}"]`;
+  return new Promise<HTMLElement | null>((resolve) => {
+    let attempts = 0;
+    const find = () => {
+      const target = document.querySelector<HTMLElement>(selector);
+      if (target || attempts >= 8) {
+        resolve(target);
+        return;
+      }
+      attempts += 1;
+      requestAnimationFrame(find);
+    };
+    find();
+  });
+}
+
+function cssEscape(value: string) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 function outlineIndent(level: number) {

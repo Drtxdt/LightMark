@@ -503,13 +503,29 @@ const FootnotesNode = Node.create({
   },
 
   addNodeView() {
-    return ({ node }) => {
+    return ({ node, editor }) => {
       const dom = document.createElement("section");
       dom.className = "footnotes";
       dom.dataset.type = "footnotes";
       dom.dataset.markdown = node.attrs.markdown || "";
       dom.contentEditable = "false";
-      renderFootnotesView(dom, node.attrs.markdown || "", node.attrs.html || "");
+      let markdown = node.attrs.markdown || "";
+      let fallbackHtml = node.attrs.html || "";
+      let frame = 0;
+      const render = () => renderFootnotesView(dom, markdown, fallbackHtml);
+      const scheduleRender = () => {
+        if (frame) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          render();
+        });
+      };
+      const refreshAfterMount = () => {
+        render();
+        scheduleRender();
+        window.setTimeout(scheduleRender, 80);
+      };
+      refreshAfterMount();
       dom.addEventListener("click", (event) => {
         const target = getEventElement(event);
         const link = target?.closest<HTMLAnchorElement>("a[href^='#'],button[data-footnote-target]");
@@ -518,12 +534,19 @@ const FootnotesNode = Node.create({
         const href = link instanceof HTMLButtonElement ? link.dataset.footnoteTarget || "" : link.getAttribute("href") || "";
         scrollInternalLink(href);
       });
+      editor.on?.("update", scheduleRender);
       return {
         dom,
         update(nextNode: any) {
-          dom.dataset.markdown = nextNode.attrs.markdown || "";
-          renderFootnotesView(dom, nextNode.attrs.markdown || "", nextNode.attrs.html || "");
+          markdown = nextNode.attrs.markdown || "";
+          fallbackHtml = nextNode.attrs.html || "";
+          dom.dataset.markdown = markdown;
+          scheduleRender();
           return true;
+        },
+        destroy() {
+          if (frame) cancelAnimationFrame(frame);
+          editor.off?.("update", scheduleRender);
         },
         ignoreMutation: () => true,
       };
@@ -539,19 +562,22 @@ const TyporaSourceMarkers = Extension.create({
       new Plugin({
         props: {
           decorations(state) {
-            if (!state.selection.empty) return null;
-
             const decorations = [
-              ...createMarkDecorations(state, "bold", "**", "**"),
-              ...createMarkDecorations(state, "italic", "*", "*"),
-              ...createMarkDecorations(state, "code", "`", "`"),
-              ...createMarkDecorations(state, "highlight", "==", "=="),
-              ...createMarkDecorations(state, "superscript", "^", "^"),
-              ...createMarkDecorations(state, "subscript", "~", "~"),
-              ...createLinkDecorations(state),
-              ...createHeadingDecorations(state),
               ...createOutlineHeadingDecorations(state),
             ];
+
+            if (state.selection.empty) {
+              decorations.push(
+                ...createMarkDecorations(state, "bold", "**", "**"),
+                ...createMarkDecorations(state, "italic", "*", "*"),
+                ...createMarkDecorations(state, "code", "`", "`"),
+                ...createMarkDecorations(state, "highlight", "==", "=="),
+                ...createMarkDecorations(state, "superscript", "^", "^"),
+                ...createMarkDecorations(state, "subscript", "~", "~"),
+                ...createLinkDecorations(state),
+                ...createHeadingDecorations(state),
+              );
+            }
 
             return decorations.length ? DecorationSet.create(state.doc, decorations) : null;
           },
