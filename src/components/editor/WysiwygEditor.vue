@@ -113,20 +113,78 @@ const FrontMatterNode = Node.create({
   },
 
   addNodeView() {
-    return ({ node }) => {
+    return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
-      dom.className = "front-matter-node";
       dom.contentEditable = "false";
-      const open = document.createElement("div");
-      open.className = "front-matter-fence";
-      open.textContent = "---";
-      const pre = document.createElement("pre");
-      pre.textContent = node.attrs.yaml || "";
-      const close = document.createElement("div");
-      close.className = "front-matter-fence";
-      close.textContent = "---";
-      dom.append(open, pre, close);
-      return { dom, ignoreMutation: () => true };
+      let yaml = node.attrs.yaml || "";
+      let editing = false;
+
+      const updateYaml = () => {
+        if (typeof getPos !== "function") return;
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { yaml }));
+      };
+
+      const renderDisplay = () => {
+        dom.innerHTML = "";
+        dom.className = "front-matter-node";
+        const open = document.createElement("div");
+        open.className = "front-matter-fence";
+        open.textContent = "---";
+        const pre = document.createElement("pre");
+        pre.textContent = yaml;
+        const close = document.createElement("div");
+        close.className = "front-matter-fence";
+        close.textContent = "---";
+        dom.append(open, pre, close);
+      };
+
+      const renderEditor = () => {
+        dom.innerHTML = "";
+        dom.className = "front-matter-node front-matter-node-editing";
+        const open = document.createElement("div");
+        open.className = "front-matter-fence";
+        open.textContent = "---";
+        const textarea = document.createElement("textarea");
+        textarea.className = "front-matter-editor";
+        textarea.value = yaml;
+        textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
+        textarea.spellcheck = false;
+        const close = document.createElement("div");
+        close.className = "front-matter-fence";
+        close.textContent = "---";
+        textarea.addEventListener("input", () => {
+          yaml = textarea.value;
+          textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
+        });
+        textarea.addEventListener("blur", () => {
+          editing = false;
+          updateYaml();
+          renderDisplay();
+        });
+        dom.append(open, textarea, close);
+        requestAnimationFrame(() => textarea.focus());
+      };
+
+      dom.addEventListener("mousedown", (event) => {
+        if (editing) return;
+        event.preventDefault();
+        editing = true;
+        renderEditor();
+      });
+
+      renderDisplay();
+      return {
+        dom,
+        update(nextNode: any) {
+          yaml = nextNode.attrs.yaml || "";
+          editing ? renderEditor() : renderDisplay();
+          return true;
+        },
+        ignoreMutation: () => true,
+        stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
+      };
     };
   },
 });
@@ -367,6 +425,16 @@ const HtmlBlockNode = Node.create({
   },
 });
 
+const StrikeMark = Mark.create({
+  name: "strike",
+  parseHTML() {
+    return [{ tag: "s" }, { tag: "del" }, { style: "text-decoration=line-through" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["s", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
 const FootnoteRefNode = Node.create({
   name: "footnoteRef",
   group: "inline",
@@ -571,6 +639,7 @@ const TyporaSourceMarkers = Extension.create({
                 ...createMarkDecorations(state, "bold", "**", "**"),
                 ...createMarkDecorations(state, "italic", "*", "*"),
                 ...createMarkDecorations(state, "code", "`", "`"),
+                ...createMarkDecorations(state, "strike", "~~", "~~"),
                 ...createMarkDecorations(state, "highlight", "==", "=="),
                 ...createMarkDecorations(state, "superscript", "^", "^"),
                 ...createMarkDecorations(state, "subscript", "~", "~"),
@@ -724,6 +793,11 @@ turndown.addRule("highlight", {
   replacement: (content) => `==${content}==`,
 });
 
+turndown.addRule("strike", {
+  filter: ["s", "del"],
+  replacement: (content) => `~~${content}~~`,
+});
+
 turndown.addRule("superscript", {
   filter: (node) => node.nodeName === "SUP" && !(node instanceof HTMLElement && node.hasAttribute("data-footnote-ref")),
   replacement: (content) => `^${content}^`,
@@ -840,6 +914,7 @@ const editor = useEditor({
       heading: false,
       codeBlock: false,
       horizontalRule: false,
+      strike: false,
       link: false,
     }),
     CodeBlockLowlight.configure({
@@ -861,6 +936,7 @@ const editor = useEditor({
     MermaidNode,
     FootnoteRefNode,
     HighlightMark,
+    StrikeMark,
     SuperscriptMark,
     SubscriptMark,
     TaskStateMark,
@@ -883,6 +959,10 @@ const editor = useEditor({
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
         return true;
       }
+      if (event.key === "ArrowRight" && moveOutOfMarkAtRightBoundary(view, ["bold", "strike"])) {
+        event.preventDefault();
+        return true;
+      }
       if (event.key === "Enter") {
         const headingTr = convertMarkdownHeading(view.state, {
           force: true,
@@ -894,6 +974,7 @@ const editor = useEditor({
           view.dispatch(headingTr.scrollIntoView());
           return true;
         }
+        window.setTimeout(() => clearStoredMarks(view, ["strike"]), 0);
       }
       return false;
     },
@@ -1226,6 +1307,37 @@ function getActiveMarkRange(state: any, markName: string) {
   return { from, to, mark: activeMark };
 }
 
+function moveOutOfMarkAtRightBoundary(view: any, markNames: string[]) {
+  const { state } = view;
+  if (!state.selection.empty) return false;
+
+  for (const markName of markNames) {
+    const range = getActiveMarkRange(state, markName);
+    if (!range || range.to !== state.selection.from) continue;
+
+    const markType = state.schema.marks[markName];
+    let tr = state.tr.setSelection(TextSelection.create(state.doc, range.to));
+    if (markType) tr = tr.removeStoredMark(markType);
+    view.dispatch(tr.scrollIntoView());
+    return true;
+  }
+
+  return false;
+}
+
+function clearStoredMarks(view: any, markNames: string[]) {
+  const { state } = view;
+  let tr = state.tr;
+  let changed = false;
+  markNames.forEach((markName) => {
+    const markType = state.schema.marks[markName];
+    if (!markType) return;
+    tr = tr.removeStoredMark(markType);
+    changed = true;
+  });
+  if (changed) view.dispatch(tr);
+}
+
 function createSourceMarker(text: string) {
   const marker = document.createElement("span");
   marker.className = "md-live-marker";
@@ -1237,6 +1349,11 @@ function createSourceMarker(text: string) {
 function convertInlineMarkdownSyntax(state: any) {
   const linkMark = state.schema.marks.link;
   const converters = [
+    {
+      mark: state.schema.marks.strike,
+      pattern: /(^|[\s(])~~([^~\n]+)~~/g,
+      attrs: () => ({}),
+    },
     {
       mark: state.schema.marks.highlight,
       pattern: /(^|[\s(])==([^=\n]+)==/g,

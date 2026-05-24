@@ -78,7 +78,7 @@ function markSpecialBlocksForEditor(markdown: string) {
   };
 
   let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
-    return `${stash(`<section data-type="front-matter" data-yaml="${escapeHtml(yaml.trim())}"></section>`)}\n`;
+    return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   });
 
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => {
@@ -126,7 +126,7 @@ function markSpecialBlocksForEditor(markdown: string) {
 
 function enhanceMarkdownForRender(markdown: string) {
   let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
-    return `<section class="front-matter-node"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
+    return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
   next = convertFootnotes(next);

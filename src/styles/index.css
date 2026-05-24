@@ -1008,6 +1008,34 @@ sub {
 .hljs-class .hljs-title {
   color: #4ec9b0;
 }
+.front-matter-node-editing {
+  padding: 10px 0;
+}
+
+.front-matter-editor {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  border-radius: 6px;
+  background: rgba(255, 253, 248, 0.72);
+  padding: 10px 12px;
+  color: inherit;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  outline: none;
+}
+
+.front-matter-editor:focus {
+  border-color: rgba(143, 107, 61, 0.45);
+  box-shadow: 0 0 0 2px rgba(143, 107, 61, 0.08);
+}
+
+.dark .front-matter-editor {
+  border-color: rgba(214, 211, 209, 0.18);
+  background: rgba(36, 33, 29, 0.72);
+}
+
 .footnote-ref-node {
   position: relative;
   cursor: pointer;
