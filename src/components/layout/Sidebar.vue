@@ -3,16 +3,24 @@ import { computed, nextTick, ref } from "vue";
 import { appStore, openFile, openWorkspace, switchMode } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
-import type { OutlineItem } from "../../types";
+import type { LargeOutlineItem, OutlineItem } from "../../types";
 
 const activePane = ref<"files" | "outline">("files");
-const outline = computed(() => extractOutline(appStore.currentContent));
+const outline = computed(() => {
+  if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
+  return extractOutline(appStore.currentContent);
+});
 
 async function selectFile(path: string) {
   await openFile(path);
 }
 
-async function jumpToHeading(item: OutlineItem) {
+async function jumpToHeading(item: OutlineItem | LargeOutlineItem) {
+  if (appStore.documentMode === "large" && "line" in item) {
+    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
+    return;
+  }
+
   if (appStore.editorMode !== "wysiwyg") {
     switchMode("wysiwyg");
     await nextTick();

@@ -15,7 +15,6 @@ import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
 async function run(action: () => Promise<void> | void) {
   try {
     await action();
-    appStore.statusMessage = "";
   } catch (error) {
     appStore.statusMessage = String(error);
   }
@@ -23,6 +22,7 @@ async function run(action: () => Promise<void> | void) {
 
 async function exportHtml() {
   if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
+  if (appStore.documentMode === "large") throw new Error("大文件模式暂不支持全量 HTML 导出。");
   const html = buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent));
   const target = await invoke<string>("export_html", {
     path: appStore.currentFilePath,
@@ -41,7 +41,7 @@ async function exportHtml() {
     <div class="mx-2 h-5 w-px bg-paper-200 dark:bg-paper-800" />
     <div class="segmented">
       <button :class="{ active: appStore.editorMode === 'wysiwyg' }" @click="switchMode('wysiwyg')">编辑</button>
-      <button :class="{ active: appStore.editorMode === 'source' }" @click="switchMode('source')">源代码</button>
+      <button :class="{ active: appStore.editorMode === 'source' }" :disabled="appStore.documentMode === 'large'" @click="switchMode('source')">源代码</button>
     </div>
     <button class="btn" @click="run(exportHtml)">导出 HTML</button>
     <div class="ml-auto flex items-center gap-2">

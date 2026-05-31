@@ -3,14 +3,21 @@ import { computed, nextTick } from "vue";
 import { appStore, switchMode } from "../../stores/appStore";
 import { extractOutline } from "../../utils/outline";
 
-const outline = computed(() => extractOutline(appStore.currentContent));
+const outline = computed(() => {
+  if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
+  return extractOutline(appStore.currentContent);
+});
 
-async function jump(id: string) {
+async function jump(item: (typeof outline.value)[number]) {
+  if (appStore.documentMode === "large" && "line" in item) {
+    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
+    return;
+  }
   if (appStore.editorMode !== "wysiwyg") {
     switchMode("wysiwyg");
     await nextTick();
   }
-  document.querySelector(`[data-outline-id="${id}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  document.querySelector(`[data-outline-id="${item.id}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
 function outlineIndent(level: number) {
@@ -27,7 +34,7 @@ function outlineIndent(level: number) {
       :key="item.id"
       class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
       :style="{ paddingLeft: outlineIndent(item.level) }"
-      @click="jump(item.id)"
+      @click="jump(item)"
     >
       {{ item.text }}
     </button>

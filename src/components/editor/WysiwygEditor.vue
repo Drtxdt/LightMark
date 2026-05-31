@@ -1049,11 +1049,7 @@ const editor = useEditor({
       blur(view) {
         window.setTimeout(() => {
           if (view.hasFocus()) return;
-          const inlineTr = convertInlineMarkdownSyntax(view.state);
-          if (inlineTr) {
-            view.dispatch(inlineTr);
-            return;
-          }
+          if (convertPendingInlineMarkdown(view)) return;
 
           const headingTr = convertMarkdownHeading(view.state, { force: true });
           if (headingTr) view.dispatch(headingTr);
@@ -1798,37 +1794,37 @@ function convertInlineMarkdownSyntax(state: any) {
   const converters = [
     {
       mark: state.schema.marks.bold,
-      pattern: /(^|[\s(])\*\*([^*\n]+)\*\*/g,
+      pattern: /(^|[^*])\*\*([^*\n]+)\*\*/g,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.italic,
-      pattern: /(^|[\s(])\*([^*\n]+)\*/g,
+      pattern: /(^|[^*])\*([^*\n]+)\*/g,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.strike,
-      pattern: /(^|[\s(])~~([^~\n]+)~~/g,
+      pattern: /(^|[^~])~~([^~\n]+)~~/g,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.highlight,
-      pattern: /(^|[\s(])==([^=\n]+)==/g,
+      pattern: /(^|[^=])==([^=\n]+)==/g,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.superscript,
-      pattern: /(^|[\s(])\^([^^\n]+)\^/g,
+      pattern: /(^|[^^])\^([^^\n]+)\^/g,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.subscript,
-      pattern: /(^|[\s(])~([^~\n]+)~/g,
+      pattern: /(^|[^~])~([^~\n]+)~/g,
       attrs: () => ({}),
     },
     {
       mark: linkMark,
-      pattern: /(^|[\s(])\[([^\]\n]+)\]\(([^)\s]+)\)/g,
+      pattern: /(^|[^\]])\[([^\]\n]+)\]\(([^)\s]+)\)/g,
       attrs: (match: RegExpExecArray) => ({ href: match[3] }),
     },
   ];
@@ -1862,6 +1858,17 @@ function convertInlineMarkdownSyntax(state: any) {
   });
 
   return converted ? tr : null;
+}
+
+function convertPendingInlineMarkdown(view: any) {
+  let converted = false;
+  for (let index = 0; index < 12; index += 1) {
+    const tr = convertInlineMarkdownSyntax(view.state);
+    if (!tr) break;
+    view.dispatch(tr);
+    converted = true;
+  }
+  return converted;
 }
 
 function convertMarkdownHeading(
