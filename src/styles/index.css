@@ -1134,7 +1134,50 @@ sub {
   font-weight: 500;
 }
 
+.footnotes .footnotes-list {
+  margin: 28px 0 0;
+  padding: 14px 0 0;
+  border-top: 1px solid rgba(120, 113, 108, 0.22);
+  list-style: none;
+  color: #5e574d;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.footnote-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: start;
+  margin: 8px 0 12px;
+}
+
+.footnote-item > .footnote-id {
+  padding-top: 1px;
+  color: #403a33;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.footnote-content {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.footnote-content > :first-child {
+  margin-top: 0;
+}
+
+.footnote-content > :last-child {
+  margin-bottom: 0;
+}
+
+.footnote-content code {
+  font-size: 0.92em;
+}
+
 .footnote-backref {
+  grid-column: 2;
   margin-top: 4px;
   margin-right: 8px;
   padding: 0;
@@ -1164,7 +1207,16 @@ sub {
   color: #c9c0b3;
 }
 
+.dark .footnotes .footnotes-list {
+  border-top-color: rgba(214, 211, 209, 0.18);
+  color: #c9c0b3;
+}
+
 .dark .footnote-source-heading {
+  color: #eee7dc;
+}
+
+.dark .footnote-item > .footnote-id {
   color: #eee7dc;
 }
 

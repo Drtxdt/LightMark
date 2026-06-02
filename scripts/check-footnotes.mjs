@@ -53,6 +53,8 @@ try {
     [editorHtml.includes('data-type="footnotes"'), "editor renders footnote source block"],
     [editorHtml.includes("[^1]: 这是一个简单脚注。"), "editor preserves simple footnote source"],
     [editorHtml.includes("[^long]:"), "editor preserves long footnote source"],
+    [!editorHtml.includes("@@LIGHTMARK_PLACEHOLDER_"), "editor restores nested placeholders inside footnotes"],
+    [editorHtml.includes("`inline code`"), "editor preserves inline code source inside footnote definitions"],
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],
     [previewHtml.includes('href="#fnref-1-2"'), "preview creates duplicate return links"],
     [previewHtml.includes("<strong>Markdown 样式</strong>"), "preview renders markdown inside long footnote"],

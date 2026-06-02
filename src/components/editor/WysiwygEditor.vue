@@ -695,36 +695,7 @@ const TyporaInlineCode = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-
-          const codeMark = newState.schema.marks.code;
-          if (!codeMark) return null;
-
-          let tr = newState.tr;
-          let converted = false;
-          const inlineCodePattern = /(^|[^`])`([^`\n]+)`/g;
-
-          newState.doc.descendants((node, pos) => {
-            if (converted) return false;
-            if (!node.isTextblock) return true;
-            if (node.type.name === "codeBlock") return false;
-
-            const text = node.textContent;
-            inlineCodePattern.lastIndex = 0;
-            const match = inlineCodePattern.exec(text);
-            if (!match) return true;
-
-            const full = match[0];
-            const leadingLength = match[1].length;
-            const code = match[2];
-            const from = pos + 1 + match.index + leadingLength;
-            const to = pos + 1 + match.index + full.length;
-            tr = tr.insertText(code, from, to);
-            tr = tr.addMark(from, from + code.length, codeMark.create());
-            converted = true;
-            return false;
-          });
-
-          return converted ? tr : null;
+          return convertInlineCodeSyntax(newState);
         },
       }),
     ];
@@ -1515,20 +1486,28 @@ function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: s
     return;
   }
 
-  const list = document.createElement("div");
-  list.className = "footnotes-source";
+  const list = document.createElement("ol");
+  list.className = "footnotes-list";
   parseFootnoteSource(source).forEach((definition) => {
-    const block = document.createElement("div");
-    block.className = "footnote-source-item";
-    const sourceBlock = document.createElement("div");
-    sourceBlock.className = "footnote-source-text";
-    sourceBlock.title = definition.refs.length > 0 ? "点击返回正文引用" : "";
-    sourceBlock.addEventListener("click", () => {
+    const block = document.createElement("li");
+    block.id = `fn-${definition.id}`;
+    block.className = "footnote-item";
+    const index = definition.order || definition.id;
+
+    const marker = document.createElement("span");
+    marker.className = "footnote-id";
+    marker.textContent = `[${index}]`;
+
+    const content = document.createElement("div");
+    content.className = "footnote-content";
+    content.innerHTML = renderMarkdownForEditor(definition.content || " ");
+    content.title = definition.refs.length > 0 ? "点击返回正文引用" : "";
+    content.addEventListener("click", () => {
       const firstRef = definition.refs[0];
       if (firstRef) scrollInternalLink(`#${firstRef}`);
     });
-    renderFootnoteSourceLines(sourceBlock, definition.raw);
-    block.appendChild(sourceBlock);
+
+    block.append(marker, content);
     definition.refs.forEach((refId, index) => {
       const backref = document.createElement("button");
       backref.type = "button";
@@ -1545,8 +1524,15 @@ function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: s
 
 function parseFootnoteSource(markdown: string) {
   const definitions = markdown.split(/\n{2,}(?= {0,3}\[\^[^\]]+\]:)/).map((item) => item.trim()).filter(Boolean);
-  return definitions.map((raw) => {
+  return definitions.map((raw, orderIndex) => {
     const id = raw.match(/^ {0,3}\[\^([^\]]+)\]:/)?.[1] || "";
+    const content = raw
+      .replace(/^ {0,3}\[\^[^\]]+\]:\s*/, "")
+      .replace(/^\n+/, "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^( {4}|\t)/, ""))
+      .join("\n")
+      .trim();
     const escapedId = cssEscape(id);
     const refs = Array.from(
       document.querySelectorAll<HTMLElement>(
@@ -1555,16 +1541,7 @@ function parseFootnoteSource(markdown: string) {
     )
       .map((item) => item.id || item.dataset.refId || "")
       .filter(Boolean);
-    return { id, raw, refs };
-  });
-}
-
-function renderFootnoteSourceLines(container: HTMLElement, raw: string) {
-  raw.split(/\r?\n/).forEach((line, index) => {
-    const row = document.createElement("div");
-    row.className = index === 0 ? "footnote-source-line footnote-source-heading" : "footnote-source-line";
-    row.textContent = line || " ";
-    container.appendChild(row);
+    return { id, raw, content, refs, order: orderIndex + 1 };
   });
 }
 
@@ -1794,38 +1771,45 @@ function convertInlineMarkdownSyntax(state: any) {
   const converters = [
     {
       mark: state.schema.marks.bold,
-      pattern: /(^|[^*])\*\*([^*\n]+)\*\*/g,
+      pattern: /(?<!\*)\*\*([^*\n]+)\*\*/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.italic,
-      pattern: /(^|[^*])\*([^*\n]+)\*/g,
+      pattern: /(?<!\*)\*([^*\n]+)\*(?!\*)/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.strike,
-      pattern: /(^|[^~])~~([^~\n]+)~~/g,
+      pattern: /(?<!~)~~([^~\n]+)~~/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.highlight,
-      pattern: /(^|[^=])==([^=\n]+)==/g,
+      pattern: /(?<!=)==([^=\n]+)==/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.superscript,
-      pattern: /(^|[^^])\^([^^\n]+)\^/g,
+      pattern: /(?<!\^)\^([^^\n]+)\^/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: state.schema.marks.subscript,
-      pattern: /(^|[^~])~([^~\n]+)~/g,
+      pattern: /(?<!~)~([^~\n]+)~(?!~)/g,
+      labelIndex: 1,
       attrs: () => ({}),
     },
     {
       mark: linkMark,
-      pattern: /(^|[^\]])\[([^\]\n]+)\]\(([^)\s]+)\)/g,
-      attrs: (match: RegExpExecArray) => ({ href: match[3] }),
+      pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)/g,
+      labelIndex: 1,
+      attrs: (match: RegExpExecArray) => ({ href: match[2] }),
     },
   ];
 
@@ -1844,9 +1828,8 @@ function convertInlineMarkdownSyntax(state: any) {
       if (!match) continue;
 
       const full = match[0];
-      const leadingLength = match[1].length;
-      const label = match[2];
-      const from = pos + 1 + match.index + leadingLength;
+      const label = match[converter.labelIndex];
+      const from = pos + 1 + match.index;
       const to = pos + 1 + match.index + full.length;
 
       tr = tr.insertText(label, from, to);
@@ -1863,12 +1846,43 @@ function convertInlineMarkdownSyntax(state: any) {
 function convertPendingInlineMarkdown(view: any) {
   let converted = false;
   for (let index = 0; index < 12; index += 1) {
-    const tr = convertInlineMarkdownSyntax(view.state);
+    const tr = convertInlineCodeSyntax(view.state) || convertInlineMarkdownSyntax(view.state);
     if (!tr) break;
     view.dispatch(tr);
     converted = true;
   }
   return converted;
+}
+
+function convertInlineCodeSyntax(state: any) {
+  const codeMark = state.schema.marks.code;
+  if (!codeMark) return null;
+
+  let tr = state.tr;
+  let converted = false;
+  const inlineCodePattern = /`([^`\n]+)`/g;
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (converted) return false;
+    if (!node.isTextblock) return true;
+    if (node.type.name === "codeBlock") return false;
+
+    const text = node.textContent;
+    inlineCodePattern.lastIndex = 0;
+    const match = inlineCodePattern.exec(text);
+    if (!match) return true;
+
+    const full = match[0];
+    const code = match[1];
+    const from = pos + 1 + match.index;
+    const to = pos + 1 + match.index + full.length;
+    tr = tr.insertText(code, from, to);
+    tr = tr.addMark(from, from + code.length, codeMark.create());
+    converted = true;
+    return false;
+  });
+
+  return converted ? tr : null;
 }
 
 function convertMarkdownHeading(

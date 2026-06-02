@@ -93,34 +93,46 @@ function markSpecialBlocksForEditor(markdown: string) {
     return `${prefix}\n${stash(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`)}\n`;
   });
 
+  next = convertFootnotes(next, stash, true);
   next = next.replace(/```[\s\S]*?```/g, (code) => stash(code));
   next = next.replace(/`([^`\n]*)`/g, (_match, code) => {
     return stash(`<code>${escapeHtml(code)}</code>`);
   });
-
   next = protectInlineMath(next, stash);
   next = protectHtmlBlocks(next, stash);
-  next = convertFootnotes(next, stash, true);
 
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
   });
 
-  next = next.replace(/(^|[A-Za-z0-9)\]])\^([A-Za-z0-9+\-=().]+)\^/g, (_match, prefix, text) => {
+  next = next.replace(/(^|[^^\s])\^([^^\n]+)\^/g, (_match, prefix, text) => {
     return `${prefix}<sup>${escapeHtml(text)}</sup>`;
   });
 
-  next = next.replace(/(^|[A-Za-z0-9)\]])~([A-Za-z0-9+\-=().]+)~/g, (_match, prefix, text) => {
+  next = next.replace(/(^|[^~\s])~([^~\n]+)~/g, (_match, prefix, text) => {
     return `${prefix}<sub>${escapeHtml(text)}</sub>`;
   });
 
   next = convertTaskItems(next);
   next = convertDefinitionLists(next);
 
-  placeholders.forEach((html, index) => {
-    next = next.replace(`@@LIGHTMARK_PLACEHOLDER_${index}@@`, html);
-  });
+  next = restorePlaceholders(next, placeholders);
 
+  return next;
+}
+
+function restorePlaceholders(value: string, placeholders: string[]) {
+  let next = value;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    placeholders.forEach((html, index) => {
+      const token = `@@LIGHTMARK_PLACEHOLDER_${index}@@`;
+      if (!next.includes(token)) return;
+      next = next.split(token).join(html);
+      changed = true;
+    });
+  }
   return next;
 }
 
@@ -155,8 +167,8 @@ function installLightMarkMarkdown(instance: MarkdownIt) {
 function renderInlineEnhancements(html: string) {
   return html
     .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
-    .replace(/(^|[A-Za-z0-9)\]])\^([A-Za-z0-9+\-=().]+)\^/g, "$1<sup>$2</sup>")
-    .replace(/(^|[A-Za-z0-9)\]])~([A-Za-z0-9+\-=().]+)~/g, "$1<sub>$2</sub>")
+    .replace(/(^|[^^\s])\^([^^\n]+)\^/g, "$1<sup>$2</sup>")
+    .replace(/(^|[^~\s])~([^~\n]+)~/g, "$1<sub>$2</sub>")
     .replace(/:([a-z0-9_+-]+):/gi, (_match, name) => emojiMap[name] || `:${name}:`);
 }
 
@@ -199,7 +211,7 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
 
   const referenceOrder = new Map<string, number>();
   const referenceCounts = new Map<string, number>();
-  let next = bodyLines.join("\n");
+  let next = protectCodeForFootnoteRefs(bodyLines.join("\n"));
 
   next = next.replace(/\[\^([^\]]+)\]/g, (_match, id) => {
     const safeId = escapeHtml(id);
@@ -213,6 +225,7 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
     }
     return `<sup data-footnote-ref="${safeId}" data-footnote-index="${order}" data-preview="${escapeAttribute(preview)}"><a href="#fn-${safeId}" id="fnref-${safeId}-${count}" data-footnote-link="ref">[${order}]</a></sup>`;
   });
+  next = restoreCodeForFootnoteRefs(next);
 
   if (definitions.size === 0) return next;
 
@@ -240,6 +253,30 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
     .join("\n\n");
   const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol>${items}</ol></section>`;
   return `${next}\n\n${stash ? stash(section) : section}`;
+}
+
+function protectCodeForFootnoteRefs(markdown: string) {
+  const codePlaceholders: string[] = [];
+  const stashCode = (code: string) => {
+    const token = `@@LIGHTMARK_FOOTNOTE_CODE_${codePlaceholders.length}@@`;
+    codePlaceholders.push(code);
+    return token;
+  };
+  const protectedMarkdown = markdown
+    .replace(/```[\s\S]*?```/g, (code) => stashCode(code))
+    .replace(/`[^`\n]*`/g, (code) => stashCode(code));
+  return `${protectedMarkdown}\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_${codePlaceholders.map((item) => encodeURIComponent(item)).join("|")}@@`;
+}
+
+function restoreCodeForFootnoteRefs(markdown: string) {
+  const map = markdown.match(/\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_([^@]*)@@$/);
+  if (!map) return markdown;
+  const codePlaceholders = map[1] ? map[1].split("|").map((item) => decodeURIComponent(item)) : [];
+  let next = markdown.slice(0, map.index);
+  codePlaceholders.forEach((code, index) => {
+    next = next.split(`@@LIGHTMARK_FOOTNOTE_CODE_${index}@@`).join(code);
+  });
+  return next;
 }
 
 function renderFootnoteContent(markdown: string) {
