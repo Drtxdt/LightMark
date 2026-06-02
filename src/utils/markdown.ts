@@ -280,35 +280,8 @@ function restoreCodeForFootnoteRefs(markdown: string) {
 }
 
 function renderFootnoteContent(markdown: string) {
-  const escaped = escapeHtml(markdown.trim());
-  if (!escaped) return "";
-  const lines = escaped.split(/\n/);
-  let html = "";
-  let inList = false;
-  for (const line of lines) {
-    const item = line.match(/^\s*[-*+]\s+(.+)$/);
-    if (item) {
-      if (!inList) {
-        html += "<ul>";
-        inList = true;
-      }
-      html += `<li>${renderInlineFootnoteMarkdown(item[1])}</li>`;
-      continue;
-    }
-    if (inList) {
-      html += "</ul>";
-      inList = false;
-    }
-    if (line.trim()) html += `<p>${renderInlineFootnoteMarkdown(line.trim())}</p>`;
-  }
-  if (inList) html += "</ul>";
-  return html;
-}
-
-function renderInlineFootnoteMarkdown(value: string) {
-  return value
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>");
+  const source = markdown.trim();
+  return source ? md.render(source) : "";
 }
 
 function buildTocHtml(markdown: string) {

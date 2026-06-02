@@ -666,7 +666,6 @@ const TyporaSourceMarkers = Extension.create({
           },
         },
         appendTransaction: (transactions, _oldState, newState) => {
-          if (transactions.some((transaction) => transaction.selectionSet)) return null;
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
           return convertInlineMarkdownSyntax(newState);
         },
@@ -895,6 +894,7 @@ turndown.addRule("blockMath", {
 });
 
 const editor = useEditor({
+  enableInputRules: ["blockquote", "bulletList", "orderedList"],
   extensions: [
     StarterKit.configure({
       heading: false,

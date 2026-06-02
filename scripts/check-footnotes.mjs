@@ -36,7 +36,13 @@ try {
     - 段落
     - 列表
     - **Markdown 样式**
+    - *斜体样式*
+    - [链接](https://example.com)
     - \`inline code\`
+
+    \`\`\`ts
+    const answer = 42
+    \`\`\`
 
 脚注行为测试：
 
@@ -58,7 +64,10 @@ try {
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],
     [previewHtml.includes('href="#fnref-1-2"'), "preview creates duplicate return links"],
     [previewHtml.includes("<strong>Markdown 样式</strong>"), "preview renders markdown inside long footnote"],
+    [previewHtml.includes("<em>斜体样式</em>"), "preview renders italic inside long footnote"],
+    [previewHtml.includes('href="https://example.com"'), "preview renders links inside long footnote"],
     [previewHtml.includes("<code>inline code</code>"), "preview renders inline code inside long footnote"],
+    [previewHtml.includes('class="hljs language-ts"'), "preview renders fenced code inside long footnote"],
   ];
 
   const failed = checks.filter(([ok]) => !ok).map(([, label]) => label);
