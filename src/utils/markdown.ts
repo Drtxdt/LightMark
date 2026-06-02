@@ -227,9 +227,14 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
   });
   next = restoreCodeForFootnoteRefs(next);
 
-  if (definitions.size === 0) return next;
+  if (definitions.size === 0 && referenceOrder.size === 0) return next;
 
-  const items = Array.from(definitions.entries())
+  referenceOrder.forEach((_order, id) => {
+    if (!definitions.has(id)) definitions.set(id, "");
+  });
+
+  const orderedDefinitions = orderFootnoteDefinitions(definitions, referenceOrder);
+  const items = orderedDefinitions
     .map(([id, text]) => {
       const safeId = escapeHtml(id);
       const order = referenceOrder.get(id) || Array.from(definitions.keys()).indexOf(id) + 1;
@@ -240,19 +245,31 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
       return `<li id="fn-${safeId}" class="footnote-item"><span class="footnote-id">[${order}]</span><div class="footnote-content">${renderFootnoteContent(text)}</div><div class="footnote-backrefs">${backrefs}</div></li>`;
     })
     .join("");
-  const source = Array.from(definitions.entries())
-    .map(([id, text]) => {
-      if (!text) return `[^${id}]:`;
-      if (!text.includes("\n")) return `[^${id}]: ${text}`;
-      const body = text
-        .split("\n")
-        .map((line) => (line ? `    ${line}` : ""))
-        .join("\n");
-      return `[^${id}]:\n\n${body}`;
-    })
-    .join("\n\n");
+  const source = orderedDefinitions.map(([id, text]) => formatFootnoteSource(id, text)).join("\n\n");
   const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol class="footnotes-list">${items}</ol></section>`;
   return `${next}\n\n${stash ? stash(section) : section}`;
+}
+
+function orderFootnoteDefinitions(definitions: Map<string, string>, referenceOrder: Map<string, number>) {
+  return Array.from(definitions.entries()).sort(([leftId], [rightId]) => {
+    const leftOrder = referenceOrder.get(leftId);
+    const rightOrder = referenceOrder.get(rightId);
+    if (leftOrder && rightOrder) return leftOrder - rightOrder;
+    if (leftOrder) return -1;
+    if (rightOrder) return 1;
+    return 0;
+  });
+}
+
+function formatFootnoteSource(id: string, text: string) {
+  const body = text.trim();
+  if (!body) return `[^${id}]:`;
+  if (!body.includes("\n")) return `[^${id}]: ${body}`;
+  const indented = body
+    .split("\n")
+    .map((line) => (line ? `    ${line}` : ""))
+    .join("\n");
+  return `[^${id}]:\n\n${indented}`;
 }
 
 function protectCodeForFootnoteRefs(markdown: string) {

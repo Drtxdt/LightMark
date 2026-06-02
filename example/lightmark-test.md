@@ -11,20 +11,20 @@
 ### 列表
 
 -   无序列表第一项
-    
+  
 -   无序列表第二项
-    
+  
     -   嵌套列表
-        
+      
     -   继续嵌套
-        
+      
 
 1.  有序列表第一项
-    
+  
 2.  有序列表第二项
-    
+  
 3.  有序列表第三项
-    
+  
 
 ### 引用
 
@@ -84,44 +84,44 @@ graph TD
 基础任务列表：
 
 -   [ ] 未完成任务
-    
+  
 -   [x] 已完成任务
-    
+  
 -   [ ] 第二个未完成任务
-    
+  
 
 嵌套任务列表：
 
 -   [ ] 主任务
-    
+  
     -   [x] 子任务 A
         
     -   [ ] 子任务 B
         
         -   [x] 更深层级任务
-            
+          
 
 有序任务列表：
 
 1.  [x] 初始化项目
-    
+  
 2.  [ ] 实现 Markdown 渲染
-    
+  
 3.  [ ] 实现 WYSIWYG 编辑
-    
+  
 
 连续点击测试：
 
 请连续点击多个 checkbox，确保：
 
 -   状态实时更新
-    
+  
 -   光标不会丢失
-    
+  
 -   不会触发整页闪烁
-    
+  
 -   Markdown 源码同步更新
-    
+  
 
 ## 八、高亮测试
 
@@ -132,13 +132,13 @@ graph TD
 高亮与其他样式混合：
 
 -   **==加粗高亮==**
-    
+  
 -   _==斜体高亮==_
-    
+  
 -   `代码高亮`
-    
+  
 -   ==含有== [==链接==](https://example.com) ==的高亮==
-    
+  
 
 边界测试：
 
@@ -154,14 +154,18 @@ graph TD
 
 同一个脚注重复引用。[^1]
 
+[^1]: 这是一个简单脚注。 
+
+[^long]: 这是一个较长的脚注。 它应该支持： - 段落 - 列表 - **Markdown 样式** - <code>代码高亮</code>
+
 脚注行为测试：
 
 -   点击脚注编号应跳转到底部
-    
+  
 -   点击返回按钮应回到原位置
-    
+  
 -   编辑模式中脚注不应错位
-    
+  
 
 ## 十、上下标测试
 
@@ -184,11 +188,11 @@ CO~2~
 边界测试：
 
 -   上标结束后继续输入文字应正常
-    
+  
 -   删除 `^` 不应导致 DOM 错乱
-    
+  
 -   连续输入 `x123abc` 应正确恢复普通文本
-    
+  
 
 ## 十一、自动链接测试
 
@@ -209,11 +213,11 @@ CO~2~
 自动链接行为测试：
 
 -   点击应打开浏览器
-    
+  
 -   不应错误包含句号
-    
+  
 -   中文后接 URL 不应解析错误
-    
+  
 
 例如：
 
@@ -248,26 +252,26 @@ LightMark is awesome :sparkles:
 请确认：
 
 -   自动生成目录
-    
+  
 -   H1-H6 都能识别
-    
+  
 -   点击目录可以跳转
-    
+  
 -   当前标题高亮（如果支持）
-    
+  
 -   标题修改后目录实时更新
-    
+  
 
 ## 十四、YAML Front Matter 测试
 
 请确认 Front Matter：
 
 -   不会被当正文渲染
-    
+  
 -   能正确解析
-    
+  
 -   不影响正文编辑
-    
+  
 
 ```yaml
 ---
@@ -335,13 +339,13 @@ HTML 与 Markdown 混合：
 请确认：
 
 -   大纲正确显示 H1-H6
-    
+  
 -   折叠逻辑正常
-    
+  
 -   不同层级字号正确
-    
+  
 -   Anchor 跳转正确
-    
+  
 
 ## 十八、复杂混合场景测试
 
@@ -367,17 +371,17 @@ HTML 与 Markdown 混合：
 复杂列表：
 
 1.  第一项
-    
+  
     -   子列表
-        
+      
         > 引用
         > 
         > ```ts
         > const x = 1;
         > ```
-        
-2.  第二项包含 Mermaid：
     
+2.  第二项包含 Mermaid：
+  
 
 ```mermaid
 sequenceDiagram
@@ -392,15 +396,15 @@ sequenceDiagram
 下面是一段用于测试：
 
 -   大文档滚动性能
-    
+  
 -   光标定位
-    
+  
 -   diff 更新
-    
+  
 -   虚拟滚动
-    
+  
 -   增量渲染
-    
+  
 
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum vulputate mauris ut nisl malesuada, vitae volutpat lectus consequat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas.
 
@@ -415,82 +419,82 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum vulputate ma
 请人工测试以下行为：
 
 1.  输入法兼容
-    
+  
     -   中文输入时不闪烁
-        
+      
     -   拼音阶段不提前渲染
-        
+      
     -   候选框位置正确
-        
+    
 2.  Undo / Redo
-    
+  
     -   Ctrl+Z
-        
+      
     -   Ctrl+Shift+Z
-        
+      
     -   多块编辑恢复正确
-        
+    
 3.  光标行为
-    
+  
     -   点击公式内部
-        
+      
     -   点击代码块边缘
-        
+      
     -   多行选择
-        
+      
     -   Shift + 方向键
-        
+    
 4.  粘贴行为
-    
+  
     -   粘贴富文本
-        
+      
     -   粘贴代码
-        
+      
     -   粘贴图片
-        
+      
     -   粘贴 HTML
-        
-5.  大文件行为
     
+5.  大文件行为
+  
     -   打开 1MB Markdown
-        
+      
     -   搜索性能
-        
+      
     -   滚动 FPS
-        
+      
     -   内存占用
-        
+      
 
 ## 二十一、最终验收检查
 
 请确认：
 
 -   Markdown 源码与渲染一致
-    
+  
 -   不会随机丢失光标
-    
+  
 -   不会出现 DOM 跳动
-    
+  
 -   不会重复渲染
-    
+  
 -   不会出现无限刷新
-    
+  
 -   保存后内容一致
-    
+  
 -   重启后状态恢复正常
-    
+  
 -   暗色模式下颜色正常
-    
+  
 -   Windows DPI 缩放正常
-    
+  
 -   Linux 下字体正常
-    
+  
 -   Emoji 不乱码
-    
+  
 -   Mermaid 不溢出
-    
+  
 -   KaTeX 不闪烁
-    
+  
 
 如果以上全部通过，则说明 LightMark 已具备较完整的现代 Markdown 编辑器基础能力。
 
@@ -503,13 +507,12 @@ _ddd_
 > dddd
 
 1.  222
-    
+  
 2.  222
-    
+  
 
 -   ddd
-    
+  
 -   ddd
-    
+  
 
-[^1]: 这是一个简单脚注。 [^long]: 这是一个较长的脚注。 它应该支持： - 段落 - 列表 - **Markdown 样式** - <code>代码高亮</code>

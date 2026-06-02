@@ -24,10 +24,6 @@ try {
 
 这里有第二个脚注。[^long]
 
-同一个脚注重复引用。[^1]
-
-[^1]: 这是一个简单脚注。
-
 [^long]: 
 
     这是一个较长的脚注。
@@ -44,11 +40,17 @@ try {
     const answer = 42
     \`\`\`
 
+同一个脚注重复引用。[^1]
+
+这里有一个没有定义回收的脚注。[^missing]
+
 脚注行为测试：
 
 - 点击脚注编号应跳转到底部
 - 点击返回按钮应回到原位置
-- 编辑模式中脚注不应错位`;
+- 编辑模式中脚注不应错位
+
+[^1]: 这是一个简单脚注。`;
 
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
@@ -60,17 +62,20 @@ try {
     [editorHtml.includes('data-type="footnotes"'), "editor renders footnote source block"],
     [editorHtml.includes("[^1]: 这是一个简单脚注。"), "editor preserves simple footnote source"],
     [editorHtml.includes("[^long]:"), "editor preserves long footnote source"],
+    [editorHtml.includes("[^missing]:"), "editor appends missing footnote definition source"],
     [!editorHtml.includes("@@LIGHTMARK_PLACEHOLDER_"), "editor restores nested placeholders inside footnotes"],
     [editorHtml.includes("`inline code`"), "editor preserves inline code source inside footnote definitions"],
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],
     [previewHtml.includes('class="footnotes-list"'), "preview footnotes use block list layout"],
-    [previewFootnoteItems.length === 2, "preview renders each footnote as a separate item"],
+    [previewFootnoteItems.length === 3, "preview renders each footnote as a separate item"],
     [previewHtml.includes('<span class="footnote-id">[1]</span>'), "preview renders first footnote number"],
     [previewHtml.includes('<span class="footnote-id">[2]</span>'), "preview renders second footnote number"],
+    [previewHtml.includes('<span class="footnote-id">[3]</span>'), "preview renders missing footnote number"],
     [previewHtml.includes('href="#fnref-1-1" class="footnote-backref" data-footnote-link="backref">返回1</a>'), "preview creates first numbered backref"],
     [previewHtml.includes('href="#fnref-1-2"'), "preview creates duplicate return links"],
     [previewHtml.includes('href="#fnref-1-2" class="footnote-backref" data-footnote-link="backref">返回2</a>'), "preview creates second numbered backref"],
     [previewHtml.includes('href="#fnref-long-1" class="footnote-backref" data-footnote-link="backref">返回1</a>'), "preview creates numbered backref for single-use long footnote"],
+    [previewHtml.includes('href="#fnref-missing-1" class="footnote-backref" data-footnote-link="backref">返回1</a>'), "preview creates numbered backref for missing footnote"],
     [previewHtml.includes("<strong>Markdown 样式</strong>"), "preview renders markdown inside long footnote"],
     [previewHtml.includes("<em>斜体样式</em>"), "preview renders italic inside long footnote"],
     [previewHtml.includes('href="https://example.com"'), "preview renders links inside long footnote"],
