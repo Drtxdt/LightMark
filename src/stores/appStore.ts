@@ -45,16 +45,14 @@ export async function loadConfig() {
   const config = await invoke<AppConfig>("read_app_config");
   appStore.recentFiles = config.recentFiles ?? [];
   appStore.theme = config.theme ?? "system";
-  if (config.lastWorkspace) {
-    appStore.currentWorkspace = config.lastWorkspace;
-    await refreshFileTree();
-  }
+  resetOpenDocument();
+  appStore.currentWorkspace = "";
+  appStore.fileTree = [];
 }
 
 export async function persistConfig() {
   const config: AppConfig = {
     recentFiles: appStore.recentFiles,
-    lastWorkspace: appStore.currentWorkspace || null,
     theme: appStore.theme,
   };
   await invoke("write_app_config", { config });
@@ -83,10 +81,8 @@ export async function openFile(path?: string) {
   if (!selected) return;
   if (selected !== appStore.currentFilePath && !(await confirmDiscardOrSave())) return;
   await closeLargeFileSession();
+  resetOpenDocument();
   const info = await invoke<FileInfo>("get_file_info", { path: selected });
-  appStore.currentFilePath = selected;
-  appStore.isDirty = false;
-  appStore.statusMessage = "";
   if (info.isLarge) {
     const session = await invoke<LargeFileSession>("open_large_file", { path: selected });
     appStore.documentMode = "large";
@@ -100,12 +96,17 @@ export async function openFile(path?: string) {
       pendingEdits: [],
       outline: session.outline,
     };
+    appStore.currentFilePath = selected;
+    appStore.isDirty = false;
     appStore.statusMessage = `大文件模式：${formatBytes(session.sizeBytes)}，${session.totalLines} 行`;
   } else {
     const content = await invoke<string>("read_text_file", { path: selected });
     appStore.documentMode = "normal";
     appStore.largeFile = null;
     appStore.currentContent = content;
+    appStore.currentFilePath = selected;
+    appStore.isDirty = false;
+    appStore.statusMessage = "";
   }
   rememberRecentFile(selected);
   await persistConfig();
@@ -223,6 +224,16 @@ async function closeLargeFileSession() {
   const sessionId = appStore.largeFile.sessionId;
   appStore.largeFile = null;
   await invoke("close_large_file", { sessionId }).catch(() => {});
+}
+
+function resetOpenDocument() {
+  appStore.currentFilePath = "";
+  appStore.currentContent = "";
+  appStore.documentMode = "normal";
+  appStore.largeFile = null;
+  appStore.isDirty = false;
+  appStore.editorMode = "wysiwyg";
+  appStore.statusMessage = "";
 }
 
 function mergeLoadedRanges(

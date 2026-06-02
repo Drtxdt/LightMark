@@ -11,7 +11,6 @@ export interface FileNode {
 
 export interface AppConfig {
   recentFiles: string[];
-  lastWorkspace: string | null;
   theme: ThemeMode;
 }
 

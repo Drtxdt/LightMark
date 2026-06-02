@@ -12,8 +12,9 @@ pub struct FileNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
     pub recent_files: Vec<String>,
-    pub last_workspace: Option<String>,
+    #[serde(default = "default_theme")]
     pub theme: String,
 }
 
@@ -25,6 +26,10 @@ pub struct FileInfo {
     pub line_count: usize,
     pub is_large: bool,
     pub encoding: String,
+}
+
+fn default_theme() -> String {
+    "system".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +82,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             recent_files: Vec::new(),
-            last_workspace: None,
             theme: "system".to_string(),
         }
     }
