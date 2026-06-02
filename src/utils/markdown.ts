@@ -235,9 +235,9 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
       const order = referenceOrder.get(id) || Array.from(definitions.keys()).indexOf(id) + 1;
       const count = referenceCounts.get(id) || 0;
       const backrefs = Array.from({ length: count }, (_item, index) => {
-        return `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${count > 1 ? index + 1 : ""}</a>`;
+        return `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${index + 1}</a>`;
       }).join(" ");
-      return `<li id="fn-${safeId}"><span class="footnote-id">[${order}]</span> ${renderFootnoteContent(text)} ${backrefs}</li>`;
+      return `<li id="fn-${safeId}" class="footnote-item"><span class="footnote-id">[${order}]</span><div class="footnote-content">${renderFootnoteContent(text)}</div><div class="footnote-backrefs">${backrefs}</div></li>`;
     })
     .join("");
   const source = Array.from(definitions.entries())
@@ -251,7 +251,7 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
       return `[^${id}]:\n\n${body}`;
     })
     .join("\n\n");
-  const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol>${items}</ol></section>`;
+  const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol class="footnotes-list">${items}</ol></section>`;
   return `${next}\n\n${stash ? stash(section) : section}`;
 }
 

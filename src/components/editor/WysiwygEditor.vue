@@ -1508,15 +1508,18 @@ function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: s
     });
 
     block.append(marker, content);
+    const backrefs = document.createElement("div");
+    backrefs.className = "footnote-backrefs";
     definition.refs.forEach((refId, index) => {
       const backref = document.createElement("button");
       backref.type = "button";
       backref.className = "footnote-backref";
       backref.dataset.footnoteTarget = `#${refId}`;
-      backref.textContent = `返回${definition.refs.length > 1 ? index + 1 : ""}`;
+      backref.textContent = `返回${index + 1}`;
       backref.addEventListener("click", () => scrollInternalLink(`#${refId}`));
-      block.appendChild(backref);
+      backrefs.appendChild(backref);
     });
+    block.appendChild(backrefs);
     list.appendChild(block);
   });
   dom.appendChild(list);
@@ -1524,6 +1527,7 @@ function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: s
 
 function parseFootnoteSource(markdown: string) {
   const definitions = markdown.split(/\n{2,}(?= {0,3}\[\^[^\]]+\]:)/).map((item) => item.trim()).filter(Boolean);
+  const refMeta = collectFootnoteRefMeta();
   return definitions.map((raw, orderIndex) => {
     const id = raw.match(/^ {0,3}\[\^([^\]]+)\]:/)?.[1] || "";
     const content = raw
@@ -1533,16 +1537,34 @@ function parseFootnoteSource(markdown: string) {
       .map((line) => line.replace(/^( {4}|\t)/, ""))
       .join("\n")
       .trim();
-    const escapedId = cssEscape(id);
-    const refs = Array.from(
-      document.querySelectorAll<HTMLElement>(
-        `sup[data-footnote-ref="${escapedId}"] a[id], span[data-type="footnote-ref"][data-footnote-ref="${escapedId}"][data-ref-id]`,
-      ),
-    )
-      .map((item) => item.id || item.dataset.refId || "")
-      .filter(Boolean);
-    return { id, raw, content, refs, order: orderIndex + 1 };
+    const meta = refMeta.get(id);
+    return { id, raw, content, refs: meta?.refs || [], order: meta?.order || orderIndex + 1 };
+  }).sort((left, right) => left.order - right.order);
+}
+
+function collectFootnoteRefMeta() {
+  const meta = new Map<string, { order: number; refs: string[] }>();
+  document.querySelectorAll<HTMLElement>('span[data-type="footnote-ref"][data-footnote-ref][data-ref-id]').forEach((item) => {
+    const id = item.dataset.footnoteRef || "";
+    if (!id) return;
+    const order = Number(item.dataset.footnoteIndex || meta.size + 1);
+    const entry = meta.get(id) || { order, refs: [] };
+    entry.order = Math.min(entry.order, order);
+    if (item.dataset.refId) entry.refs.push(item.dataset.refId);
+    meta.set(id, entry);
   });
+  document.querySelectorAll<HTMLElement>('sup[data-footnote-ref][data-footnote-index]').forEach((item) => {
+    const id = item.dataset.footnoteRef || "";
+    if (!id) return;
+    const order = Number(item.dataset.footnoteIndex || meta.size + 1);
+    const entry = meta.get(id) || { order, refs: [] };
+    entry.order = Math.min(entry.order, order);
+    item.querySelectorAll<HTMLElement>("a[id]").forEach((link) => {
+      if (link.id) entry.refs.push(link.id);
+    });
+    meta.set(id, entry);
+  });
+  return meta;
 }
 
 function formatFootnotePreview(value: string) {

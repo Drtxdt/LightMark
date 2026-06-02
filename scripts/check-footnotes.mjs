@@ -52,6 +52,7 @@ try {
 
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
+  const previewFootnoteItems = previewHtml.match(/class="footnote-item"/g) || [];
   const checks = [
     [editorHtml.includes('data-type="footnote-ref"'), "editor footnote refs use stable node placeholders"],
     [(editorHtml.match(/data-footnote-ref="1"/g) || []).length === 2, "editor preserves duplicate [^1] refs"],
@@ -62,7 +63,14 @@ try {
     [!editorHtml.includes("@@LIGHTMARK_PLACEHOLDER_"), "editor restores nested placeholders inside footnotes"],
     [editorHtml.includes("`inline code`"), "editor preserves inline code source inside footnote definitions"],
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],
+    [previewHtml.includes('class="footnotes-list"'), "preview footnotes use block list layout"],
+    [previewFootnoteItems.length === 2, "preview renders each footnote as a separate item"],
+    [previewHtml.includes('<span class="footnote-id">[1]</span>'), "preview renders first footnote number"],
+    [previewHtml.includes('<span class="footnote-id">[2]</span>'), "preview renders second footnote number"],
+    [previewHtml.includes('href="#fnref-1-1" class="footnote-backref" data-footnote-link="backref">返回1</a>'), "preview creates first numbered backref"],
     [previewHtml.includes('href="#fnref-1-2"'), "preview creates duplicate return links"],
+    [previewHtml.includes('href="#fnref-1-2" class="footnote-backref" data-footnote-link="backref">返回2</a>'), "preview creates second numbered backref"],
+    [previewHtml.includes('href="#fnref-long-1" class="footnote-backref" data-footnote-link="backref">返回1</a>'), "preview creates numbered backref for single-use long footnote"],
     [previewHtml.includes("<strong>Markdown 样式</strong>"), "preview renders markdown inside long footnote"],
     [previewHtml.includes("<em>斜体样式</em>"), "preview renders italic inside long footnote"],
     [previewHtml.includes('href="https://example.com"'), "preview renders links inside long footnote"],
