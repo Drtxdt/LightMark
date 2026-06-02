@@ -55,6 +55,10 @@ try {
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
   const previewFootnoteItems = previewHtml.match(/class="footnote-item"/g) || [];
+  const longDefinitionPosition = previewHtml.indexOf('id="fn-long"');
+  const repeatedReferencePosition = previewHtml.indexOf("同一个脚注重复引用");
+  const missingDefinitionPosition = previewHtml.indexOf('id="fn-missing"');
+  const simpleDefinitionPosition = previewHtml.indexOf('id="fn-1"');
   const checks = [
     [editorHtml.includes('data-type="footnote-ref"'), "editor footnote refs use stable node placeholders"],
     [(editorHtml.match(/data-footnote-ref="1"/g) || []).length === 2, "editor preserves duplicate [^1] refs"],
@@ -68,6 +72,8 @@ try {
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],
     [previewHtml.includes('class="footnotes-list"'), "preview footnotes use block list layout"],
     [previewFootnoteItems.length === 3, "preview renders each footnote as a separate item"],
+    [longDefinitionPosition > -1 && longDefinitionPosition < repeatedReferencePosition, "preview renders inline footnote definition in place"],
+    [missingDefinitionPosition > simpleDefinitionPosition, "preview appends missing footnote definition at document end"],
     [previewHtml.includes('<span class="footnote-id">[1]</span>'), "preview renders first footnote number"],
     [previewHtml.includes('<span class="footnote-id">[2]</span>'), "preview renders second footnote number"],
     [previewHtml.includes('<span class="footnote-id">[3]</span>'), "preview renders missing footnote number"],

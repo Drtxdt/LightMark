@@ -538,7 +538,7 @@ const FootnoteRefNode = Node.create({
 
       const preview = document.createElement("span");
       preview.className = "footnote-ref-preview";
-      preview.textContent = formatFootnotePreview(node.attrs.preview || "");
+      preview.innerHTML = renderMarkdownForEditor(node.attrs.preview || "");
 
       const render = () => {
         link.textContent = editing ? `[^${id}]` : `[${index}]`;

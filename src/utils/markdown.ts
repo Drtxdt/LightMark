@@ -188,25 +188,22 @@ function convertDefinitionLists(markdown: string) {
 function convertFootnotes(markdown: string, stash?: (html: string) => string, forEditor = false) {
   const definitions = new Map<string, string>();
   const lines = markdown.split(/\r?\n/);
+  const definitionOrder = new Map<string, number>();
+  const definitionBlocks: Array<{ token: string; entries: Array<[string, string]> }> = [];
   const bodyLines: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    const definition = lines[index].match(/^ {0,3}\[\^([^\]]+)\]:\s*(.*)$/);
+    const definition = parseFootnoteDefinitionAt(lines, index);
     if (!definition) {
       bodyLines.push(lines[index]);
       continue;
     }
 
-    const id = definition[1];
-    const chunks = definition[2] ? [definition[2]] : [];
-    while (index + 1 < lines.length && (lines[index + 1].trim() === "" || /^( {4,}|\t)/.test(lines[index + 1]))) {
-      index += 1;
-      if (lines[index].trim() === "") {
-        chunks.push("");
-      } else {
-        chunks.push(lines[index].replace(/^( {4}|\t)/, ""));
-      }
-    }
-    definitions.set(id, chunks.join("\n").trim());
+    if (!definitionOrder.has(definition.id)) definitionOrder.set(definition.id, definitionOrder.size + 1);
+    definitions.set(definition.id, definition.text);
+    const token = `@@LIGHTMARK_FOOTNOTE_SECTION_${definitionBlocks.length}@@`;
+    definitionBlocks.push({ token, entries: [[definition.id, definition.text]] });
+    bodyLines.push(token);
+    index = definition.nextIndex;
   }
 
   const referenceOrder = new Map<string, number>();
@@ -229,15 +226,54 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
 
   if (definitions.size === 0 && referenceOrder.size === 0) return next;
 
+  const missingDefinitions: Array<[string, string]> = [];
   referenceOrder.forEach((_order, id) => {
-    if (!definitions.has(id)) definitions.set(id, "");
+    if (definitions.has(id)) return;
+    definitions.set(id, "");
+    missingDefinitions.push([id, ""]);
   });
 
-  const orderedDefinitions = orderFootnoteDefinitions(definitions, referenceOrder);
-  const items = orderedDefinitions
+  definitionBlocks.forEach((block) => {
+    const section = renderFootnoteSection(block.entries, referenceOrder, referenceCounts, definitionOrder, stash);
+    next = next.split(block.token).join(section);
+  });
+
+  if (missingDefinitions.length > 0) {
+    const missingSection = renderFootnoteSection(missingDefinitions, referenceOrder, referenceCounts, definitionOrder, stash);
+    next = `${next.trimEnd()}\n\n${missingSection}\n\n`;
+  }
+
+  return next;
+}
+
+function parseFootnoteDefinitionAt(lines: string[], index: number) {
+  const definition = lines[index].match(/^ {0,3}\[\^([^\]]+)\]:\s*(.*)$/);
+  if (!definition) return null;
+
+  const id = definition[1];
+  const chunks = definition[2] ? [definition[2]] : [];
+  while (index + 1 < lines.length && (lines[index + 1].trim() === "" || /^( {4,}|\t)/.test(lines[index + 1]))) {
+    index += 1;
+    if (lines[index].trim() === "") {
+      chunks.push("");
+    } else {
+      chunks.push(lines[index].replace(/^( {4}|\t)/, ""));
+    }
+  }
+  return { id, text: chunks.join("\n").trim(), nextIndex: index };
+}
+
+function renderFootnoteSection(
+  entries: Array<[string, string]>,
+  referenceOrder: Map<string, number>,
+  referenceCounts: Map<string, number>,
+  definitionOrder: Map<string, number>,
+  stash?: (html: string) => string,
+) {
+  const items = entries
     .map(([id, text]) => {
       const safeId = escapeHtml(id);
-      const order = referenceOrder.get(id) || Array.from(definitions.keys()).indexOf(id) + 1;
+      const order = referenceOrder.get(id) || definitionOrder.get(id) || 1;
       const count = referenceCounts.get(id) || 0;
       const backrefs = Array.from({ length: count }, (_item, index) => {
         return `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${index + 1}</a>`;
@@ -245,20 +281,9 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
       return `<li id="fn-${safeId}" class="footnote-item"><span class="footnote-id">[${order}]</span><div class="footnote-content">${renderFootnoteContent(text)}</div><div class="footnote-backrefs">${backrefs}</div></li>`;
     })
     .join("");
-  const source = orderedDefinitions.map(([id, text]) => formatFootnoteSource(id, text)).join("\n\n");
+  const source = entries.map(([id, text]) => formatFootnoteSource(id, text)).join("\n\n");
   const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol class="footnotes-list">${items}</ol></section>`;
-  return `${next}\n\n${stash ? stash(section) : section}`;
-}
-
-function orderFootnoteDefinitions(definitions: Map<string, string>, referenceOrder: Map<string, number>) {
-  return Array.from(definitions.entries()).sort(([leftId], [rightId]) => {
-    const leftOrder = referenceOrder.get(leftId);
-    const rightOrder = referenceOrder.get(rightId);
-    if (leftOrder && rightOrder) return leftOrder - rightOrder;
-    if (leftOrder) return -1;
-    if (rightOrder) return 1;
-    return 0;
-  });
+  return stash ? stash(section) : section;
 }
 
 function formatFootnoteSource(id: string, text: string) {
