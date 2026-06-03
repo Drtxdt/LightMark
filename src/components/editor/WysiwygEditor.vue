@@ -801,7 +801,8 @@ turndown.addRule("footnotes", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "footnotes",
   replacement: (_content, node) => {
     const markdown = node instanceof HTMLElement ? node.dataset.markdown || "" : "";
-    return markdown ? `\n\n${markdown.trim()}\n\n` : "";
+    const source = normalizeFootnoteSource(markdown);
+    return source ? `\n\n${source}\n\n` : "";
   },
 });
 
@@ -1462,8 +1463,13 @@ function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
 
+function normalizeFootnoteSource(value: string) {
+  return value.replace(/\r\n?/g, "\n").trim();
+}
+
 function editorHtmlToMarkdown(html: string) {
   const document = new DOMParser().parseFromString(html, "text/html");
+  const footnoteSources: string[] = [];
 
   document.querySelectorAll<HTMLElement>('span[data-type="footnote-ref"], sup[data-footnote-ref]').forEach((node) => {
     const id = node.dataset.footnoteRef || "";
@@ -1471,11 +1477,17 @@ function editorHtmlToMarkdown(html: string) {
   });
 
   document.querySelectorAll<HTMLElement>('section[data-type="footnotes"]').forEach((node) => {
-    const markdown = node.dataset.markdown || "";
-    node.replaceWith(document.createTextNode(markdown ? `\n\n${markdown.trim()}\n\n` : ""));
+    const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${footnoteSources.length}@@`;
+    footnoteSources.push(normalizeFootnoteSource(node.dataset.markdown || ""));
+    node.replaceWith(document.createTextNode(token));
   });
 
-  return turndown.turndown(document.body.innerHTML);
+  let markdown = turndown.turndown(document.body.innerHTML);
+  footnoteSources.forEach((source, index) => {
+    const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${index}@@`;
+    markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
+  });
+  return markdown;
 }
 
 function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: string) {

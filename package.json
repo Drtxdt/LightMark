@@ -12,8 +12,11 @@
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/language": "^6.12.3",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.38.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
     "@tiptap/core": "^3.11.0",

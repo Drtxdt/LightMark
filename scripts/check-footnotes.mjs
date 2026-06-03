@@ -51,9 +51,17 @@ try {
 - 编辑模式中脚注不应错位
 
 [^1]: 这是一个简单脚注。`;
+  const adjacentDefinitions = `正文。[^a]
+
+[^a]: 第一个脚注。
+
+[^b]: 第二个脚注。
+
+继续正文。[^b]`;
 
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
+  const adjacentEditorHtml = renderMarkdownForEditor(adjacentDefinitions);
   const previewFootnoteItems = previewHtml.match(/class="footnote-item"/g) || [];
   const longDefinitionPosition = previewHtml.indexOf('id="fn-long"');
   const repeatedReferencePosition = previewHtml.indexOf("同一个脚注重复引用");
@@ -67,6 +75,9 @@ try {
     [editorHtml.includes("[^1]: 这是一个简单脚注。"), "editor preserves simple footnote source"],
     [editorHtml.includes("[^long]:"), "editor preserves long footnote source"],
     [editorHtml.includes("[^missing]:"), "editor appends missing footnote definition source"],
+    [adjacentEditorHtml.includes("[^a]: 第一个脚注。"), "editor preserves first adjacent footnote definition"],
+    [adjacentEditorHtml.includes("[^b]: 第二个脚注。"), "editor preserves second adjacent footnote definition"],
+    [!adjacentEditorHtml.includes("[^a]: 第一个脚注。 [^b]:"), "editor keeps adjacent footnote definitions separated"],
     [!editorHtml.includes("@@LIGHTMARK_PLACEHOLDER_"), "editor restores nested placeholders inside footnotes"],
     [editorHtml.includes("`inline code`"), "editor preserves inline code source inside footnote definitions"],
     [previewHtml.includes('href="#fn-1"'), "preview links ref to footnote"],

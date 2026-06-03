@@ -1,5 +1,7 @@
 @import "highlight.js/styles/github-dark.css";
 @import "katex/dist/katex.min.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/700.css";
 
 @tailwind base;
 @tailwind components;
