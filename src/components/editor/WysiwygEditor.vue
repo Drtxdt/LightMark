@@ -115,6 +115,10 @@ const FrontMatterNode = Node.create({
           "data-yaml": attributes.yaml,
         }),
       },
+      editing: {
+        default: false,
+        rendered: false,
+      },
     };
   },
 
@@ -131,13 +135,13 @@ const FrontMatterNode = Node.create({
       const dom = document.createElement("section");
       dom.contentEditable = "false";
       let yaml = node.attrs.yaml || "";
-      let editing = false;
+      let editing = Boolean(node.attrs.editing);
 
       const updateYaml = () => {
         if (typeof getPos !== "function") return;
         const pos = getPos();
         if (typeof pos !== "number") return;
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { yaml }));
+        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { yaml, editing: false }));
       };
 
       const renderDisplay = () => {
@@ -147,7 +151,8 @@ const FrontMatterNode = Node.create({
         open.className = "front-matter-fence";
         open.textContent = "---";
         const pre = document.createElement("pre");
-        pre.textContent = yaml;
+        pre.className = yaml.trim() ? "" : "front-matter-placeholder";
+        pre.textContent = yaml.trim() ? yaml : "请输入yaml";
         const close = document.createElement("div");
         close.className = "front-matter-fence";
         close.textContent = "---";
@@ -162,6 +167,7 @@ const FrontMatterNode = Node.create({
         open.textContent = "---";
         const textarea = document.createElement("textarea");
         textarea.className = "front-matter-editor";
+        textarea.placeholder = "请输入yaml";
         textarea.value = yaml;
         textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
         textarea.spellcheck = false;
@@ -188,11 +194,12 @@ const FrontMatterNode = Node.create({
         renderEditor();
       });
 
-      renderDisplay();
+      editing ? renderEditor() : renderDisplay();
       return {
         dom,
         update(nextNode: any) {
           yaml = nextNode.attrs.yaml || "";
+          editing = Boolean(nextNode.attrs.editing);
           editing ? renderEditor() : renderDisplay();
           return true;
         },
@@ -202,6 +209,102 @@ const FrontMatterNode = Node.create({
     };
   },
 });
+
+const FrontMatterInput = Extension.create({
+  name: "frontMatterInput",
+  priority: 1000,
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleKeyDown(view, event) {
+            return convertLeadingFrontMatter(view, event);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+const FencedCodeBlockInput = Extension.create({
+  name: "fencedCodeBlockInput",
+  priority: 1000,
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleKeyDown(view, event) {
+            return convertFencedCodeBlock(view, event);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+function isLeadingFrontMatterFence(state: any) {
+  const { selection } = state;
+  if (!selection.empty) return false;
+  const { $from } = selection;
+  const firstNode = state.doc.firstChild;
+  if (!firstNode || $from.depth !== 1 || $from.before(1) !== 0) return false;
+  if ($from.parent !== firstNode || !firstNode.isTextblock) return false;
+  if ($from.parentOffset !== firstNode.content.size) return false;
+  return firstNode.textContent.trim() === "---";
+}
+
+function getFencedCodeLanguage(text: string) {
+  const match = text.match(/^```([A-Za-z0-9_+-]*)\s*$/);
+  return match ? match[1] : null;
+}
+
+function convertFencedCodeBlock(view: any, event: KeyboardEvent) {
+  if (event.key !== "Enter") return false;
+  const { state } = view;
+  const { selection, schema } = state;
+  if (!selection.empty) return false;
+
+  const { $from } = selection;
+  if (!$from.parent.isTextblock || $from.parent.type.name === "codeBlock") return false;
+  if ($from.parentOffset !== $from.parent.content.size) return false;
+
+  const language = getFencedCodeLanguage($from.parent.textContent.trim());
+  if (language === null) return false;
+
+  const codeBlockType = schema.nodes.codeBlock;
+  if (!codeBlockType) return false;
+
+  const from = $from.before();
+  const to = $from.after();
+  const codeBlock = codeBlockType.create(language ? { language } : undefined);
+  const tr = state.tr.replaceWith(from, to, codeBlock);
+  tr.setSelection(TextSelection.create(tr.doc, from + 1));
+  view.dispatch(tr.scrollIntoView());
+  event.preventDefault();
+  return true;
+}
+
+function convertLeadingFrontMatter(view: any, event: KeyboardEvent) {
+  if (event.key !== "Enter") return false;
+  const { state } = view;
+  if (!isLeadingFrontMatterFence(state)) return false;
+
+  const { schema } = state;
+  const firstNode = state.doc.firstChild;
+  const frontMatterType = schema.nodes.frontMatter;
+  const paragraphType = schema.nodes.paragraph;
+  if (!firstNode || !frontMatterType || !paragraphType) return false;
+
+  const frontMatter = frontMatterType.create({ yaml: "", editing: true });
+  const paragraph = paragraphType.create();
+  const tr = state.tr.replaceWith(0, firstNode.nodeSize, [frontMatter, paragraph]);
+  tr.setSelection(NodeSelection.create(tr.doc, 0));
+  view.dispatch(tr.scrollIntoView());
+  event.preventDefault();
+  return true;
+}
 
 const TableOfContentsNode = Node.create({
   name: "tableOfContents",
@@ -734,6 +837,7 @@ const TyporaHorizontalRule = Node.create({
             const { state } = view;
             const { $from, empty } = state.selection;
             if (!empty || !$from.parent.isTextblock) return false;
+            if (isLeadingFrontMatterFence(state)) return false;
             if (!/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test($from.parent.textContent)) return false;
 
             event.preventDefault();
@@ -933,6 +1037,8 @@ const editor = useEditor({
     FootnotesNode,
     TyporaInlineCode,
     TyporaHorizontalRule,
+    FrontMatterInput,
+    FencedCodeBlockInput,
     TyporaSourceMarkers,
   ],
   content: renderMarkdownForEditor(appStore.currentContent),
@@ -941,6 +1047,8 @@ const editor = useEditor({
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
+      if (convertLeadingFrontMatter(view, event)) return true;
+      if (convertFencedCodeBlock(view, event)) return true;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
         event.preventDefault();
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));

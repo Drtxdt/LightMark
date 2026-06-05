@@ -362,9 +362,9 @@ sub {
 
 .front-matter-node {
   margin: 0.9rem 0;
-  border: 1px solid #e7e1d7;
+  border: 1px solid #ece7de;
   border-radius: 4px;
-  background: #f8f8f8;
+  background: #fafafa;
   color: #756f66;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.86rem;
@@ -435,8 +435,18 @@ sub {
 .front-matter-fence,
 .toc-node-label,
 .footnote-id {
-  color: #b9b3a8;
+  color: #d0cbc2;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.front-matter-fence {
+  font-size: 0.78rem;
+  line-height: 1.2;
+  user-select: none;
+}
+
+.front-matter-placeholder {
+  color: #b9b3a8 !important;
 }
 
 .toc-node {
@@ -511,6 +521,14 @@ sub {
 .dark .html-block-node {
   border-color: #3b3833;
   background: #1b1a18;
+}
+
+.dark .front-matter-fence {
+  color: #5c5850;
+}
+
+.dark .front-matter-placeholder {
+  color: #777169 !important;
 }
 
 .md-live-marker {
@@ -865,8 +883,10 @@ sub {
   background: #f3f4f4;
   border-radius: 3px;
   color: #333333;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;
-  padding: 0 2px;
+  line-height: 1.5;
+  padding: 1px 4px 0;
 }
 
 .ProseMirror code::before,
@@ -878,8 +898,9 @@ sub {
 
 .dark .ProseMirror code:not(pre code),
 .dark .markdown-preview code:not(pre code) {
-  background: #1b1a18;
-  color: #e8e5df;
+  border-color: #373a3f;
+  background: #24262b;
+  color: #e7e9ec;
 }
 
 .ProseMirror pre,
@@ -890,8 +911,11 @@ sub {
   background: #f8f8f8;
   color: #333333;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
-  padding: 8px 10px 6px;
+  font-size: 0.9em;
+  line-height: 1.55;
+  padding: 10px 12px 9px;
   overflow-x: auto;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 60%);
 }
 
 .ProseMirror pre code,
@@ -900,15 +924,18 @@ sub {
   background: transparent;
   color: inherit;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.9em;
+  font-size: 1em;
+  line-height: inherit;
   padding: 0;
+  white-space: pre;
 }
 
 .dark .ProseMirror pre,
 .dark .markdown-preview pre {
-  border-color: #2a2926;
-  background: #1b1a18;
-  color: #e8e5df;
+  border-color: #373a3f;
+  background: #202226;
+  color: #e7e9ec;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
 }
 
 .ProseMirror table,
@@ -983,7 +1010,7 @@ sub {
 }
 
 .dark .hljs {
-  color: #d4d4d4;
+  color: #e7e9ec;
 }
 
 .hljs-keyword,
@@ -991,50 +1018,101 @@ sub {
 .hljs-built_in,
 .hljs-tag,
 .hljs-doctag {
-  color: #569cd6;
+  color: #005cc5;
 }
 
 .hljs-name,
 .hljs-title,
 .hljs-section,
 .hljs-function .hljs-title {
-  color: #dcdcaa;
+  color: #6f42c1;
 }
 
 .hljs-string,
 .hljs-literal,
 .hljs-template-variable,
 .hljs-regexp {
-  color: #ce9178;
+  color: #032f62;
 }
 
 .hljs-attribute,
 .hljs-variable,
 .hljs-property,
 .hljs-params {
-  color: #9cdcfe;
+  color: #e36209;
 }
 
 .hljs-comment,
 .hljs-quote {
-  color: #6a9955;
+  color: #6a737d;
 }
 
 .hljs-meta,
 .hljs-subst {
-  color: #c586c0;
+  color: #735c0f;
 }
 
 .hljs-number,
 .hljs-symbol,
 .hljs-bullet,
 .hljs-link {
-  color: #b5cea8;
+  color: #005cc5;
 }
 
 .hljs-type,
 .hljs-class .hljs-title {
-  color: #4ec9b0;
+  color: #22863a;
+}
+
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-built_in,
+.dark .hljs-tag,
+.dark .hljs-doctag {
+  color: #79b8ff;
+}
+
+.dark .hljs-name,
+.dark .hljs-title,
+.dark .hljs-section,
+.dark .hljs-function .hljs-title {
+  color: #b392f0;
+}
+
+.dark .hljs-string,
+.dark .hljs-literal,
+.dark .hljs-template-variable,
+.dark .hljs-regexp {
+  color: #9ecbff;
+}
+
+.dark .hljs-attribute,
+.dark .hljs-variable,
+.dark .hljs-property,
+.dark .hljs-params {
+  color: #ffab70;
+}
+
+.dark .hljs-comment,
+.dark .hljs-quote {
+  color: #959da5;
+}
+
+.dark .hljs-meta,
+.dark .hljs-subst {
+  color: #f97583;
+}
+
+.dark .hljs-number,
+.dark .hljs-symbol,
+.dark .hljs-bullet,
+.dark .hljs-link {
+  color: #79b8ff;
+}
+
+.dark .hljs-type,
+.dark .hljs-class .hljs-title {
+  color: #85e89d;
 }
 .front-matter-node-editing {
   padding: 10px 0;
