@@ -76,25 +76,27 @@ function outlineIndent(level: number) {
 </script>
 
 <template>
-  <aside class="min-w-0 overflow-auto bg-paper-100/60 p-3 dark:bg-paper-900">
-    <div class="mb-3 flex items-center gap-1 rounded-md bg-paper-200/70 p-1 dark:bg-paper-800">
-      <button
-        class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
-        :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'files' }"
-        @click="activePane = 'files'"
-      >
-        文件
-      </button>
-      <button
-        class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
-        :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'outline' }"
-        @click="activePane = 'outline'"
-      >
-        大纲
-      </button>
+  <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-paper-100/60 dark:bg-paper-900">
+    <div class="flex-none p-3 pb-2">
+      <div class="flex items-center gap-1 rounded-md bg-paper-200/70 p-1 dark:bg-paper-800">
+        <button
+          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
+          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'files' }"
+          @click="activePane = 'files'"
+        >
+          文件
+        </button>
+        <button
+          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
+          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'outline' }"
+          @click="activePane = 'outline'"
+        >
+          大纲
+        </button>
+      </div>
     </div>
 
-    <section v-if="activePane === 'files'">
+    <section v-if="activePane === 'files'" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
       <div class="mb-3 flex items-center justify-between gap-2">
         <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">工作区</h2>
         <button class="btn-small" @click="openWorkspace()">打开</button>
@@ -104,7 +106,7 @@ function outlineIndent(level: number) {
       <FileTreeNode v-for="node in appStore.fileTree" :key="node.path" :node="node" @select="selectFile" />
     </section>
 
-    <section v-else>
+    <section v-else class="min-h-0 flex-1 overflow-auto px-3 pb-3">
       <h2 class="mb-3 text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">当前文档</h2>
       <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">暂无标题。</p>
       <button
