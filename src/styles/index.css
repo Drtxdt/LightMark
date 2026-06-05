@@ -644,6 +644,10 @@ sub {
   vertical-align: baseline;
 }
 
+.math-node-block-editing {
+  position: relative;
+}
+
 .math-block-editor {
   width: 100%;
   border: 0;
@@ -747,6 +751,12 @@ sub {
   font-size: 0.9em;
 }
 
+.math-node-inline.math-suggest-open .math-live-preview-inline {
+  top: calc(100% + 7.9rem);
+  max-height: 6.4rem;
+  overflow: auto;
+}
+
 .dark .math-live-preview-inline {
   background: #11100f;
   box-shadow: 0 10px 24px rgb(0 0 0 / 25%);
@@ -757,6 +767,12 @@ sub {
   margin: 0.55rem 0 0.05rem;
   border-top: 0;
   padding-top: 0.35rem;
+}
+
+.math-node-block.math-suggest-open .math-live-preview-block {
+  margin-top: 7.6rem;
+  max-height: 6.8rem;
+  overflow: auto;
 }
 
 .dark .math-live-preview-inline,
@@ -791,6 +807,90 @@ sub {
   color: #8d867c;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.86rem;
+}
+
+.math-suggest {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 40;
+  max-height: 7.25rem;
+  min-width: 17rem;
+  overflow: auto;
+  border: 1px solid #d5d0c6;
+  border-radius: 6px;
+  background: #fbfaf7;
+  box-shadow: 0 14px 34px rgb(31 30 27 / 14%);
+  padding: 0.2rem;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.math-node-block-editing .math-suggest {
+  top: 2.25rem;
+}
+
+.math-suggest-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0.34rem 0.48rem;
+  color: #4d4942;
+  text-align: left;
+  cursor: pointer;
+}
+
+.math-suggest-item:hover,
+.math-suggest-item-active {
+  background: #e9e4d8;
+  color: #333333;
+}
+
+.math-suggest-command {
+  color: #005cc5;
+  font-size: 0.83rem;
+}
+
+.math-suggest-label {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 0.78rem;
+  opacity: 0.8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.math-suggest-category {
+  color: #8d867c;
+  font-size: 0.68rem;
+}
+
+.dark .math-suggest {
+  border-color: #373a3f;
+  background: #202226;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 32%);
+}
+
+.dark .math-suggest-item {
+  color: #e7e9ec;
+}
+
+.dark .math-suggest-item:hover,
+.dark .math-suggest-item-active {
+  background: #30333a;
+}
+
+.dark .math-suggest-command {
+  color: #79b8ff;
+}
+
+.dark .math-suggest-category {
+  color: #959da5;
 }
 
 .mermaid-node {

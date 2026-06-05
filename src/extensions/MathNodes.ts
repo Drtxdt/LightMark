@@ -1,6 +1,12 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
 import katex from "katex";
+import {
+  createLatexSuggestController,
+  getContentEditableCaret,
+  setContentEditableCaret,
+  type LatexSuggestController,
+} from "./LatexSuggest";
 
 type MathAttrs = {
   tex: string;
@@ -177,6 +183,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
 
   let tex = attrs.tex || "";
   let editing = Boolean(attrs.editing);
+  let suggest: LatexSuggestController | null = null;
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
     if (typeof getPos !== "function") return;
@@ -193,6 +200,8 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   };
 
   const renderDisplay = () => {
+    suggest?.destroy();
+    suggest = null;
     dom.innerHTML = "";
     dom.className = "math-node math-node-inline";
     const rendered = document.createElement("span");
@@ -223,10 +232,26 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     const refresh = () => {
       tex = source.textContent || "";
       renderKatex(body, tex, false, "公式预览");
+      suggest?.sync();
     };
+
+    suggest = createLatexSuggestController({
+      host: dom,
+      anchor: source,
+      getValue: () => source.textContent || "",
+      setValue: (value) => {
+        source.textContent = value;
+        tex = value;
+      },
+      getCaret: () => getContentEditableCaret(source),
+      setCaret: (position) => setContentEditableCaret(source, position),
+      focus: () => focusEditableAtEnd(source),
+      onChange: refresh,
+    });
 
     source.addEventListener("input", refresh);
     source.addEventListener("keydown", (event) => {
+      if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && isCaretAtStart(source)) {
         event.preventDefault();
         deleteMathNode(editor, getPos);
@@ -248,6 +273,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       }
     });
     source.addEventListener("blur", () => {
+      window.setTimeout(() => suggest?.close(), 120);
       editing = false;
       updateAttrs({ tex, editing: false });
       renderDisplay();
@@ -292,7 +318,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       renderDisplay();
     },
     ignoreMutation: () => true,
-    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor")),
+    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest")),
   };
 }
 
@@ -303,6 +329,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
 
   let tex = attrs.tex || "";
   let editing = attrs.editing || !tex;
+  let suggest: LatexSuggestController | null = null;
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
     if (typeof getPos !== "function") return;
@@ -326,6 +353,8 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   };
 
   const renderDisplay = () => {
+    suggest?.destroy();
+    suggest = null;
     dom.innerHTML = "";
     dom.className = "math-node math-node-block";
     const rendered = document.createElement("div");
@@ -358,10 +387,26 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       textarea.rows = Math.max(2, tex.split(/\r?\n/).length);
       renderKatex(body, tex, true, "公式预览");
       updateAttrs({ tex, editing: true });
+      suggest?.sync();
     };
+
+    suggest = createLatexSuggestController({
+      host: dom,
+      anchor: textarea,
+      getValue: () => textarea.value,
+      setValue: (value) => {
+        textarea.value = value;
+        tex = value;
+      },
+      getCaret: () => textarea.selectionStart,
+      setCaret: (position) => textarea.setSelectionRange(position, position),
+      focus: () => textarea.focus(),
+      onChange: refresh,
+    });
 
     textarea.addEventListener("input", refresh);
     textarea.addEventListener("keydown", (event) => {
+      if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
         event.preventDefault();
         deleteMathNode(editor, getPos);
@@ -383,6 +428,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       }
     });
     textarea.addEventListener("blur", () => {
+      window.setTimeout(() => suggest?.close(), 120);
       editing = false;
       updateAttrs({ tex, editing: false });
       if (tex.trim()) renderDisplay();
@@ -427,7 +473,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       renderDisplay();
     },
     ignoreMutation: () => true,
-    stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
+    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest")),
   };
 }
 
