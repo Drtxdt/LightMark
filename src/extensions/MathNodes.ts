@@ -227,6 +227,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
 
     source.addEventListener("input", refresh);
     source.addEventListener("keydown", (event) => {
+      if (event.key === "Backspace" && !tex.trim() && isCaretAtStart(source)) {
+        event.preventDefault();
+        deleteMathNode(editor, getPos);
+        return;
+      }
       if (event.key === "Enter" || event.key === "Escape") {
         event.preventDefault();
         source.blur();
@@ -357,6 +362,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
 
     textarea.addEventListener("input", refresh);
     textarea.addEventListener("keydown", (event) => {
+      if (event.key === "Backspace" && !tex.trim() && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+        event.preventDefault();
+        deleteMathNode(editor, getPos);
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         textarea.blur();
@@ -419,6 +429,20 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
   };
+}
+
+function deleteMathNode(editor: any, getPos: NodeViewPosition) {
+  if (typeof getPos !== "function") return;
+  const pos = getPos();
+  if (typeof pos !== "number") return;
+  const { state } = editor.view;
+  const node = state.doc.nodeAt(pos);
+  if (!node) return;
+  const tr = state.tr.delete(pos, pos + node.nodeSize);
+  const selectionPos = Math.max(0, Math.min(pos, tr.doc.content.size));
+  tr.setSelection(TextSelection.near(tr.doc.resolve(selectionPos), -1));
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.view.focus();
 }
 
 function renderKatex(target: HTMLElement, tex: string, displayMode: boolean, emptyText = tex) {

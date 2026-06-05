@@ -147,33 +147,21 @@ const FrontMatterNode = Node.create({
       const renderDisplay = () => {
         dom.innerHTML = "";
         dom.className = "front-matter-node";
-        const open = document.createElement("div");
-        open.className = "front-matter-fence";
-        open.textContent = "---";
         const pre = document.createElement("pre");
         pre.className = yaml.trim() ? "" : "front-matter-placeholder";
         pre.textContent = yaml.trim() ? yaml : "请输入yaml";
-        const close = document.createElement("div");
-        close.className = "front-matter-fence";
-        close.textContent = "---";
-        dom.append(open, pre, close);
+        dom.append(pre);
       };
 
       const renderEditor = () => {
         dom.innerHTML = "";
         dom.className = "front-matter-node front-matter-node-editing";
-        const open = document.createElement("div");
-        open.className = "front-matter-fence";
-        open.textContent = "---";
         const textarea = document.createElement("textarea");
         textarea.className = "front-matter-editor";
         textarea.placeholder = "请输入yaml";
         textarea.value = yaml;
         textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
         textarea.spellcheck = false;
-        const close = document.createElement("div");
-        close.className = "front-matter-fence";
-        close.textContent = "---";
         textarea.addEventListener("input", () => {
           yaml = textarea.value;
           textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
@@ -183,7 +171,7 @@ const FrontMatterNode = Node.create({
           updateYaml();
           renderDisplay();
         });
-        dom.append(open, textarea, close);
+        dom.append(textarea);
         requestAnimationFrame(() => textarea.focus());
       };
 
