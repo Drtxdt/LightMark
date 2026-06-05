@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { appStore, applyLargeFileEdits, readLargeFileChunk } from "../../stores/appStore";
 import type { LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
@@ -15,17 +15,26 @@ type MarkdownBlock = {
   endLine: number;
   lines: string[];
   text: string;
+  html: string;
 };
 
 const lineHeight = 28;
-const viewportBuffer = 180;
-const chunkLineCount = 260;
+const viewportBufferLines = 90;
+const reloadMarginLines = 32;
+const chunkLineCount = 420;
+const maxRenderCacheEntries = 800;
 const scroller = ref<HTMLElement | null>(null);
-const loadedLines = ref<LineRecord[]>([]);
+const loadedLines = shallowRef<LineRecord[]>([]);
 const viewportStartLine = ref(0);
 const editingKey = ref("");
 const editingText = ref("");
 const loading = ref(false);
+const loadedStartLine = ref(0);
+const loadedEndLine = ref(0);
+let activeRequestId = 0;
+let queuedStartLine: number | null = null;
+let scrollFrame = 0;
+const renderCache = new Map<string, string>();
 
 const largeFile = computed(() => appStore.largeFile);
 const totalLines = computed(() => largeFile.value?.totalLines ?? 0);
@@ -38,9 +47,15 @@ const blocks = computed(() => buildBlocks(loadedLines.value));
 watch(
   () => largeFile.value?.sessionId,
   () => {
+    activeRequestId += 1;
+    queuedStartLine = null;
+    loading.value = false;
     loadedLines.value = [];
     viewportStartLine.value = 0;
+    loadedStartLine.value = 0;
+    loadedEndLine.value = 0;
     editingKey.value = "";
+    renderCache.clear();
     void loadAround(0);
   },
   { immediate: true },
@@ -52,29 +67,63 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
+  if (scrollFrame) cancelAnimationFrame(scrollFrame);
 });
 
 function onScroll() {
+  if (scrollFrame) cancelAnimationFrame(scrollFrame);
+  scrollFrame = requestAnimationFrame(syncViewportFromScroll);
+}
+
+function syncViewportFromScroll() {
+  scrollFrame = 0;
   if (!scroller.value) return;
-  const nextStart = Math.max(0, Math.floor(scroller.value.scrollTop / lineHeight) - viewportBuffer);
-  if (Math.abs(nextStart - viewportStartLine.value) < 60) return;
+  const visibleLine = Math.max(0, Math.floor(scroller.value.scrollTop / lineHeight));
+  const nextStart = Math.max(0, visibleLine - viewportBufferLines);
+  if (Math.abs(nextStart - viewportStartLine.value) < reloadMarginLines && isLineWindowCovered(visibleLine)) return;
   viewportStartLine.value = nextStart;
-  void loadAround(nextStart);
+  if (!isLineWindowCovered(visibleLine)) void loadAround(nextStart);
 }
 
 async function loadAround(startLine: number) {
-  if (!largeFile.value || loading.value) return;
+  if (!largeFile.value) return;
+  const sessionId = largeFile.value.sessionId;
+  const boundedStart = Math.max(0, Math.min(startLine, Math.max(largeFile.value.totalLines - 1, 0)));
+  if (loading.value) {
+    queuedStartLine = boundedStart;
+    return;
+  }
+  const requestId = ++activeRequestId;
   loading.value = true;
   try {
-    const boundedStart = Math.max(0, Math.min(startLine, Math.max(largeFile.value.totalLines - 1, 0)));
     const chunk = await readLargeFileChunk(boundedStart, chunkLineCount);
+    if (requestId !== activeRequestId || largeFile.value?.sessionId !== sessionId) return;
     const lines = chunk.text.split(/\r?\n/).slice(0, chunk.endLine - chunk.startLine);
+    loadedStartLine.value = chunk.startLine;
+    loadedEndLine.value = chunk.endLine;
     loadedLines.value = lines.map((text, index) => ({ line: chunk.startLine + index, text }));
+    pruneRenderCache();
   } catch (error) {
     appStore.statusMessage = String(error);
   } finally {
-    loading.value = false;
+    if (requestId === activeRequestId) {
+      loading.value = false;
+      const queued = queuedStartLine;
+      queuedStartLine = null;
+      if (queued !== null && !isLoadedStartNear(queued)) void loadAround(queued);
+    }
   }
+}
+
+function isLineWindowCovered(visibleLine: number) {
+  if (loadedLines.value.length === 0) return false;
+  const minLine = Math.max(0, visibleLine - reloadMarginLines);
+  const maxLine = Math.min(Math.max(totalLines.value - 1, 0), visibleLine + viewportBufferLines);
+  return minLine >= loadedStartLine.value && maxLine < loadedEndLine.value;
+}
+
+function isLoadedStartNear(startLine: number) {
+  return loadedLines.value.length > 0 && Math.abs(startLine - loadedStartLine.value) < reloadMarginLines;
 }
 
 function buildBlocks(lines: LineRecord[]) {
@@ -94,6 +143,7 @@ function buildBlocks(lines: LineRecord[]) {
       endLine,
       lines: blockLines,
       text: blockLines.join("\n"),
+      html: cachedRenderBlock(startLine, endLine, blockLines.join("\n")),
     });
     current = [];
   };
@@ -110,6 +160,7 @@ function buildBlocks(lines: LineRecord[]) {
         endLine: line.line,
         lines: [""],
         text: "",
+        html: "",
       });
       continue;
     }
@@ -198,6 +249,8 @@ function applyLocalEdit(edit: TextEdit) {
       .filter((line) => line.line > edit.endLine)
       .map((line) => ({ ...line, line: line.line + lineDelta })),
   ];
+  loadedEndLine.value = Math.max(loadedStartLine.value, loadedEndLine.value + lineDelta);
+  renderCache.clear();
 }
 
 function updateLargeOutline(edit: TextEdit, previousText: string) {
@@ -216,8 +269,25 @@ function updateLargeOutline(edit: TextEdit, previousText: string) {
   appStore.largeFile.totalLines = Math.max(0, appStore.largeFile.totalLines + lineDelta);
 }
 
-function renderBlock(block: MarkdownBlock) {
-  return renderMarkdownForEditor(block.text || "\n");
+function cachedRenderBlock(startLine: number, endLine: number, text: string) {
+  if (!text) return "";
+  const key = `${startLine}-${endLine}:${text}`;
+  const cached = renderCache.get(key);
+  if (cached !== undefined) return cached;
+  const html = renderMarkdownForEditor(text);
+  renderCache.set(key, html);
+  return html;
+}
+
+function pruneRenderCache() {
+  if (renderCache.size <= maxRenderCacheEntries) return;
+  const overflow = renderCache.size - maxRenderCacheEntries;
+  let removed = 0;
+  for (const key of renderCache.keys()) {
+    renderCache.delete(key);
+    removed += 1;
+    if (removed >= overflow) break;
+  }
 }
 
 function taskLine(block: MarkdownBlock) {
@@ -285,7 +355,7 @@ function handleJumpLine(event: CustomEvent<number>) {
               @blur="commitEditing(block)"
               @keydown.ctrl.enter.prevent="commitEditing(block)"
             />
-            <div v-else class="large-doc-render prose prose-stone max-w-none dark:prose-invert" @click="taskLine(block) !== null && toggleTask(taskLine(block)!)" v-html="renderBlock(block)" />
+            <div v-else class="large-doc-render prose prose-stone max-w-none dark:prose-invert" @click="taskLine(block) !== null && toggleTask(taskLine(block)!)" v-html="block.html || '&nbsp;'" />
           </article>
         </div>
       </div>
@@ -296,12 +366,14 @@ function handleJumpLine(event: CustomEvent<number>) {
 <style scoped>
 .large-doc-scroll {
   scrollbar-gutter: stable;
+  overflow-anchor: none;
 }
 
 .large-doc-block {
   min-height: 28px;
   border-radius: 6px;
   padding: 2px 8px;
+  contain: layout paint;
 }
 
 .large-doc-block:hover {
@@ -311,6 +383,10 @@ function handleJumpLine(event: CustomEvent<number>) {
 .large-doc-render :deep(*) {
   margin-top: 0.35em;
   margin-bottom: 0.35em;
+}
+
+.large-doc-render {
+  min-height: 24px;
 }
 
 .large-doc-render :deep(pre) {
