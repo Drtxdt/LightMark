@@ -37,6 +37,7 @@ const contextMenu = ref({
 const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
+const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
@@ -1037,12 +1038,16 @@ const editor = useEditor({
     handleKeyDown(view, event) {
       if (convertLeadingFrontMatter(view, event)) return true;
       if (convertFencedCodeBlock(view, event)) return true;
+      if (event.key === "Backspace" && exitEmptyStoredFormattingOnBackspace(view)) {
+        event.preventDefault();
+        return true;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
         event.preventDefault();
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
         return true;
       }
-      if (event.key === "ArrowRight" && moveOutOfMarkAtRightBoundary(view, ["bold", "strike"])) {
+      if (event.key === "ArrowRight" && moveOutOfMarkAtRightBoundary(view, typoraInlineMarkNames)) {
         event.preventDefault();
         return true;
       }
@@ -1067,6 +1072,9 @@ const editor = useEditor({
       return false;
     },
     handleDOMEvents: {
+      mousedown(view, event) {
+        return convertPendingMarkdownBeforeMouseSelection(view, event as MouseEvent);
+      },
       contextmenu(view, event) {
         const mouseEvent = event as MouseEvent;
         const target = getEventElement(mouseEvent);
@@ -1798,6 +1806,34 @@ function getEventElement(event: Event) {
   return null;
 }
 
+function convertPendingMarkdownBeforeMouseSelection(view: any, event: MouseEvent) {
+  if (event.button !== 0 || !view.state.selection.empty) return false;
+
+  const clickPos = view.posAtCoords({ left: event.clientX, top: event.clientY });
+  if (!clickPos || !isClickOutsideSelectionBlock(view.state, clickPos.pos)) return false;
+
+  let tr =
+    convertMarkdownHeading(view.state, { force: true, onlySelectionBlock: true }) ||
+    convertInlineCodeSyntax(view.state, { onlySelectionBlock: true }) ||
+    convertInlineMarkdownSyntax(view.state, { onlySelectionBlock: true });
+  if (!tr) return false;
+
+  const mappedPos = Math.max(0, Math.min(tr.mapping.map(clickPos.pos, clickPos.pos >= view.state.selection.from ? 1 : -1), tr.doc.content.size));
+  tr = tr.setSelection(TextSelection.near(tr.doc.resolve(mappedPos), clickPos.pos >= view.state.selection.from ? 1 : -1));
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+  event.preventDefault();
+  return true;
+}
+
+function isClickOutsideSelectionBlock(state: any, pos: number) {
+  const { $from } = state.selection;
+  if (!$from.parent.isTextblock) return false;
+  const blockFrom = $from.before();
+  const blockTo = $from.after();
+  return pos <= blockFrom || pos >= blockTo;
+}
+
 function scrollInternalLink(href: string) {
   if (!href.startsWith("#")) return;
   const id = decodeURIComponent(href.slice(1));
@@ -1820,7 +1856,8 @@ function getActiveMarkRange(state: any, markName: string) {
   const { $from } = state.selection;
   if (!$from.parent.isTextblock) return null;
 
-  const activeMark = (state.storedMarks || $from.marks()).find((mark: any) => mark.type === markType);
+  const storedMark = (state.storedMarks || []).find((mark: any) => mark.type === markType);
+  const activeMark = storedMark || $from.marks().find((mark: any) => mark.type === markType);
   if (!activeMark) return null;
 
   const parentStart = $from.start();
@@ -1849,25 +1886,53 @@ function getActiveMarkRange(state: any, markName: string) {
   const from = parentStart + children[startIndex].offset;
   const endChild = children[endIndex];
   const to = parentStart + endChild.offset + endChild.node.nodeSize;
+  const atRightBoundary = cursorOffset === endChild.offset + endChild.node.nodeSize;
+  if (!storedMark && atRightBoundary) return null;
   return { from, to, mark: activeMark };
 }
 
 function moveOutOfMarkAtRightBoundary(view: any, markNames: string[]) {
   const { state } = view;
   if (!state.selection.empty) return false;
+  const { $from } = state.selection;
+  if (!$from.parent.isTextblock) return false;
 
   for (const markName of markNames) {
-    const range = getActiveMarkRange(state, markName);
-    if (!range || range.to !== state.selection.from) continue;
-
     const markType = state.schema.marks[markName];
-    let tr = state.tr.setSelection(TextSelection.create(state.doc, range.to));
-    if (markType) tr = tr.removeStoredMark(markType);
+    if (!markType) continue;
+
+    const cursorOffset = $from.parentOffset;
+    let boundary = false;
+    $from.parent.forEach((node: any, offset: number) => {
+      if (boundary || cursorOffset !== offset + node.nodeSize) return;
+      boundary = node.marks.some((mark: any) => mark.type === markType);
+    });
+    if (!boundary) continue;
+
+    let tr = state.tr.setSelection(TextSelection.create(state.doc, state.selection.from));
+    tr = tr.removeStoredMark(markType).setStoredMarks([]);
     view.dispatch(tr.scrollIntoView());
     return true;
   }
 
   return false;
+}
+
+function exitEmptyStoredFormattingOnBackspace(view: any) {
+  const { state } = view;
+  if (!state.selection.empty) return false;
+  const activeStoredMarks = (state.storedMarks || []).filter((mark: any) => typoraInlineMarkNames.includes(mark.type.name));
+  if (!activeStoredMarks.length) return false;
+
+  const hasRenderedContent = activeStoredMarks.some((mark: any) => getActiveMarkRange(state, mark.type.name));
+  if (hasRenderedContent) return false;
+
+  let tr = state.tr.setStoredMarks([]);
+  activeStoredMarks.forEach((mark: any) => {
+    tr = tr.removeStoredMark(mark.type);
+  });
+  view.dispatch(tr.scrollIntoView());
+  return true;
 }
 
 function clearStoredMarks(view: any, markNames: string[]) {
@@ -1896,7 +1961,8 @@ function createSourceMarker(text: string) {
   return marker;
 }
 
-function convertInlineMarkdownSyntax(state: any) {
+function convertInlineMarkdownSyntax(state: any, options: { onlySelectionBlock?: boolean } = {}) {
+  const { onlySelectionBlock = false } = options;
   const linkMark = state.schema.marks.link;
   const converters = [
     {
@@ -1945,10 +2011,13 @@ function convertInlineMarkdownSyntax(state: any) {
 
   let tr = state.tr;
   let converted = false;
+  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
+  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
 
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const text = node.textContent;
     for (const converter of converters) {
@@ -1964,6 +2033,7 @@ function convertInlineMarkdownSyntax(state: any) {
 
       tr = tr.insertText(label, from, to);
       tr = tr.addMark(from, from + label.length, converter.mark.create(converter.attrs(match)));
+      tr = finishInlineMarkdownConversion(tr, state, from, to, from + label.length, converter.mark);
       converted = true;
       return false;
     }
@@ -1984,18 +2054,22 @@ function convertPendingInlineMarkdown(view: any) {
   return converted;
 }
 
-function convertInlineCodeSyntax(state: any) {
+function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boolean } = {}) {
+  const { onlySelectionBlock = false } = options;
   const codeMark = state.schema.marks.code;
   if (!codeMark) return null;
 
   let tr = state.tr;
   let converted = false;
   const inlineCodePattern = /`([^`\n]+)`/g;
+  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
+  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
 
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock) return true;
     if (node.type.name === "codeBlock") return false;
+    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const text = node.textContent;
     inlineCodePattern.lastIndex = 0;
@@ -2008,11 +2082,20 @@ function convertInlineCodeSyntax(state: any) {
     const to = pos + 1 + match.index + full.length;
     tr = tr.insertText(code, from, to);
     tr = tr.addMark(from, from + code.length, codeMark.create());
+    tr = finishInlineMarkdownConversion(tr, state, from, to, from + code.length, codeMark);
     converted = true;
     return false;
   });
 
   return converted ? tr : null;
+}
+
+function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: number, selectionPos: number, markType: any) {
+  if (!state.selection.empty || state.selection.from < from || state.selection.from > to) return tr;
+
+  tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos));
+  if (markType) tr = tr.removeStoredMark(markType);
+  return tr.setStoredMarks([]);
 }
 
 function convertMarkdownHeading(
