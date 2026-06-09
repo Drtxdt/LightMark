@@ -93,6 +93,19 @@ try {
 ---
 
 下文`;
+  const rawHtmlSample = `输入框：<input type="checkbox" checked>
+
+未闭合标签测试：<span style="color:red;">这里没有闭合
+
+<!-- this is a comment -->
+
+代码里的公式：\`$E = mc^2$\`
+
+<pre>
+function hello() {
+  console.log("Hello from pre");
+}
+</pre>`;
 
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
@@ -103,6 +116,8 @@ try {
   const blockPreviewHtml = renderMarkdown(blockHtmlSample);
   const horizontalEditorHtml = renderMarkdownForEditor(horizontalRuleSample);
   const horizontalPreviewHtml = renderMarkdown(horizontalRuleSample);
+  const rawEditorHtml = renderMarkdownForEditor(rawHtmlSample);
+  const rawPreviewHtml = renderMarkdown(rawHtmlSample);
   const examplePath = path.resolve("example/inline-html-test.md");
   const exampleMarkdown = fs.existsSync(examplePath) ? fs.readFileSync(examplePath, "utf8") : "";
   const exampleEditorHtml = exampleMarkdown ? renderMarkdownForEditor(exampleMarkdown) : "";
@@ -160,10 +175,21 @@ try {
     [blockPreviewHtml.includes("<p>段落后面继续正常 Markdown。</p>"), "preview keeps markdown after block html outside html block"],
     [horizontalEditorHtml.includes("<hr"), "editor renders markdown horizontal rules"],
     [horizontalPreviewHtml.includes("<hr"), "preview renders markdown horizontal rules"],
+    [rawEditorHtml.includes('data-type="raw-html"'), "editor preserves unsupported html as raw placeholders"],
+    [rawEditorHtml.includes('&lt;input type=&quot;checkbox&quot; checked&gt;'), "editor stores raw input source"],
+    [rawEditorHtml.includes('&lt;!-- this is a comment --&gt;'), "editor stores html comments as raw source"],
+    [rawPreviewHtml.includes("raw-html-token") && rawPreviewHtml.includes("&lt;input"), "preview renders unsupported input as muted raw html"],
+    [rawPreviewHtml.includes("raw-html-comment") && rawPreviewHtml.includes("&lt;!-- this is a comment --&gt;"), "preview renders html comments as muted comments"],
+    [rawPreviewHtml.includes("&lt;span style=\"color:red;\"&gt;这里没有闭合"), "preview keeps unclosed tags as raw html"],
+    [rawPreviewHtml.includes("<code>$E = mc^2$</code>"), "preview keeps dollar math inside inline code"],
+    [rawEditorHtml.includes("console.log(&quot;Hello from pre&quot;);"), "editor html block stores quotes with one attribute escape"],
+    [!rawEditorHtml.includes("&amp;quot;") && !rawPreviewHtml.includes("&amp;quot;"), "html block rendering does not amplify quote entities"],
     [!exampleEditorHtml || exampleEditorHtml.includes('data-type="inline-html"'), "example renders inline html as editor placeholders"],
     [!exampleEditorHtml || !/&amp;(?:amp;)*lt;span/.test(exampleEditorHtml), "example editor html does not repeatedly escape spans"],
     [!examplePreviewHtml || !/&amp;(?:amp;)*lt;span/.test(examplePreviewHtml), "example preview html does not repeatedly escape spans"],
     [!examplePreviewHtml || examplePreviewHtml.includes("<b>HTML 加粗</b>"), "example preview renders inline bold html"],
+    [!examplePreviewHtml || examplePreviewHtml.includes("<code>$E = mc^2$</code>"), "example preview keeps code math as inline code"],
+    [!examplePreviewHtml || examplePreviewHtml.includes("raw-html-comment"), "example preview renders html comments safely"],
     [!examplePreviewHtml || !/\s(?:href|src|action)=["']javascript:/i.test(examplePreviewHtml), "example preview removes dangerous javascript urls"],
     [!examplePreviewHtml || !examplePreviewHtml.includes("<script"), "example preview does not emit script tags"],
   ];

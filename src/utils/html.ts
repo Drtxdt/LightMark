@@ -24,7 +24,7 @@ const inlineHtmlTags = new Set([
   "img",
 ]);
 
-const formHtmlTags = new Set(["input", "button", "select", "option", "label"]);
+const rawHtmlTags = new Set(["script", "iframe", "object", "embed", "input", "button", "select", "option", "label"]);
 
 const blockHtmlTags = new Set([
   "p",
@@ -54,7 +54,7 @@ const blockHtmlTags = new Set([
   "hr",
 ]);
 
-const voidTags = new Set(["br", "img", "hr", "input"]);
+const voidTags = new Set(["br", "img", "hr"]);
 const globalAttributes = new Set(["class", "id", "title", "style"]);
 const tagAttributes: Record<string, Set<string>> = {
   a: new Set(["href"]),
@@ -90,34 +90,64 @@ export function escapeHtml(value: string) {
   });
 }
 
+function escapeHtmlText(value: string) {
+  return value.replace(/[&<>]/g, (char) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+    };
+    return entities[char];
+  });
+}
+
 export function escapeAttribute(value: string) {
   return escapeHtml(value).replace(/\r?\n/g, "&#10;");
+}
+
+export function decodeHtmlEntities(value: string) {
+  let next = value;
+  for (let index = 0; index < 4; index += 1) {
+    const decoded = next
+      .replace(/&#10;/g, "\n")
+      .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+      .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+    if (decoded === next) break;
+    next = decoded;
+  }
+  return next;
 }
 
 export function sanitizeInlineHtmlSource(html: string) {
   return sanitizeHtmlFragment(html, { inlineOnly: true });
 }
 
-export function sanitizeHtmlFragment(html: string, options: { inlineOnly?: boolean } = {}) {
-  const allowedTags = options.inlineOnly ? inlineHtmlTags : new Set([...inlineHtmlTags, ...blockHtmlTags, ...formHtmlTags]);
+export function sanitizeHtmlFragment(html: string, options: { inlineOnly?: boolean; displayRaw?: boolean } = {}) {
+  const allowedTags = options.inlineOnly ? inlineHtmlTags : new Set([...inlineHtmlTags, ...blockHtmlTags]);
   let output = "";
   let cursor = 0;
   const tagPattern = /<!--[\s\S]*?-->|<\/?\s*[a-zA-Z][\w:-]*(?:\s+[^<>]*?)?\s*\/?>/g;
   let match = tagPattern.exec(html);
 
   while (match) {
-    output += escapeHtml(html.slice(cursor, match.index));
-    output += sanitizeTag(match[0], allowedTags);
+    output += escapeHtmlText(decodeHtmlEntities(html.slice(cursor, match.index)));
+    output += sanitizeTag(match[0], allowedTags, Boolean(options.displayRaw));
     cursor = match.index + match[0].length;
     match = tagPattern.exec(html);
   }
 
-  output += escapeHtml(html.slice(cursor));
+  output += escapeHtmlText(decodeHtmlEntities(html.slice(cursor)));
   return output;
 }
 
 export function renderInlineMarkdownInHtml(html: string, options: { inlineOnly?: boolean } = {}) {
-  const sanitized = sanitizeHtmlFragment(html, options);
+  const sanitized = sanitizeHtmlFragment(html, { ...options, displayRaw: true });
   let output = "";
   let cursor = 0;
   const tagPattern = /<\/?\s*([a-zA-Z][\w:-]*)(?:\s+[^<>]*?)?\s*\/?>/g;
@@ -186,6 +216,69 @@ export function findInlineHtmlMatch(text: string): InlineHtmlMatch | null {
   return null;
 }
 
+export function findRawHtmlMatch(text: string): InlineHtmlMatch | null {
+  const comment = /<!--[\s\S]*?-->/g.exec(text);
+  let best: InlineHtmlMatch | null = comment ? { from: comment.index, to: comment.index + comment[0].length, html: comment[0] } : null;
+
+  const rawTagPattern = /<\s*([a-zA-Z][\w:-]*)(?:\s+[^<>]*?)?\s*\/?>/g;
+  let match = rawTagPattern.exec(text);
+  while (match) {
+    const tag = match[1].toLowerCase();
+    const raw = match[0];
+    if (isLightMarkInternalHtml(raw) || (!rawHtmlTags.has(tag) && inlineHtmlTags.has(tag))) {
+      const candidate = findUnclosedInlineHtml(text, match.index, tag, raw);
+      if (candidate && (!best || candidate.from < best.from)) best = candidate;
+      match = rawTagPattern.exec(text);
+      continue;
+    }
+
+    if (rawHtmlTags.has(tag) || (!inlineHtmlTags.has(tag) && !blockHtmlTags.has(tag))) {
+      const complete = findCompleteRawHtml(text, match.index, tag, raw);
+      const candidate = complete || { from: match.index, to: match.index + raw.length, html: raw };
+      if (!best || candidate.from < best.from) best = candidate;
+      rawTagPattern.lastIndex = candidate.to;
+      match = rawTagPattern.exec(text);
+      continue;
+    }
+
+    match = rawTagPattern.exec(text);
+  }
+
+  return best;
+}
+
+function findUnclosedInlineHtml(text: string, from: number, tag: string, raw: string): InlineHtmlMatch | null {
+  if (!inlineHtmlTags.has(tag) || voidTags.has(tag) || /\/\s*>$/.test(raw)) return null;
+  const lineEnd = text.indexOf("\n", from);
+  const to = lineEnd === -1 ? text.length : lineEnd;
+  const source = text.slice(from, to);
+  const closePattern = new RegExp(`<\\/\\s*${escapeRegExp(tag)}\\s*>`, "i");
+  if (closePattern.test(source)) return null;
+  return { from, to, html: source };
+}
+
+function findCompleteRawHtml(text: string, from: number, tag: string, raw: string): InlineHtmlMatch | null {
+  if (/\/\s*>$/.test(raw) || rawHtmlTags.has(tag)) {
+    if (tag === "script" || tag === "iframe" || tag === "object" || tag === "select") {
+      const closePattern = new RegExp(`<\\/\\s*${escapeRegExp(tag)}\\s*>`, "i");
+      const rest = text.slice(from + raw.length);
+      const close = closePattern.exec(rest);
+      if (close) {
+        const to = from + raw.length + close.index + close[0].length;
+        return { from, to, html: text.slice(from, to) };
+      }
+    }
+    return { from, to: from + raw.length, html: raw };
+  }
+
+  const closePattern = new RegExp(`<\\/\\s*${escapeRegExp(tag)}\\s*>`, "i");
+  const rest = text.slice(from + raw.length);
+  const close = closePattern.exec(rest);
+  if (!close) return null;
+  const to = from + raw.length + close.index + close[0].length;
+  return { from, to, html: text.slice(from, to) };
+}
+
 function isLightMarkInternalHtml(html: string) {
   return /\sdata-(?:type|task-item|footnote|markdown|tex|code|yaml|html|ref-id)\s*=/i.test(html);
 }
@@ -198,24 +291,48 @@ export function isInlineHtmlTag(tag: string) {
   return inlineHtmlTags.has(tag.toLowerCase());
 }
 
-function sanitizeTag(rawTag: string, allowedTags: Set<string>) {
-  if (rawTag.startsWith("<!--")) return "";
+export function isRawHtmlSource(html: string) {
+  return Boolean(findRawHtmlMatch(html));
+}
+
+export function isRawHtmlToken(html: string) {
+  const trimmed = html.trim();
+  if (trimmed.startsWith("<!--")) return true;
+  const tag = trimmed.match(/^<\/?\s*([a-zA-Z][\w:-]*)/)?.[1]?.toLowerCase();
+  return Boolean(tag && (rawHtmlTags.has(tag) || (!inlineHtmlTags.has(tag) && !blockHtmlTags.has(tag))));
+}
+
+export function rawHtmlKind(html: string) {
+  return html.trimStart().startsWith("<!--") ? "comment" : "html";
+}
+
+export function renderRawHtmlSource(html: string) {
+  return renderRawHtmlToken(html, rawHtmlKind(html));
+}
+
+function sanitizeTag(rawTag: string, allowedTags: Set<string>, displayRaw: boolean) {
+  if (rawTag.startsWith("<!--")) return displayRaw ? renderRawHtmlToken(rawTag, "comment") : "";
 
   const tagMatch = rawTag.match(/^<\s*(\/?)\s*([a-zA-Z][\w:-]*)([\s\S]*?)\s*(\/?)>$/);
   if (!tagMatch) return escapeHtml(rawTag);
 
   const closing = Boolean(tagMatch[1]);
   const tag = tagMatch[2].toLowerCase();
-  if (!allowedTags.has(tag)) return escapeHtml(rawTag);
+  if (!allowedTags.has(tag)) return displayRaw ? renderRawHtmlToken(rawTag, "html") : escapeHtml(rawTag);
 
   if (closing) {
     if (voidTags.has(tag)) return "";
     return `</${tag}>`;
   }
 
-  const attrs = sanitizeAttributes(tag, tagMatch[3]);
+  const attrs = sanitizeAttributes(tag, decodeHtmlEntities(tagMatch[3]));
   const suffix = voidTags.has(tag) || Boolean(tagMatch[4]) ? " />" : ">";
   return `<${tag}${attrs}${suffix}`;
+}
+
+function renderRawHtmlToken(source: string, kind: string) {
+  const className = kind === "comment" ? "raw-html-token raw-html-comment" : "raw-html-token";
+  return `<span class="${className}">${escapeHtmlText(decodeHtmlEntities(source))}</span>`;
 }
 
 function sanitizeAttributes(tag: string, rawAttributes: string) {
@@ -225,7 +342,7 @@ function sanitizeAttributes(tag: string, rawAttributes: string) {
 
   while (match) {
     const name = match[1].toLowerCase();
-    const value = match[2] ?? match[3] ?? match[4] ?? "";
+    const value = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
     if (!isAllowedAttribute(tag, name)) {
       match = attrPattern.exec(rawAttributes);
       continue;

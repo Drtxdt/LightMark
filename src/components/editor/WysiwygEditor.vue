@@ -19,10 +19,10 @@ import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
-import { containsInlineHtml, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
+import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
-import { InlineHtmlNode } from "../../extensions/InlineHtmlNode";
+import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
 
 const lowlight = createLowlight(all);
@@ -430,10 +430,10 @@ const HtmlBlockNode = Node.create({
     return {
       html: {
         default: "",
-        parseHTML: (element) => sanitizeHtmlFragment(element.getAttribute("data-html") || ""),
+        parseHTML: (element) => sanitizeHtmlFragment(decodeHtmlEntities(element.getAttribute("data-html") || "")),
         renderHTML: (attributes) => ({
           "data-type": "html-block",
-          "data-html": sanitizeHtmlFragment(attributes.html || ""),
+          "data-html": sanitizeHtmlFragment(decodeHtmlEntities(attributes.html || "")),
         }),
       },
       editing: {
@@ -455,7 +455,7 @@ const HtmlBlockNode = Node.create({
     return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
       dom.contentEditable = "false";
-      let html = sanitizeHtmlFragment(node.attrs.html || "");
+      let html = sanitizeHtmlFragment(decodeHtmlEntities(node.attrs.html || ""));
       let editing = Boolean(node.attrs.editing);
       let committing = false;
 
@@ -525,7 +525,7 @@ const HtmlBlockNode = Node.create({
       return {
         dom,
         update(nextNode: any) {
-          html = sanitizeHtmlFragment(nextNode.attrs.html || "");
+          html = sanitizeHtmlFragment(decodeHtmlEntities(nextNode.attrs.html || ""));
           editing = Boolean(nextNode.attrs.editing);
           editing ? renderEditor() : renderDisplay();
           return true;
@@ -944,7 +944,7 @@ turndown.addRule("tableOfContents", {
 turndown.addRule("htmlBlock", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "html-block",
   replacement: (_content, node) => {
-    const html = node instanceof HTMLElement ? node.dataset.html || node.textContent || "" : "";
+    const html = node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
     return `\n\n${sanitizeHtmlFragment(html).trim()}\n\n`;
   },
 });
@@ -952,8 +952,15 @@ turndown.addRule("htmlBlock", {
 turndown.addRule("inlineHtml", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-html",
   replacement: (_content, node) => {
-    const html = node instanceof HTMLElement ? node.dataset.html || node.textContent || "" : "";
+    const html = node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
     return sanitizeInlineHtmlSource(html);
+  },
+});
+
+turndown.addRule("rawHtml", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "raw-html",
+  replacement: (_content, node) => {
+    return node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
   },
 });
 
@@ -1036,6 +1043,7 @@ const editor = useEditor({
     MarkdownHeading,
     InlineMath,
     InlineHtmlNode,
+    RawHtmlNode,
     BlockMath,
     MermaidNode,
     FootnoteRefNode,

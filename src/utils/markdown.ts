@@ -5,8 +5,12 @@ import {
   escapeAttribute,
   escapeHtml,
   findInlineHtmlMatch,
+  findRawHtmlMatch,
   isInlineHtmlTag,
+  isRawHtmlToken,
+  rawHtmlKind,
   renderInlineMarkdownInHtml,
+  renderRawHtmlSource,
   sanitizeHtmlFragment,
   sanitizeInlineHtmlSource,
 } from "./html";
@@ -33,7 +37,13 @@ const editorMd = new MarkdownIt({
 installLightMarkMarkdown(editorMd, { preserveLightMarkInternal: true });
 
 export function renderMarkdown(markdown: string) {
-  return md.render(enhanceMarkdownForRender(markdown));
+  const placeholders: string[] = [];
+  const stash = (html: string) => {
+    const token = `@@LIGHTMARK_PLACEHOLDER_${placeholders.length}@@`;
+    placeholders.push(html);
+    return token;
+  };
+  return restorePlaceholders(md.render(enhanceMarkdownForRender(markdown, stash)), placeholders);
 }
 
 export function renderMarkdownForEditor(markdown: string) {
@@ -93,6 +103,7 @@ function markSpecialBlocksForEditor(markdown: string) {
   next = protectInlineMath(next, stash);
   next = protectHtmlBlocks(next, stash);
   next = protectInlineHtml(next, stash);
+  next = protectRawHtml(next, stash);
 
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
@@ -129,12 +140,13 @@ function restorePlaceholders(value: string, placeholders: string[]) {
   return next;
 }
 
-function enhanceMarkdownForRender(markdown: string) {
+function enhanceMarkdownForRender(markdown: string, stash?: (html: string) => string) {
   let next = normalizeLatexMathDelimiters(markdown).replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
   next = convertFootnotes(next);
+  next = renderRawHtmlForPreview(next, stash);
   next = convertTaskItems(next);
   next = convertDefinitionLists(next);
   return next;
@@ -147,11 +159,13 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
   instance.renderer.rules.html_inline = (tokens, idx) => {
     const content = tokens[idx].content;
     if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    if (isRawHtmlToken(content)) return renderRawHtmlSource(content);
     return renderInlineMarkdownInHtml(content, { inlineOnly: true });
   };
   instance.renderer.rules.html_block = (tokens, idx) => {
     const content = tokens[idx].content;
     if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    if (isRawHtmlToken(content)) return renderRawHtmlSource(content);
     return renderInlineMarkdownInHtml(content);
   };
 
@@ -183,7 +197,7 @@ function convertTaskItems(markdown: string) {
 }
 
 function isLightMarkInternalPlaceholder(html: string) {
-  return /\sdata-type="(?:front-matter|mermaid|block-math|inline-math|inline-html|html-block|footnote-ref|footnotes|table-of-contents|horizontal-rule)"/.test(html);
+  return /\sdata-type="(?:front-matter|mermaid|block-math|inline-math|inline-html|raw-html|html-block|footnote-ref|footnotes|table-of-contents|horizontal-rule)"/.test(html);
 }
 
 function convertDefinitionLists(markdown: string) {
@@ -428,12 +442,36 @@ function renderInlineMarkdownInsideMark(value: string) {
   });
 }
 
+function protectRawHtml(markdown: string, stash: (html: string) => string) {
+  let next = markdown;
+  let match = findRawHtmlMatch(next);
+  while (match) {
+    const kind = rawHtmlKind(match.html);
+    const placeholder = stash(`<span data-type="raw-html" data-kind="${kind}" data-html="${escapeAttribute(match.html)}"></span>`);
+    next = `${next.slice(0, match.from)}${placeholder}${next.slice(match.to)}`;
+    match = findRawHtmlMatch(next);
+  }
+  return next;
+}
+
+function renderRawHtmlForPreview(markdown: string, stash?: (html: string) => string) {
+  let next = markdown;
+  let match = findRawHtmlMatch(next);
+  while (match) {
+    const raw = renderRawHtmlSource(match.html);
+    next = `${next.slice(0, match.from)}${stash ? stash(raw) : raw}${next.slice(match.to)}`;
+    match = findRawHtmlMatch(next);
+  }
+  return next;
+}
+
 function collectHtmlBlock(lines: string[], startIndex: number) {
   const first = lines[startIndex];
   const open = first.match(/^ {0,3}<([a-zA-Z][\w-]*)(?:\s[^>]*)?>\s*$/) || first.match(/^ {0,3}<([a-zA-Z][\w-]*)(?:\s[^>]*)?>/);
   if (!open) return null;
 
   const tag = open[1].toLowerCase();
+  if (isRawHtmlBlockTag(tag)) return null;
   if (isInlineHtmlTag(tag)) return null;
   if (isHtmlVoidBlock(tag) || /\/>\s*$/.test(first)) return { html: first, endIndex: startIndex };
 
@@ -465,7 +503,11 @@ function collectHtmlBlock(lines: string[], startIndex: number) {
 }
 
 function isHtmlVoidBlock(tag: string) {
-  return tag === "hr" || tag === "input" || tag === "embed";
+  return tag === "hr";
+}
+
+function isRawHtmlBlockTag(tag: string) {
+  return /^(script|iframe|object|embed|input|button|select|option|label)$/i.test(tag);
 }
 
 const emojiMap: Record<string, string> = {

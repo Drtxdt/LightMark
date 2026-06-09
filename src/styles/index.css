@@ -439,9 +439,9 @@ sub {
 
 .html-block-label {
   color: #b9b3a8;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   letter-spacing: 0;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.2rem;
 }
 
 .html-block-rendered {
@@ -455,18 +455,34 @@ sub {
   min-height: 5rem;
   resize: vertical;
   border: 0;
-  border-radius: 8px;
-  background: #1b1a18;
-  color: #e8e5df;
+  border-left: 2px solid #e7e1d7;
+  border-radius: 0;
+  background: transparent;
+  color: #5b4630;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9rem;
   line-height: 1.6;
   outline: none;
-  padding: 16px;
+  padding: 0.15rem 0 0.15rem 0.75rem;
 }
 
 .dark .html-block-editor {
-  background: #11100f;
+  border-left-color: #3b3833;
+  background: transparent;
+  color: #d6b985;
+}
+
+.raw-html-node,
+.raw-html-token {
+  color: #9b9488;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.raw-html-node-comment,
+.raw-html-comment {
+  color: #a8b08c;
 }
 
 .inline-html-node {
@@ -674,6 +690,16 @@ sub {
 
 .dark .inline-html-node:hover {
   background: #1b1a18;
+}
+
+.dark .raw-html-node,
+.dark .raw-html-token {
+  color: #8b8377;
+}
+
+.dark .raw-html-node-comment,
+.dark .raw-html-comment {
+  color: #8d9b78;
 }
 
 .dark .inline-html-source-editor {

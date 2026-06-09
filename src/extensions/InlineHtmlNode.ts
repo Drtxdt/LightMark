@@ -1,6 +1,13 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
-import { findInlineHtmlMatch, renderInlineMarkdownInHtml, sanitizeInlineHtmlSource } from "../utils/html";
+import {
+  decodeHtmlEntities,
+  findInlineHtmlMatch,
+  findRawHtmlMatch,
+  rawHtmlKind,
+  renderInlineMarkdownInHtml,
+  sanitizeInlineHtmlSource,
+} from "../utils/html";
 
 type InlineHtmlAttrs = {
   html: string;
@@ -32,7 +39,7 @@ export const InlineHtmlNode = Node.create({
         tag: 'span[data-type="inline-html"]',
         getAttrs: (element) => {
           if (!(element instanceof HTMLElement)) return false;
-          return { html: sanitizeInlineHtmlSource(element.dataset.html || element.textContent || "") };
+          return { html: sanitizeInlineHtmlSource(decodeHtmlEntities(element.getAttribute("data-html") || element.textContent || "")) };
         },
       },
     ];
@@ -85,6 +92,81 @@ export const InlineHtmlNode = Node.create({
 
   addNodeView() {
     return ({ node, editor, getPos }) => createInlineHtmlView(node.attrs as InlineHtmlAttrs, editor, getPos);
+  },
+});
+
+export const RawHtmlNode = Node.create({
+  name: "rawHtml",
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      html: { default: "" },
+      kind: { default: "html" },
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: 'span[data-type="raw-html"]',
+        getAttrs: (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const html = decodeHtmlEntities(element.getAttribute("data-html") || element.textContent || "");
+          return { html, kind: element.getAttribute("data-kind") || rawHtmlKind(html) };
+        },
+      },
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    const html = decodeHtmlEntities(HTMLAttributes.html || "");
+    const kind = HTMLAttributes.kind || rawHtmlKind(html);
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, {
+        "data-type": "raw-html",
+        "data-kind": kind,
+        "data-html": html,
+        class: kind === "comment" ? "raw-html-node raw-html-node-comment" : "raw-html-node",
+      }),
+      html,
+    ];
+  },
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        appendTransaction: (transactions, _oldState, newState) => {
+          if (!transactions.some((transaction) => transaction.docChanged)) return null;
+
+          let tr = newState.tr;
+          let converted = false;
+
+          newState.doc.descendants((node, pos) => {
+            if (converted) return false;
+            if (!node.isTextblock) return true;
+            if (node.type.name === "codeBlock" || textblockHasCodeMark(node)) return false;
+
+            const match = findRawHtmlMatch(node.textContent);
+            if (!match) return true;
+
+            const html = match.html;
+            const from = pos + 1 + match.from;
+            const to = pos + 1 + match.to;
+            tr = tr.replaceWith(from, to, this.type.create({ html, kind: rawHtmlKind(html) }));
+            tr = tr.setSelection(NodeSelection.create(tr.doc, from));
+            converted = true;
+            return false;
+          });
+
+          return converted ? tr : null;
+        },
+      }),
+    ];
   },
 });
 
