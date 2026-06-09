@@ -77,7 +77,7 @@ function markSpecialBlocksForEditor(markdown: string) {
     return token;
   };
 
-  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = normalizeLatexMathDelimiters(markdown).replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   });
 
@@ -137,7 +137,7 @@ function restorePlaceholders(value: string, placeholders: string[]) {
 }
 
 function enhanceMarkdownForRender(markdown: string) {
-  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = normalizeLatexMathDelimiters(markdown).replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
@@ -341,9 +341,48 @@ function buildTocHtml(markdown: string) {
 }
 
 function protectInlineMath(markdown: string, stash: (html: string) => string) {
-  return markdown.replace(/(^|[^$\\])\$([^$\n]+?)\$/g, (_match, prefix, tex) => {
-    return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
+  return markdown
+    .replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
+      return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
+    })
+    .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
+      return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
+    });
+}
+
+function normalizeLatexMathDelimiters(markdown: string) {
+  const placeholders: string[] = [];
+  const stash = (value: string) => {
+    const token = `@@LIGHTMARK_MATH_SOURCE_${placeholders.length}@@`;
+    placeholders.push(value);
+    return token;
+  };
+
+  let next = markdown
+    .replace(/```[\s\S]*?```/g, (code) => stash(code))
+    .replace(/`[^`\n]*`/g, (code) => stash(code));
+
+  next = next.replace(/(^|\n)\s*\\\[\s*([^\n]+?)\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    return `${prefix}$$\n${tex.trim()}\n$$`;
   });
+  next = next.replace(/(^|\n)\s*\\\[\s*\n([\s\S]*?)\n\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    return `${prefix}$$\n${tex.trim()}\n$$`;
+  });
+  next = next.replace(
+    /(^|\n)\s*\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?|split)\}\s*\n?([\s\S]*?)\n?\s*\\end\{\2\}\s*(?=\n|$)/g,
+    (_match, prefix, environment, tex) => {
+      return `${prefix}$$\n\\begin{${environment}}\n${tex.trim()}\n\\end{${environment}}\n$$`;
+    },
+  );
+  next = next.replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
+    if (!tex.trim()) return _match;
+    return `${prefix}$${tex.trim()}$`;
+  });
+
+  placeholders.forEach((value, index) => {
+    next = next.split(`@@LIGHTMARK_MATH_SOURCE_${index}@@`).join(value);
+  });
+  return next;
 }
 
 function protectHtmlBlocks(markdown: string, stash: (html: string) => string) {

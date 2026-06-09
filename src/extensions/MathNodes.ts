@@ -13,6 +13,43 @@ type MathAttrs = {
   editing?: boolean;
 };
 
+type InlineMathMatch = {
+  from: number;
+  to: number;
+  tex: string;
+};
+
+function findInlineMathMatch(text: string): InlineMathMatch | null {
+  const displayPair = /(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g;
+  const singlePair = /(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g;
+  const candidates: InlineMathMatch[] = [];
+
+  for (const pattern of [displayPair, singlePair]) {
+    pattern.lastIndex = 0;
+    let match = pattern.exec(text);
+    while (match) {
+      const prefixLength = match[1].length;
+      const from = match.index + prefixLength;
+      const to = match.index + match[0].length;
+      const tex = match[2].trim();
+      if (tex && !isWholeTextBlockMathDelimiter(text, from, to)) {
+        candidates.push({ from, to, tex });
+      }
+      match = pattern.exec(text);
+    }
+  }
+
+  return candidates.sort((left, right) => left.from - right.from)[0] || null;
+}
+
+function isWholeTextBlockMathDelimiter(text: string, from: number, to: number) {
+  return from === 0 && to === text.length && /^\s*\$\$\s*$/.test(text);
+}
+
+function isBlockMathOpeningDelimiter(text: string) {
+  return /^\s*(\$\$|\\\[)\s*$/.test(text);
+}
+
 export const InlineMath = Node.create({
   name: "inlineMath",
   group: "inline",
@@ -62,7 +99,6 @@ export const InlineMath = Node.create({
 
           let tr = newState.tr;
           let converted = false;
-          const inlineMathPattern = /(^|[^$])\$([^$\n]+?)\$/g;
 
           newState.doc.descendants((node, pos) => {
             if (converted) return false;
@@ -70,17 +106,14 @@ export const InlineMath = Node.create({
             if (node.type.name === "codeBlock") return false;
 
             const text = node.textContent;
-            inlineMathPattern.lastIndex = 0;
-            const match = inlineMathPattern.exec(text);
+            const match = findInlineMathMatch(text);
             if (!match) return true;
 
-            const full = match[0];
-            const leadingLength = match[1].length;
-            const tex = match[2].trim();
+            const tex = match.tex.trim();
             if (!tex) return true;
 
-            const from = pos + 1 + match.index + leadingLength;
-            const to = pos + 1 + match.index + full.length;
+            const from = pos + 1 + match.from;
+            const to = pos + 1 + match.to;
             tr = tr.replaceWith(from, to, this.type.create({ tex, editing: true }));
             tr = tr.setSelection(NodeSelection.create(tr.doc, from));
             converted = true;
@@ -151,7 +184,7 @@ export const BlockMath = Node.create({
             if (!empty || !$from.parent.isTextblock) return false;
 
             const text = $from.parent.textContent;
-            if (text.trim() !== "$$" || $from.parentOffset < text.length) return false;
+            if (!isBlockMathOpeningDelimiter(text) || $from.parentOffset < text.length) return false;
 
             event.preventDefault();
             const from = $from.before();
