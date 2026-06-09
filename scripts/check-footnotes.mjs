@@ -5,15 +5,29 @@ import ts from "typescript";
 
 const sourcePath = path.resolve("src/utils/markdown.ts");
 const source = fs.readFileSync(sourcePath, "utf8");
-const compiled = ts.transpileModule(source, {
+const htmlSourcePath = path.resolve("src/utils/html.ts");
+const htmlSource = fs.readFileSync(htmlSourcePath, "utf8");
+const timestamp = Date.now();
+const tempDir = path.resolve(`scripts/.lightmark-check-${timestamp}`);
+fs.mkdirSync(tempDir, { recursive: true });
+const htmlTempPath = path.join(tempDir, `.lightmark-html-${timestamp}.mjs`);
+const tempPath = path.join(tempDir, `.lightmark-markdown-${timestamp}.mjs`);
+const htmlCompiled = ts.transpileModule(htmlSource, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2022,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
   },
 }).outputText;
+const compiled = ts.transpileModule(source, {
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2022,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  },
+}).outputText.replace('from "./html";', `from "./${path.basename(htmlTempPath)}";`);
 
-const tempPath = path.resolve(`scripts/.lightmark-markdown-${Date.now()}.mjs`);
+fs.writeFileSync(htmlTempPath, htmlCompiled, "utf8");
 fs.writeFileSync(tempPath, compiled, "utf8");
 
 try {
@@ -58,10 +72,41 @@ try {
 [^b]: 第二个脚注。
 
 继续正文。[^b]`;
+  const inlineHtmlSample = `这里有 <span style="color:red; background-image:url(javascript:alert(1))" onclick="alert(1)">红色</span> 文本。
+
+<u>下划线</u> 和 <kbd>Ctrl</kbd>。
+
+<b>HTML 加粗里有 *Markdown 斜体*</b>
+
+危险链接 <a href="javascript:alert(1)">x</a>。
+
+<script>alert(1)</script>`;
+  const blockHtmlSample = `<div>
+这是 div 内部的普通文本。
+
+这里有 <span style="color:purple;">紫色 span</span>。
+</div>
+
+段落后面继续正常 Markdown。`;
+  const horizontalRuleSample = `上文
+
+---
+
+下文`;
 
   const editorHtml = renderMarkdownForEditor(sample);
   const previewHtml = renderMarkdown(sample);
   const adjacentEditorHtml = renderMarkdownForEditor(adjacentDefinitions);
+  const inlineEditorHtml = renderMarkdownForEditor(inlineHtmlSample);
+  const inlinePreviewHtml = renderMarkdown(inlineHtmlSample);
+  const blockEditorHtml = renderMarkdownForEditor(blockHtmlSample);
+  const blockPreviewHtml = renderMarkdown(blockHtmlSample);
+  const horizontalEditorHtml = renderMarkdownForEditor(horizontalRuleSample);
+  const horizontalPreviewHtml = renderMarkdown(horizontalRuleSample);
+  const examplePath = path.resolve("example/inline-html-test.md");
+  const exampleMarkdown = fs.existsSync(examplePath) ? fs.readFileSync(examplePath, "utf8") : "";
+  const exampleEditorHtml = exampleMarkdown ? renderMarkdownForEditor(exampleMarkdown) : "";
+  const examplePreviewHtml = exampleMarkdown ? renderMarkdown(exampleMarkdown) : "";
   const previewFootnoteItems = previewHtml.match(/class="footnote-item"/g) || [];
   const longDefinitionPosition = previewHtml.indexOf('id="fn-long"');
   const repeatedReferencePosition = previewHtml.indexOf("同一个脚注重复引用");
@@ -98,16 +143,41 @@ try {
     [previewHtml.includes('href="https://example.com"'), "preview renders links inside long footnote"],
     [previewHtml.includes("<code>inline code</code>"), "preview renders inline code inside long footnote"],
     [previewHtml.includes('class="hljs language-ts"'), "preview renders fenced code inside long footnote"],
+    [inlineEditorHtml.includes('data-type="inline-html"'), "editor protects inline html as placeholders"],
+    [inlineEditorHtml.includes('data-html="&lt;span style=&quot;color: red&quot;&gt;红色&lt;/span&gt;"'), "editor stores inline html with single-escaped data-html"],
+    [!inlineEditorHtml.includes("&amp;lt;span"), "editor does not double-escape inline html placeholders"],
+    [inlineEditorHtml.includes("color: red"), "editor preserves safe inline styles"],
+    [!inlineEditorHtml.includes("onclick"), "editor removes inline event handlers"],
+    [!inlineEditorHtml.includes("background-image"), "editor removes unsafe style declarations"],
+    [inlinePreviewHtml.includes("<u>下划线</u>"), "preview renders safe inline html"],
+    [inlinePreviewHtml.includes("<kbd>Ctrl</kbd>"), "preview renders keyboard inline html"],
+    [inlinePreviewHtml.includes("<b>HTML 加粗里有 <em>Markdown 斜体</em></b>"), "preview renders markdown emphasis inside inline html"],
+    [!inlinePreviewHtml.includes("javascript:"), "preview removes dangerous javascript urls"],
+    [!inlinePreviewHtml.includes("<script>"), "preview does not emit executable script tags"],
+    [blockEditorHtml.includes('data-type="html-block"'), "editor protects block html as block node"],
+    [blockEditorHtml.includes("段落后面继续正常 Markdown"), "editor does not swallow content after block html"],
+    [blockPreviewHtml.includes('style="color: purple"'), "preview renders safe styles inside block html"],
+    [blockPreviewHtml.includes("<p>段落后面继续正常 Markdown。</p>"), "preview keeps markdown after block html outside html block"],
+    [horizontalEditorHtml.includes("<hr"), "editor renders markdown horizontal rules"],
+    [horizontalPreviewHtml.includes("<hr"), "preview renders markdown horizontal rules"],
+    [!exampleEditorHtml || exampleEditorHtml.includes('data-type="inline-html"'), "example renders inline html as editor placeholders"],
+    [!exampleEditorHtml || !/&amp;(?:amp;)*lt;span/.test(exampleEditorHtml), "example editor html does not repeatedly escape spans"],
+    [!examplePreviewHtml || !/&amp;(?:amp;)*lt;span/.test(examplePreviewHtml), "example preview html does not repeatedly escape spans"],
+    [!examplePreviewHtml || examplePreviewHtml.includes("<b>HTML 加粗</b>"), "example preview renders inline bold html"],
+    [!examplePreviewHtml || !/\s(?:href|src|action)=["']javascript:/i.test(examplePreviewHtml), "example preview removes dangerous javascript urls"],
+    [!examplePreviewHtml || !examplePreviewHtml.includes("<script"), "example preview does not emit script tags"],
   ];
 
   const failed = checks.filter(([ok]) => !ok).map(([, label]) => label);
   if (failed.length > 0) {
     console.error("footnote check failed:");
     failed.forEach((label) => console.error(`- ${label}`));
-    process.exit(1);
+    throw new Error("footnote render check failed");
   }
 
   console.log("footnote render check passed");
 } finally {
   fs.rmSync(tempPath, { force: true });
+  fs.rmSync(htmlTempPath, { force: true });
+  fs.rmSync(tempDir, { force: true, recursive: true });
 }

@@ -1,6 +1,15 @@
 import MarkdownIt from "markdown-it";
 import markdownItKatex from "markdown-it-katex";
 import hljs from "highlight.js";
+import {
+  escapeAttribute,
+  escapeHtml,
+  findInlineHtmlMatch,
+  isInlineHtmlTag,
+  renderInlineMarkdownInHtml,
+  sanitizeHtmlFragment,
+  sanitizeInlineHtmlSource,
+} from "./html";
 
 const md = new MarkdownIt({
   html: true,
@@ -21,7 +30,7 @@ const editorMd = new MarkdownIt({
   linkify: true,
   typographer: true,
 });
-installLightMarkMarkdown(editorMd);
+installLightMarkMarkdown(editorMd, { preserveLightMarkInternal: true });
 
 export function renderMarkdown(markdown: string) {
   return md.render(enhanceMarkdownForRender(markdown));
@@ -50,23 +59,6 @@ export function buildExportHtml(title: string, body: string) {
 </head>
 <body><main>${body}</main></body>
 </html>`;
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (char) => {
-    const entities: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
-    return entities[char];
-  });
-}
-
-function escapeAttribute(value: string) {
-  return escapeHtml(value).replace(/\r?\n/g, "&#10;");
 }
 
 function markSpecialBlocksForEditor(markdown: string) {
@@ -100,6 +92,7 @@ function markSpecialBlocksForEditor(markdown: string) {
   });
   next = protectInlineMath(next, stash);
   next = protectHtmlBlocks(next, stash);
+  next = protectInlineHtml(next, stash);
 
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
@@ -147,10 +140,20 @@ function enhanceMarkdownForRender(markdown: string) {
   return next;
 }
 
-function installLightMarkMarkdown(instance: MarkdownIt) {
+function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLightMarkInternal?: boolean } = {}) {
   instance.linkify.set({ fuzzyLink: true });
 
   instance.renderer.rules.text = (tokens, idx) => renderInlineEnhancements(instance.utils.escapeHtml(tokens[idx].content));
+  instance.renderer.rules.html_inline = (tokens, idx) => {
+    const content = tokens[idx].content;
+    if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    return renderInlineMarkdownInHtml(content, { inlineOnly: true });
+  };
+  instance.renderer.rules.html_block = (tokens, idx) => {
+    const content = tokens[idx].content;
+    if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    return renderInlineMarkdownInHtml(content);
+  };
 
   const defaultFenceRenderer = instance.renderer.rules.fence;
   instance.renderer.rules.fence = (tokens, idx, options, env, self) => {
@@ -177,6 +180,10 @@ function convertTaskItems(markdown: string) {
     const isChecked = checked.toLowerCase() === "x";
     return `${indent}${marker} <span data-task-item="${isChecked ? "checked" : "unchecked"}">${text || "&nbsp;"}</span>`;
   });
+}
+
+function isLightMarkInternalPlaceholder(html: string) {
+  return /\sdata-type="(?:front-matter|mermaid|block-math|inline-math|inline-html|html-block|footnote-ref|footnotes|table-of-contents|horizontal-rule)"/.test(html);
 }
 
 function convertDefinitionLists(markdown: string) {
@@ -386,15 +393,79 @@ function normalizeLatexMathDelimiters(markdown: string) {
 }
 
 function protectHtmlBlocks(markdown: string, stash: (html: string) => string) {
-  return markdown.replace(/(^|\n)<([a-z][\w-]*)(\s[^>]*)?>[\s\S]*?<\/\2>\s*(?=\n|$)/gi, (_match) => {
-    return stash(`<div data-type="html-block" data-html="${escapeHtml(_match.trim())}"></div>`);
-  });
+  const lines = markdown.split("\n");
+  const result: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const block = collectHtmlBlock(lines, index);
+    if (!block) {
+      result.push(lines[index]);
+      continue;
+    }
+
+    result.push(stash(`<div data-type="html-block" data-html="${escapeAttribute(block.html.trim())}"></div>`));
+    index = block.endIndex;
+  }
+
+  return result.join("\n");
+}
+
+function protectInlineHtml(markdown: string, stash: (html: string) => string) {
+  let next = markdown;
+  let match = findInlineHtmlMatch(next);
+  while (match) {
+    const html = sanitizeInlineHtmlSource(match.html);
+    const placeholder = stash(`<span data-type="inline-html" data-html="${escapeAttribute(html)}"></span>`);
+    next = `${next.slice(0, match.from)}${placeholder}${next.slice(match.to)}`;
+    match = findInlineHtmlMatch(next);
+  }
+  return next;
 }
 
 function renderInlineMarkdownInsideMark(value: string) {
   return escapeHtml(value).replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
     return `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   });
+}
+
+function collectHtmlBlock(lines: string[], startIndex: number) {
+  const first = lines[startIndex];
+  const open = first.match(/^ {0,3}<([a-zA-Z][\w-]*)(?:\s[^>]*)?>\s*$/) || first.match(/^ {0,3}<([a-zA-Z][\w-]*)(?:\s[^>]*)?>/);
+  if (!open) return null;
+
+  const tag = open[1].toLowerCase();
+  if (isInlineHtmlTag(tag)) return null;
+  if (isHtmlVoidBlock(tag) || /\/>\s*$/.test(first)) return { html: first, endIndex: startIndex };
+
+  const stack: string[] = [];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    const tagPattern = /<\/?\s*([a-zA-Z][\w-]*)(?:\s[^>]*)?\s*\/?>/g;
+    let match = tagPattern.exec(line);
+    while (match) {
+      const raw = match[0];
+      const name = match[1].toLowerCase();
+      if (!isInlineHtmlTag(name) && !isHtmlVoidBlock(name)) {
+        if (/^<\s*\//.test(raw)) {
+          const pos = stack.lastIndexOf(name);
+          if (pos >= 0) stack.splice(pos, 1);
+        } else if (!/\/\s*>$/.test(raw)) {
+          stack.push(name);
+        }
+      }
+      match = tagPattern.exec(line);
+    }
+
+    if (stack.length === 0) {
+      return { html: lines.slice(startIndex, index + 1).join("\n"), endIndex: index };
+    }
+  }
+
+  return null;
+}
+
+function isHtmlVoidBlock(tag: string) {
+  return tag === "hr" || tag === "input" || tag === "embed";
 }
 
 const emojiMap: Record<string, string> = {

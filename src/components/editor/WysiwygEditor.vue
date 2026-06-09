@@ -19,8 +19,10 @@ import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import { containsInlineHtml, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
+import { InlineHtmlNode } from "../../extensions/InlineHtmlNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
 
 const lowlight = createLowlight(all);
@@ -428,10 +430,10 @@ const HtmlBlockNode = Node.create({
     return {
       html: {
         default: "",
-        parseHTML: (element) => element.getAttribute("data-html") || "",
+        parseHTML: (element) => sanitizeHtmlFragment(element.getAttribute("data-html") || ""),
         renderHTML: (attributes) => ({
           "data-type": "html-block",
-          "data-html": attributes.html,
+          "data-html": sanitizeHtmlFragment(attributes.html || ""),
         }),
       },
       editing: {
@@ -453,8 +455,9 @@ const HtmlBlockNode = Node.create({
     return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
       dom.contentEditable = "false";
-      let html = node.attrs.html || "";
+      let html = sanitizeHtmlFragment(node.attrs.html || "");
       let editing = Boolean(node.attrs.editing);
+      let committing = false;
 
       const updateAttrs = (next: { html?: string; editing?: boolean }) => {
         if (typeof getPos !== "function") return;
@@ -463,12 +466,25 @@ const HtmlBlockNode = Node.create({
         editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { html, editing, ...next }));
       };
 
+      const commitEditor = (textarea?: HTMLTextAreaElement) => {
+        if (!editing || committing) return;
+        committing = true;
+        if (textarea) html = textarea.value;
+        editing = false;
+        html = sanitizeHtmlFragment(html);
+        updateAttrs({ html, editing: false });
+        renderDisplay();
+        window.setTimeout(() => {
+          committing = false;
+        }, 0);
+      };
+
       const renderDisplay = () => {
         dom.innerHTML = "";
         dom.className = "html-block-node";
         const rendered = document.createElement("div");
         rendered.className = "html-block-rendered";
-        rendered.innerHTML = html;
+        rendered.innerHTML = renderInlineMarkdownInHtml(html);
         dom.appendChild(rendered);
       };
 
@@ -487,11 +503,12 @@ const HtmlBlockNode = Node.create({
           html = textarea.value;
           textarea.rows = Math.max(3, html.split(/\r?\n/).length);
         });
-        textarea.addEventListener("blur", () => {
-          editing = false;
-          updateAttrs({ html, editing: false });
-          renderDisplay();
+        textarea.addEventListener("keydown", (event) => {
+          if (event.key !== "Escape" && !(event.key === "Enter" && (event.ctrlKey || event.metaKey))) return;
+          event.preventDefault();
+          commitEditor(textarea);
         });
+        textarea.addEventListener("blur", () => commitEditor(textarea));
         dom.append(label, textarea);
         requestAnimationFrame(() => textarea.focus());
       };
@@ -508,21 +525,19 @@ const HtmlBlockNode = Node.create({
       return {
         dom,
         update(nextNode: any) {
-          html = nextNode.attrs.html || "";
+          html = sanitizeHtmlFragment(nextNode.attrs.html || "");
           editing = Boolean(nextNode.attrs.editing);
           editing ? renderEditor() : renderDisplay();
           return true;
         },
         selectNode() {
+          if (editing) return;
           editing = true;
           updateAttrs({ editing: true });
           renderEditor();
         },
         deselectNode() {
-          if (!editing) return;
-          editing = false;
-          updateAttrs({ html, editing: false });
-          renderDisplay();
+          commitEditor();
         },
         ignoreMutation: () => true,
         stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
@@ -930,7 +945,15 @@ turndown.addRule("htmlBlock", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "html-block",
   replacement: (_content, node) => {
     const html = node instanceof HTMLElement ? node.dataset.html || node.textContent || "" : "";
-    return `\n\n${html.trim()}\n\n`;
+    return `\n\n${sanitizeHtmlFragment(html).trim()}\n\n`;
+  },
+});
+
+turndown.addRule("inlineHtml", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-html",
+  replacement: (_content, node) => {
+    const html = node instanceof HTMLElement ? node.dataset.html || node.textContent || "" : "";
+    return sanitizeInlineHtmlSource(html);
   },
 });
 
@@ -1012,6 +1035,7 @@ const editor = useEditor({
     TableCell,
     MarkdownHeading,
     InlineMath,
+    InlineHtmlNode,
     BlockMath,
     MermaidNode,
     FootnoteRefNode,
@@ -1054,6 +1078,17 @@ const editor = useEditor({
       if (event.key === "Enter") {
         if (continueTaskItem(view)) {
           event.preventDefault();
+          return true;
+        }
+
+        const horizontalRuleTr = convertHorizontalRuleMarkdown(view.state, {
+          force: true,
+          onlySelectionBlock: true,
+          insertParagraph: true,
+        });
+        if (horizontalRuleTr) {
+          event.preventDefault();
+          view.dispatch(horizontalRuleTr.scrollIntoView());
           return true;
         }
 
@@ -1127,8 +1162,8 @@ const editor = useEditor({
           if (view.hasFocus()) return;
           if (convertPendingInlineMarkdown(view)) return;
 
-          const headingTr = convertMarkdownHeading(view.state, { force: true });
-          if (headingTr) view.dispatch(headingTr);
+          const blockTr = convertHorizontalRuleMarkdown(view.state, { force: true }) || convertMarkdownHeading(view.state, { force: true });
+          if (blockTr) view.dispatch(blockTr);
         }, 0);
         return false;
       },
@@ -1560,7 +1595,7 @@ function deleteCodeBlock() {
 }
 
 function looksLikeMarkdown(text: string) {
-  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\[\^[^\]]+\]:|\$\$)/.test(text) || /\[\^[^\]]+\]|`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text);
+  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\[\^[^\]]+\]:|\$\$)/.test(text) || /\[\^[^\]]+\]|`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text) || containsInlineHtml(text);
 }
 
 function normalizeTableCell(value: string) {
@@ -1813,6 +1848,7 @@ function convertPendingMarkdownBeforeMouseSelection(view: any, event: MouseEvent
   if (!clickPos || !isClickOutsideSelectionBlock(view.state, clickPos.pos)) return false;
 
   let tr =
+    convertHorizontalRuleMarkdown(view.state, { force: true, onlySelectionBlock: true }) ||
     convertMarkdownHeading(view.state, { force: true, onlySelectionBlock: true }) ||
     convertInlineCodeSyntax(view.state, { onlySelectionBlock: true }) ||
     convertInlineMarkdownSyntax(view.state, { onlySelectionBlock: true });
@@ -2147,6 +2183,40 @@ function editHeadingAsMarkdown(view: any, element: HTMLElement) {
   let tr = view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize - 1));
   view.dispatch(tr.scrollIntoView());
   view.focus();
+}
+
+function convertHorizontalRuleMarkdown(
+  state: any,
+  options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean } = {},
+) {
+  const { force = false, onlySelectionBlock = false, insertParagraph = false } = options;
+  const horizontalRule = state.schema.nodes.horizontalRule;
+  if (!horizontalRule) return null;
+
+  let tr = state.tr;
+  let converted = false;
+  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
+  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (converted) return false;
+    if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
+    if (!/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(node.textContent)) return true;
+    if (!force && state.selection.from >= pos && state.selection.from <= pos + node.nodeSize) return true;
+
+    const rule = horizontalRule.create();
+    tr = tr.replaceWith(pos, pos + node.nodeSize, rule);
+    if (insertParagraph && state.schema.nodes.paragraph) {
+      const after = pos + rule.nodeSize;
+      tr = tr.insert(after, state.schema.nodes.paragraph.create());
+      tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
+    }
+    converted = true;
+    return false;
+  });
+
+  return converted ? tr : null;
 }
 
 function getTaskMarkAtSelection(state: any) {
