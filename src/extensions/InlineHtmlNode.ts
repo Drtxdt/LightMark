@@ -53,6 +53,7 @@ export const InlineHtmlNode = Node.create({
         "data-type": "inline-html",
         "data-html": html,
       }),
+      html,
     ];
   },
 
@@ -211,19 +212,8 @@ function createInlineHtmlView(attrs: InlineHtmlAttrs, editor: any, getPos: NodeV
     source.spellcheck = false;
     source.contentEditable = "true";
 
-    const preview = document.createElement("span");
-    preview.className = "inline-html-live-preview";
-    const label = document.createElement("span");
-    label.className = "inline-html-live-preview-label";
-    label.textContent = "HTML";
-    const body = document.createElement("span");
-    body.className = "inline-html-live-preview-body";
-    preview.append(label, body);
-
     const refresh = () => {
       html = source.textContent || "";
-      body.innerHTML = renderInlineMarkdownInHtml(html, { inlineOnly: true }) || "HTML 预览";
-      body.classList.toggle("inline-html-live-preview-empty", !html.trim());
     };
 
     source.addEventListener("input", refresh);
@@ -255,7 +245,7 @@ function createInlineHtmlView(attrs: InlineHtmlAttrs, editor: any, getPos: NodeV
       renderDisplay();
     });
 
-    dom.append(source, preview);
+    dom.append(source);
     refresh();
     requestAnimationFrame(() => focusEditableAtEnd(source));
   };

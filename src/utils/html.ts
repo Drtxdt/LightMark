@@ -197,10 +197,12 @@ export function findInlineHtmlMatch(text: string): InlineHtmlMatch | null {
     }
 
     const closePattern = new RegExp(`<\\/\\s*${escapeRegExp(tag)}\\s*>`, "i");
-    const rest = text.slice(match.index + raw.length);
+    const afterOpen = match.index + raw.length;
+    const lineEnd = text.indexOf("\n", afterOpen);
+    const rest = text.slice(afterOpen, lineEnd === -1 ? undefined : lineEnd);
     const close = closePattern.exec(rest);
     if (close) {
-      const to = match.index + raw.length + close.index + close[0].length;
+      const to = afterOpen + close.index + close[0].length;
       const html = text.slice(match.index, to);
       if (isLightMarkInternalHtml(html)) {
         tagPattern.lastIndex = to;

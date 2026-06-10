@@ -60,6 +60,7 @@ body,
 #app {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
@@ -521,21 +522,20 @@ sub {
 .inline-html-source-editor {
   display: inline;
   min-width: 2ch;
-  border: 1px solid #d5d0c6;
-  border-radius: 4px;
-  background: #fbfaf7;
-  color: inherit;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #9b9488;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;
   line-height: 1.5;
   outline: none;
-  padding: 0.18rem 0.38rem;
+  padding: 0;
   white-space: pre;
 }
 
 .inline-html-source-editor:focus {
-  border-color: #8d867c;
-  box-shadow: 0 0 0 2px rgb(141 134 124 / 12%);
+  box-shadow: none;
 }
 
 .inline-html-live-preview {
@@ -703,8 +703,8 @@ sub {
 }
 
 .dark .inline-html-source-editor {
-  border-color: #3b3833;
   background: transparent;
+  color: #8b8377;
 }
 
 .dark .inline-html-live-preview {

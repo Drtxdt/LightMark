@@ -6,7 +6,7 @@ import WysiwygEditor from "./WysiwygEditor.vue";
 </script>
 
 <template>
-  <section class="h-full overflow-hidden">
+  <section class="h-full min-h-0 overflow-hidden">
     <LargeMarkdownEditor v-if="appStore.documentMode === 'large'" />
     <WysiwygEditor v-else-if="appStore.editorMode === 'wysiwyg'" />
     <SourceEditor v-else />

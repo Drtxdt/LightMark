@@ -38,7 +38,7 @@ function startResize(event: PointerEvent) {
         class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
         @pointerdown="startResize"
       />
-      <main class="min-w-0 overflow-hidden bg-paper-50 dark:bg-paper-950">
+      <main class="min-h-0 min-w-0 overflow-hidden bg-paper-50 dark:bg-paper-950">
         <EditorShell />
       </main>
     </div>
