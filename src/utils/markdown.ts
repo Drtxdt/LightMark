@@ -100,10 +100,10 @@ function markSpecialBlocksForEditor(markdown: string) {
   next = next.replace(/`([^`\n]*)`/g, (_match, code) => {
     return stash(`<code>${escapeHtml(code)}</code>`);
   });
-  next = protectInlineMath(next, stash);
   next = protectHtmlBlocks(next, stash);
   next = protectInlineHtml(next, stash);
   next = protectRawHtml(next, stash);
+  next = protectInlineMath(next, stash);
 
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;

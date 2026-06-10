@@ -19,7 +19,7 @@ type InlineMathMatch = {
   tex: string;
 };
 
-function findInlineMathMatch(text: string): InlineMathMatch | null {
+function findInlineMathMatch(text: string, isAllowedRange: (from: number, to: number) => boolean = () => true): InlineMathMatch | null {
   const displayPair = /(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g;
   const singlePair = /(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g;
   const candidates: InlineMathMatch[] = [];
@@ -32,7 +32,7 @@ function findInlineMathMatch(text: string): InlineMathMatch | null {
       const from = match.index + prefixLength;
       const to = match.index + match[0].length;
       const tex = match[2].trim();
-      if (tex && !isWholeTextBlockMathDelimiter(text, from, to)) {
+      if (tex && isAllowedRange(from, to) && !isWholeTextBlockMathDelimiter(text, from, to)) {
         candidates.push({ from, to, tex });
       }
       match = pattern.exec(text);
@@ -106,7 +106,8 @@ export const InlineMath = Node.create({
             if (node.type.name === "codeBlock") return false;
 
             const text = node.textContent;
-            const match = findInlineMathMatch(text);
+            const codeRanges = getCodeMarkRanges(node);
+            const match = findInlineMathMatch(text, (from, to) => !rangeOverlapsCodeMark(codeRanges, from, to));
             if (!match) return true;
 
             const tex = match.tex.trim();
@@ -130,6 +131,20 @@ export const InlineMath = Node.create({
     return ({ node, editor, getPos }) => createInlineMathView(node.attrs as MathAttrs, editor, getPos);
   },
 });
+
+function getCodeMarkRanges(node: any) {
+  const ranges: Array<{ from: number; to: number }> = [];
+  node.forEach((child: any, offset: number) => {
+    if (!child.isText) return;
+    if (!child.marks.some((mark: any) => mark.type.name === "code")) return;
+    ranges.push({ from: offset, to: offset + child.text.length });
+  });
+  return ranges;
+}
+
+function rangeOverlapsCodeMark(ranges: Array<{ from: number; to: number }>, from: number, to: number) {
+  return ranges.some((range) => from < range.to && to > range.from);
+}
 
 export const BlockMath = Node.create({
   name: "blockMath",

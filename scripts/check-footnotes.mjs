@@ -78,6 +78,8 @@ try {
 
 <b>HTML 加粗里有 *Markdown 斜体*</b>
 
+HTML 内含公式：<span>$a^2 + b^2 = c^2$</span>
+
 危险链接 <a href="javascript:alert(1)">x</a>。
 
 <script>alert(1)</script>`;
@@ -167,6 +169,8 @@ function hello() {
     [inlinePreviewHtml.includes("<u>下划线</u>"), "preview renders safe inline html"],
     [inlinePreviewHtml.includes("<kbd>Ctrl</kbd>"), "preview renders keyboard inline html"],
     [inlinePreviewHtml.includes("<b>HTML 加粗里有 <em>Markdown 斜体</em></b>"), "preview renders markdown emphasis inside inline html"],
+    [inlineEditorHtml.includes("$a^2 + b^2 = c^2$"), "editor preserves math source inside inline html"],
+    [inlinePreviewHtml.includes("katex") && inlinePreviewHtml.includes("a^2"), "preview renders math inside inline html"],
     [!inlinePreviewHtml.includes("javascript:"), "preview removes dangerous javascript urls"],
     [!inlinePreviewHtml.includes("<script>"), "preview does not emit executable script tags"],
     [blockEditorHtml.includes('data-type="html-block"'), "editor protects block html as block node"],
@@ -181,6 +185,8 @@ function hello() {
     [rawPreviewHtml.includes("raw-html-token") && rawPreviewHtml.includes("&lt;input"), "preview renders unsupported input as muted raw html"],
     [rawPreviewHtml.includes("raw-html-comment") && rawPreviewHtml.includes("&lt;!-- this is a comment --&gt;"), "preview renders html comments as muted comments"],
     [rawPreviewHtml.includes("&lt;span style=\"color:red;\"&gt;这里没有闭合"), "preview keeps unclosed tags as raw html"],
+    [rawEditorHtml.includes("<code>$E = mc^2$</code>"), "editor keeps dollar math inside inline code"],
+    [!rawEditorHtml.includes('data-tex="E = mc^2"'), "editor does not convert inline-code math to math node"],
     [rawPreviewHtml.includes("<code>$E = mc^2$</code>"), "preview keeps dollar math inside inline code"],
     [rawEditorHtml.includes("console.log(&quot;Hello from pre&quot;);"), "editor html block stores quotes with one attribute escape"],
     [!rawEditorHtml.includes("&amp;quot;") && !rawPreviewHtml.includes("&amp;quot;"), "html block rendering does not amplify quote entities"],

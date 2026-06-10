@@ -1,3 +1,5 @@
+import katex from "katex";
+
 const inlineHtmlTags = new Set([
   "span",
   "a",
@@ -414,8 +416,34 @@ function escapeRegExp(value: string) {
 }
 
 function renderInlineMarkdownText(value: string) {
-  return value
+  return renderInlineMathText(value)
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>")
     .replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+}
+
+function renderInlineMathText(value: string) {
+  return value
+    .replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
+      return `${prefix}${renderMathSource(tex, true)}`;
+    })
+    .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
+      return `${prefix}${renderMathSource(tex, false)}`;
+    });
+}
+
+function renderMathSource(tex: string, displayMode: boolean) {
+  const source = decodeHtmlEntities(tex.trim());
+  if (!source) return "";
+  try {
+    return katex.renderToString(source, {
+      displayMode,
+      throwOnError: false,
+      strict: false,
+      trust: false,
+    });
+  } catch {
+    const delimiter = displayMode ? "$$" : "$";
+    return `${delimiter}${escapeHtmlText(source)}${delimiter}`;
+  }
 }
