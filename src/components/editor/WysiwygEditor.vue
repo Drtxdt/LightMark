@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onBeforeUnmount, watch } from "vue";
+import { computed, ref, onBeforeUnmount, onMounted, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import { Extension, Mark, mergeAttributes, Node, wrappingInputRule } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -20,6 +20,15 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { appStore, setContent } from "../../stores/appStore";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
+import {
+  getImageFilesFromClipboard,
+  getImageFilesFromDrop,
+  imagePathsAsMarkdown,
+  markdownImageSourceFromElement,
+  resolveMarkdownImageSource,
+  resolveRenderedImageSources,
+  saveImagesAsMarkdown,
+} from "../../utils/imageAssets";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
@@ -28,6 +37,7 @@ import { MermaidNode } from "../../extensions/MermaidNode";
 const lowlight = createLowlight(all);
 
 type ContextMenuMode = "default" | "code";
+type ImageInsertDetail = { files?: File[]; paths?: string[]; position?: { x?: number; y?: number } };
 
 const contextMenu = ref({
   visible: false,
@@ -115,6 +125,29 @@ const GithubAlertInput = Extension.create({
         },
       }),
     ];
+  },
+});
+
+const MarkdownImage = Image.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      markdownSrc: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("data-markdown-src"),
+        renderHTML: (attributes) => {
+          return attributes.markdownSrc ? { "data-markdown-src": attributes.markdownSrc } : {};
+        },
+      },
+      editing: {
+        default: false,
+        rendered: false,
+      },
+    };
+  },
+
+  addNodeView() {
+    return ({ node, editor, getPos }) => createTyporaImageView(node, editor, getPos);
   },
 });
 
@@ -716,7 +749,7 @@ const FootnoteRefNode = Node.create({
 
       const preview = document.createElement("span");
       preview.className = "footnote-ref-preview";
-      preview.innerHTML = renderMarkdownForEditor(node.attrs.preview || "");
+      preview.innerHTML = renderMarkdownForEditorWithAssets(node.attrs.preview || "");
 
       const render = () => {
         link.textContent = editing ? `[^${id}]` : `[${index}]`;
@@ -1133,6 +1166,169 @@ turndown.addRule("blockMath", {
   },
 });
 
+turndown.addRule("image", {
+  filter: "img",
+  replacement: (_content, node) => {
+    if (!(node instanceof HTMLElement)) return "";
+    const src = markdownImageSourceFromElement(node).trim();
+    if (!src) return "";
+    const alt = (node.getAttribute("alt") || "").replace(/]/g, "\\]");
+    const title = node.getAttribute("title");
+    const markdown = title ? `![${alt}](${src} "${title.replace(/"/g, '\\"')}")` : `![${alt}](${src})`;
+    return markdown;
+  },
+});
+
+function renderMarkdownForEditorWithAssets(markdown: string) {
+  return resolveRenderedImageSources(renderMarkdownForEditor(markdown));
+}
+
+function createTyporaImageView(node: any, editor: any, getPos: (() => number | undefined) | boolean) {
+  const dom = document.createElement("figure");
+  const source = document.createElement("input");
+  const error = document.createElement("div");
+  const image = document.createElement("img");
+  let currentNode = node;
+  let sourceVisible = Boolean(node.attrs.editing);
+  let errorMessage = "";
+
+  dom.className = "typora-image-node";
+  dom.contentEditable = "false";
+  source.type = "text";
+  source.className = "typora-image-source";
+  source.spellcheck = false;
+  error.className = "typora-image-error";
+  image.draggable = false;
+  dom.append(source, error, image);
+
+  const markdown = () => imageMarkdownFromAttrs(currentNode.attrs);
+  const render = () => {
+    if (document.activeElement !== source) source.value = markdown();
+    error.textContent = errorMessage;
+    image.src = currentNode.attrs.src || "";
+    image.alt = currentNode.attrs.alt || "";
+    if (currentNode.attrs.title) image.title = currentNode.attrs.title;
+    else image.removeAttribute("title");
+    dom.classList.toggle("typora-image-node-editing", sourceVisible);
+    dom.classList.toggle("typora-image-node-error", Boolean(errorMessage));
+  };
+  const showSource = (focus = false) => {
+    sourceVisible = true;
+    render();
+    if (focus) {
+      requestAnimationFrame(() => {
+        source.focus();
+        source.select();
+      });
+    }
+  };
+  const hideSource = (reset = false) => {
+    sourceVisible = false;
+    errorMessage = "";
+    if (reset) source.value = markdown();
+    render();
+  };
+  const commitSource = () => {
+    if (!sourceVisible) return true;
+    const parsed = parseSingleMarkdownImage(source.value.trim());
+    if (!parsed) {
+      errorMessage = "图片 Markdown 格式无效，应为 ![alt](path) 或 ![alt](path \"title\")";
+      sourceVisible = true;
+      render();
+      requestAnimationFrame(() => source.focus());
+      return false;
+    }
+    if (typeof getPos !== "function") return true;
+    const pos = getPos();
+    if (typeof pos !== "number") return true;
+    const nextAttrs = {
+      ...currentNode.attrs,
+      src: parsed.src,
+      markdownSrc: parsed.markdownSrc,
+      alt: parsed.alt,
+      title: parsed.title,
+      editing: false,
+    };
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
+    errorMessage = "";
+    sourceVisible = false;
+    return true;
+  };
+  const selectImage = () => {
+    if (typeof getPos !== "function") return;
+    const pos = getPos();
+    if (typeof pos !== "number") return;
+    editor.view.dispatch(editor.view.state.tr.setSelection(NodeSelection.create(editor.view.state.doc, pos)));
+  };
+  const onMouseDown = (event: MouseEvent) => {
+    if (event.target instanceof globalThis.Node && dom.contains(event.target)) return;
+    commitSource();
+  };
+  const onEditorBlur = () => {
+    window.setTimeout(() => {
+      if (document.activeElement instanceof globalThis.Node && dom.contains(document.activeElement)) return;
+      commitSource();
+    });
+  };
+
+  image.addEventListener("click", (event) => {
+    event.preventDefault();
+    showSource(true);
+    selectImage();
+  });
+  source.addEventListener("click", (event) => {
+    event.stopPropagation();
+    showSource(false);
+    selectImage();
+  });
+  source.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitSource();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hideSource(true);
+      editor.view.focus();
+    }
+  });
+  source.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (document.activeElement instanceof globalThis.Node && dom.contains(document.activeElement)) return;
+      commitSource();
+    });
+  });
+  editor.on?.("blur", onEditorBlur);
+  document.addEventListener("mousedown", onMouseDown);
+  render();
+  if (sourceVisible) showSource(true);
+
+  return {
+    dom,
+    update(nextNode: any) {
+      if (nextNode.type !== currentNode.type) return false;
+      currentNode = nextNode;
+      if (nextNode.attrs.editing) sourceVisible = true;
+      render();
+      return true;
+    },
+    destroy() {
+      editor.off?.("blur", onEditorBlur);
+      document.removeEventListener("mousedown", onMouseDown);
+    },
+    ignoreMutation: () => true,
+    stopEvent: (event: Event) => event.target instanceof globalThis.Node && source.contains(event.target),
+  };
+}
+
+function imageMarkdownFromAttrs(attrs: Record<string, string | null | undefined>) {
+  const src = attrs.markdownSrc || attrs.src || "";
+  const alt = (attrs.alt || "").replace(/]/g, "\\]");
+  const title = attrs.title ? ` "${attrs.title.replace(/"/g, '\\"')}"` : "";
+  return `![${alt}](${src}${title})`;
+}
+
 const editor = useEditor({
   enableInputRules: ["blockquote", "bulletList", "orderedList"],
   extensions: [
@@ -1154,7 +1350,7 @@ const editor = useEditor({
     TyporaBlockquote,
     GithubAlertInput,
     Link.configure({ openOnClick: false }),
-    Image,
+    MarkdownImage,
     Table.configure({ resizable: true }),
     TableRow,
     TableHeader,
@@ -1181,7 +1377,7 @@ const editor = useEditor({
     FencedCodeBlockInput,
     TyporaSourceMarkers,
   ],
-  content: renderMarkdownForEditor(appStore.currentContent),
+  content: renderMarkdownForEditorWithAssets(appStore.currentContent),
   editorProps: {
     attributes: {
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 pb-12 pt-6 focus:outline-none",
@@ -1295,6 +1491,22 @@ const editor = useEditor({
         }
         return false;
       },
+      dragover(_view, event) {
+        const dragEvent = event as DragEvent;
+        if (getImageFilesFromDrop(dragEvent.dataTransfer).length === 0) return false;
+        dragEvent.preventDefault();
+        return true;
+      },
+      drop(view, event) {
+        const dragEvent = event as DragEvent;
+        const files = getImageFilesFromDrop(dragEvent.dataTransfer);
+        if (files.length === 0) return false;
+        dragEvent.preventDefault();
+        const position = view.posAtCoords({ left: dragEvent.clientX, top: dragEvent.clientY });
+        const insertAt = position?.pos ?? view.state.doc.content.size;
+        void insertImageFilesIntoWysiwyg(files, insertAt, insertAt);
+        return true;
+      },
       blur(view) {
         window.setTimeout(() => {
           if (view.hasFocus()) return;
@@ -1329,11 +1541,18 @@ const editor = useEditor({
       return false;
     },
     handlePaste(view, event) {
+      const imageFiles = getImageFilesFromClipboard(event.clipboardData);
+      if (imageFiles.length > 0) {
+        event.preventDefault();
+        const { from, to } = view.state.selection;
+        void insertImageFilesIntoWysiwyg(imageFiles, from, to);
+        return true;
+      }
       const text = event.clipboardData?.getData("text/plain");
       if (!text || !looksLikeMarkdown(text)) return false;
       event.preventDefault();
       const { from, to } = view.state.selection;
-      editor.value?.commands.insertContentAt({ from, to }, renderMarkdownForEditor(text));
+      editor.value?.commands.insertContentAt({ from, to }, renderMarkdownForEditorWithAssets(text));
       return true;
     },
   },
@@ -1342,10 +1561,55 @@ const editor = useEditor({
   },
 });
 
+async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number) {
+  const markdown = await saveImagesAsMarkdown(files);
+  if (!markdown) return;
+  insertImageMarkdownIntoWysiwyg(markdown, from, to);
+}
+
+async function insertImagePathsIntoWysiwyg(paths: string[], from: number, to: number) {
+  const markdown = await imagePathsAsMarkdown(paths);
+  if (!markdown) return;
+  insertImageMarkdownIntoWysiwyg(markdown, from, to);
+}
+
+function insertImageMarkdownIntoWysiwyg(markdown: string, from: number, to: number) {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  const images = parseMarkdownImageSnippets(markdown);
+  if (images.length === 0) return;
+  const content = images.map((image) => ({ type: "image", attrs: { ...image, editing: true } }));
+  activeEditor.commands.insertContentAt({ from, to }, content);
+}
+
+function parseMarkdownImageSnippets(markdown: string) {
+  const images: Array<{ src: string; markdownSrc: string; alt: string; title: string | null }> = [];
+  const pattern = /!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(markdown))) {
+    const image = parseSingleMarkdownImage(match[0]);
+    if (image) images.push(image);
+  }
+  return images;
+}
+
+function parseSingleMarkdownImage(markdown: string) {
+  const match = markdown.match(/^!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)$/);
+  if (!match) return null;
+  const markdownSrc = match[2]?.trim();
+  if (!markdownSrc) return null;
+  return {
+    src: resolveMarkdownImageSource(markdownSrc),
+    markdownSrc,
+    alt: match[1].replace(/\\]/g, "]"),
+    title: match[3] || null,
+  };
+}
+
 watch(
   () => appStore.currentFilePath,
   () => {
-    editor.value?.commands.setContent(renderMarkdownForEditor(appStore.currentContent), { emitUpdate: false });
+    editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
   },
 );
 
@@ -1353,12 +1617,40 @@ watch(
   () => appStore.editorMode,
   () => {
     if (appStore.editorMode === "wysiwyg") {
-      editor.value?.commands.setContent(renderMarkdownForEditor(appStore.currentContent), { emitUpdate: false });
+      editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
     }
   },
 );
 
-onBeforeUnmount(() => editor.value?.destroy());
+onMounted(() => {
+  window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  editor.value?.destroy();
+});
+
+function handleGlobalImageInsert(event: CustomEvent<ImageInsertDetail>) {
+  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  const files = event.detail?.files || [];
+  const paths = event.detail?.paths || [];
+  if (files.length === 0 && paths.length === 0) return;
+  const view = editor.value?.view;
+  if (!view) return;
+  const insertAt = imageInsertPositionFromEventDetail(event.detail, view.state.doc.content.size);
+  if (paths.length > 0) {
+    void insertImagePathsIntoWysiwyg(paths, insertAt, insertAt);
+    return;
+  }
+  void insertImageFilesIntoWysiwyg(files, insertAt, insertAt);
+}
+
+function imageInsertPositionFromEventDetail(detail: ImageInsertDetail | undefined, fallback: number) {
+  const view = editor.value?.view;
+  if (!view || typeof detail?.position?.x !== "number" || typeof detail.position.y !== "number") return fallback;
+  return view.posAtCoords({ left: detail.position.x, top: detail.position.y })?.pos ?? fallback;
+}
 
 function hideContextMenu() {
   contextMenu.value.visible = false;
@@ -1490,7 +1782,7 @@ async function pasteFromClipboard(clean: boolean) {
   const text = await readClipboardText();
   if (!text) return;
   if (clean) {
-    (editor.value as any)?.commands.insertContent(renderMarkdownForEditor(text));
+    (editor.value as any)?.commands.insertContent(renderMarkdownForEditorWithAssets(text));
     return;
   }
   (editor.value as any)?.commands.insertContent(text);
@@ -1558,7 +1850,7 @@ function toggleLink() {
 function insertTaskItem() {
   const activeEditor = editor.value as any;
   if (!activeEditor) return;
-  activeEditor.commands.insertContent(renderMarkdownForEditor("- [ ] "));
+  activeEditor.commands.insertContent(renderMarkdownForEditorWithAssets("- [ ] "));
 }
 
 function insertGithubAlert(kind: string) {
@@ -1571,7 +1863,7 @@ function insertGithubAlert(kind: string) {
     .map((line) => `> ${line}`)
     .join("\n");
   const markdown = `> [!${kind.toUpperCase()}]\n${quotedBody}`;
-  activeEditor.commands.insertContent(renderMarkdownForEditor(markdown));
+  activeEditor.commands.insertContent(renderMarkdownForEditorWithAssets(markdown));
 }
 
 function setHeadingLevel(level: number | null) {
@@ -1780,7 +2072,14 @@ function editorHtmlToMarkdown(html: string) {
     const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${index}@@`;
     markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
   });
-  return markdown;
+  return normalizeLeadingImageWhitespace(markdown);
+}
+
+function normalizeLeadingImageWhitespace(markdown: string) {
+  return markdown
+    .replace(/^\n+(?=!\[[^\]\n]*\]\([^)\n]+\))/g, "")
+    .replace(/\n{3,}(?=!\[[^\]\n]*\]\([^)\n]+\))/g, "\n\n")
+    .replace(/(!\[[^\]\n]*\]\([^)\n]+\))\n{3,}/g, "$1\n\n");
 }
 
 function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: string) {
@@ -1805,7 +2104,7 @@ function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: s
 
     const content = document.createElement("div");
     content.className = "footnote-content";
-    content.innerHTML = renderMarkdownForEditor(definition.content || " ");
+    content.innerHTML = renderMarkdownForEditorWithAssets(definition.content || " ");
     content.title = definition.refs.length > 0 ? "点击返回正文引用" : "";
     content.addEventListener("click", () => {
       const firstRef = definition.refs[0];

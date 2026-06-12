@@ -15,6 +15,8 @@ pub fn run() {
             commands::file::save_large_file,
             commands::file::close_large_file,
             commands::file::write_text_file,
+            commands::file::save_asset_file,
+            commands::file::image_paths_to_markdown,
             commands::file::list_markdown_files,
             commands::file::create_markdown_file,
             commands::export::export_html,

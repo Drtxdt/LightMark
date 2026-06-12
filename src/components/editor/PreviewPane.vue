@@ -3,10 +3,11 @@ import { computed, nextTick, watch } from "vue";
 import mermaid from "mermaid";
 import { appStore } from "../../stores/appStore";
 import { renderMarkdown } from "../../utils/markdown";
+import { resolveRenderedImageSources } from "../../utils/imageAssets";
 import { extractOutline } from "../../utils/outline";
 
 const html = computed(() => {
-  const rendered = renderMarkdown(appStore.currentContent);
+  const rendered = resolveRenderedImageSources(renderMarkdown(appStore.currentContent));
   const outline = extractOutline(appStore.currentContent);
   let index = 0;
   return rendered.replace(/<h([1-6])>/g, (match) => {

@@ -1,4 +1,4 @@
-export function bindShortcut(key: string, handler: (event: KeyboardEvent) => void) {
+export function bindShortcut(key: string, handler: (event: KeyboardEvent) => void | boolean) {
   const normalized = key.toLowerCase();
   const listener = (event: KeyboardEvent) => {
     const parts = normalized.split("+");
@@ -12,8 +12,8 @@ export function bindShortcut(key: string, handler: (event: KeyboardEvent) => voi
       event.shiftKey === shift &&
       event.altKey === alt
     ) {
+      if (handler(event) === false) return;
       event.preventDefault();
-      handler(event);
     }
   };
   window.addEventListener("keydown", listener);

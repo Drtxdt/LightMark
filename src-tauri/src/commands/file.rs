@@ -278,6 +278,60 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn save_asset_file(
+    markdown_path: String,
+    file_name: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let markdown_path = PathBuf::from(markdown_path);
+    let document_dir = markdown_path
+        .parent()
+        .ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+    let assets_dir = document_dir.join("assets");
+    fs::create_dir_all(&assets_dir)
+        .map_err(|err| format!("Failed to create folder {}: {err}", assets_dir.display()))?;
+
+    let safe_name = sanitize_asset_file_name(&file_name);
+    let target = unique_asset_path(&assets_dir, &safe_name);
+    fs::write(&target, bytes).map_err(|err| format!("Failed to write {}: {err}", target.display()))?;
+    target
+        .strip_prefix(document_dir)
+        .map(|path| path_to_string(path.to_path_buf()))
+        .map_err(|err| format!("Failed to build relative path for {}: {err}", target.display()))
+}
+
+#[tauri::command]
+pub fn image_paths_to_markdown(markdown_path: String, paths: Vec<String>) -> Result<String, String> {
+    let markdown_path = PathBuf::from(markdown_path);
+    let document_dir = markdown_path
+        .parent()
+        .ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+
+    let snippets = paths
+        .into_iter()
+        .filter_map(|path| {
+            let image_path = PathBuf::from(path);
+            if !is_image_file(&image_path) {
+                return None;
+            }
+            let reference = relative_path(document_dir, &image_path);
+            let alt = image_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("image");
+            Some(format!("![{}]({})", alt, markdown_path_url(&reference)))
+        })
+        .collect::<Vec<_>>();
+
+    if snippets.is_empty() {
+        return Err("没有可用的图片文件。".to_string());
+    }
+
+    Ok(snippets.join("\n\n"))
+}
+
+#[tauri::command]
 pub fn list_markdown_files(folder: String) -> Result<Vec<FileNode>, String> {
     let root = PathBuf::from(folder);
     if !root.is_dir() {
@@ -307,6 +361,117 @@ pub fn create_markdown_file(folder: String, name: String) -> Result<String, Stri
     }
     fs::write(&path, "").map_err(|err| format!("Failed to create {}: {err}", path.display()))?;
     Ok(path_to_string(path))
+}
+
+fn sanitize_asset_file_name(file_name: &str) -> String {
+    let source = Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image.png");
+    let mut result = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            result.push(ch);
+        } else {
+            result.push('-');
+        }
+    }
+    let trimmed = result.trim_matches('-');
+    if trimmed.is_empty() {
+        "image.png".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unique_asset_path(folder: &Path, file_name: &str) -> PathBuf {
+    let path = folder.join(file_name);
+    if !path.exists() {
+        return path;
+    }
+
+    let source = Path::new(file_name);
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("image");
+    let extension = source.extension().and_then(|value| value.to_str());
+
+    for index in 1.. {
+        let candidate_name = match extension {
+            Some(ext) if !ext.is_empty() => format!("{stem}-{index}.{ext}"),
+            _ => format!("{stem}-{index}"),
+        };
+        let candidate = folder.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded asset filename search should always return");
+}
+
+fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn relative_path(from_dir: &Path, to_path: &Path) -> String {
+    let from_components = from_dir.components().collect::<Vec<_>>();
+    let to_components = to_path.components().collect::<Vec<_>>();
+    let mut common = 0_usize;
+    while common < from_components.len()
+        && common < to_components.len()
+        && from_components[common] == to_components[common]
+    {
+        common += 1;
+    }
+
+    if common == 0 {
+        return path_to_string(to_path.to_path_buf());
+    }
+
+    let mut parts = Vec::new();
+    for _ in common..from_components.len() {
+        parts.push("..".to_string());
+    }
+    for component in &to_components[common..] {
+        parts.push(component.as_os_str().to_string_lossy().to_string());
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn markdown_path_url(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .map(percent_encode_markdown_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn percent_encode_markdown_segment(segment: &str) -> String {
+    let mut encoded = String::new();
+    for byte in segment.as_bytes() {
+        let ch = *byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | ':' ) {
+            encoded.push(ch);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn read_children(folder: &Path) -> Result<Vec<FileNode>, String> {

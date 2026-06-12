@@ -1136,6 +1136,95 @@ sub {
   margin: 0;
 }
 
+.ProseMirror > p:first-child:has(> img:only-child),
+.markdown-preview > p:first-child:has(> img:only-child) {
+  margin-top: 0;
+}
+
+.ProseMirror > p:first-child > img:first-child,
+.markdown-preview > p:first-child > img:first-child {
+  margin-top: 0;
+}
+
+.typora-image-node {
+  margin: 0.9rem 0;
+}
+
+.ProseMirror > .typora-image-node:first-child,
+.typora-image-node:first-child img {
+  margin-top: 0;
+}
+
+.typora-image-node img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+}
+
+.typora-image-source {
+  display: none;
+  box-sizing: border-box;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  margin: 0 0 0.35rem;
+  padding: 0.08rem 0;
+  color: #9b9488;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  user-select: text;
+  outline: none;
+}
+
+.typora-image-node-editing .typora-image-source {
+  display: block;
+}
+
+.typora-image-source:focus {
+  color: #6f675d;
+  background: rgba(120, 113, 108, 0.08);
+}
+
+.typora-image-error {
+  display: none;
+  margin: -0.15rem 0 0.4rem;
+  color: #b42318;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.typora-image-node-error .typora-image-source {
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+}
+
+.typora-image-node-error .typora-image-error {
+  display: block;
+}
+
+.dark .typora-image-source {
+  color: #8b8377;
+}
+
+.dark .typora-image-source:focus {
+  color: #c8c0b6;
+  background: rgba(214, 211, 207, 0.08);
+}
+
+.dark .typora-image-error {
+  color: #f0a6a0;
+}
+
+.dark .typora-image-node-error .typora-image-source {
+  color: #f0a6a0;
+  background: rgba(240, 166, 160, 0.1);
+}
+
 .ProseMirror blockquote,
 .markdown-preview blockquote {
   border-left: 4px solid #dfe2e5;

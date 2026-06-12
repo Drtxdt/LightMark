@@ -6,6 +6,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import { appStore, setContent } from "../../stores/appStore";
+import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
@@ -134,6 +135,28 @@ function extensions() {
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
+    EditorView.domEventHandlers({
+      paste(event, currentView) {
+        const files = getImageFilesFromClipboard(event.clipboardData);
+        if (files.length === 0) return false;
+        event.preventDefault();
+        void insertImageFilesIntoSource(files, currentView);
+        return true;
+      },
+      dragover(event) {
+        if (getImageFilesFromDrop(event.dataTransfer).length === 0) return false;
+        event.preventDefault();
+        return true;
+      },
+      drop(event, currentView) {
+        const files = getImageFilesFromDrop(event.dataTransfer);
+        if (files.length === 0) return false;
+        event.preventDefault();
+        const position = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
+        void insertImageFilesIntoSource(files, currentView, position ?? currentView.state.doc.length);
+        return true;
+      },
+    }),
     minimalTheme,
     EditorView.updateListener.of((update) => {
       if (update.docChanged && !applyingExternalChange) {
@@ -141,6 +164,39 @@ function extensions() {
       }
     }),
   ];
+}
+
+async function insertImageFilesIntoSource(files: File[], currentView: EditorView, position?: number) {
+  const markdown = await saveImagesAsMarkdown(files);
+  if (!markdown) return;
+  insertImageMarkdownIntoSource(markdown, currentView, position);
+}
+
+async function insertImagePathsIntoSource(paths: string[], currentView: EditorView, position?: number) {
+  const markdown = await imagePathsAsMarkdown(paths);
+  if (!markdown) return;
+  insertImageMarkdownIntoSource(markdown, currentView, position);
+}
+
+function insertImageMarkdownIntoSource(markdown: string, currentView: EditorView, position?: number) {
+  const state = currentView.state;
+  const from = position ?? state.selection.main.from;
+  const to = position ?? state.selection.main.to;
+  const insert = withBlockSpacing(state.doc.toString(), from, to, markdown);
+  currentView.dispatch({
+    changes: { from, to, insert },
+    selection: { anchor: from + insert.length },
+    scrollIntoView: true,
+  });
+  currentView.focus();
+}
+
+function withBlockSpacing(documentText: string, from: number, to: number, markdown: string) {
+  const before = documentText.slice(0, from);
+  const after = documentText.slice(to);
+  const prefix = before.trim().length === 0 ? "" : before.endsWith("\n\n") ? "" : before.endsWith("\n") ? "\n" : "\n\n";
+  const suffix = after.trim().length === 0 ? "" : after.startsWith("\n\n") ? "" : after.startsWith("\n") ? "\n" : "\n\n";
+  return `${prefix}${markdown}${suffix}`;
 }
 
 onMounted(() => {
@@ -152,6 +208,7 @@ onMounted(() => {
       extensions: extensions(),
     }),
   });
+  window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
 });
 
 watch(
@@ -167,9 +224,26 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   view?.destroy();
   view = null;
 });
+
+function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: string[]; position?: { x?: number; y?: number } }>) {
+  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  const files = event.detail?.files || [];
+  const paths = event.detail?.paths || [];
+  if (files.length === 0 && paths.length === 0) return;
+  const position =
+    typeof event.detail?.position?.x === "number" && typeof event.detail.position.y === "number"
+      ? view.posAtCoords({ x: event.detail.position.x, y: event.detail.position.y }) ?? view.state.doc.length
+      : view.state.doc.length;
+  if (paths.length > 0) {
+    void insertImagePathsIntoSource(paths, view, position);
+    return;
+  }
+  void insertImageFilesIntoSource(files, view, position);
+}
 </script>
 
 <template>
