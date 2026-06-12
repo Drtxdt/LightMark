@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onBeforeUnmount, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
-import { Extension, Mark, mergeAttributes, Node } from "@tiptap/core";
+import { Extension, Mark, mergeAttributes, Node, wrappingInputRule } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import Heading from "@tiptap/extension-heading";
@@ -40,10 +40,74 @@ const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
+const githubAlertLabels: Record<string, string> = {
+  note: "Note",
+  tip: "Tip",
+  important: "Important",
+  warning: "Warning",
+  caution: "Caution",
+};
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
     return [];
+  },
+});
+
+const TyporaBlockquote = Node.create({
+  name: "blockquote",
+  group: "block",
+  content: "block+",
+  defining: true,
+
+  addAttributes() {
+    return {
+      alert: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("data-alert") || null,
+        renderHTML: (attributes) => {
+          const alert = attributes.alert;
+          if (!alert) return {};
+          return {
+            "data-alert": alert,
+            class: `markdown-alert markdown-alert-${alert}`,
+          };
+        },
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: "blockquote" }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["blockquote", mergeAttributes(HTMLAttributes), 0];
+  },
+
+  addInputRules() {
+    return [
+      wrappingInputRule({
+        find: /^\s*>\s$/,
+        type: this.type,
+        joinPredicate: () => false,
+      }),
+    ];
+  },
+});
+
+const GithubAlertInput = Extension.create({
+  name: "githubAlertInput",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        appendTransaction(transactions, _oldState, newState) {
+          if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          return convertBlockquoteMarkdown(newState, { force: true });
+        },
+      }),
+    ];
   },
 });
 
@@ -941,6 +1005,51 @@ turndown.addRule("tableOfContents", {
   replacement: () => "\n\n[TOC]\n\n",
 });
 
+turndown.addRule("githubAlert", {
+  filter: (node) => node instanceof HTMLElement && node.nodeName === "BLOCKQUOTE" && Boolean(node.dataset.alert),
+  replacement: (_content, node) => {
+    if (!(node instanceof HTMLElement)) return "";
+    const kind = (node.dataset.alert || "note").toLowerCase();
+    const alert = kind.toUpperCase();
+    const clone = node.cloneNode(true) as HTMLElement;
+    removeGithubAlertTitle(clone, kind);
+    const body = serializeGithubAlertBody(clone);
+    const quoted = body
+      ? body
+          .split("\n")
+          .map((line) => (line ? `> ${line}` : ">"))
+          .join("\n")
+      : "";
+    return `\n\n> [!${alert}]${quoted ? `\n${quoted}` : ""}\n\n`;
+  },
+});
+
+function removeGithubAlertTitle(clone: HTMLElement, kind: string) {
+  const title = clone.querySelector(".markdown-alert-title");
+  if (title) {
+    title.remove();
+    return;
+  }
+
+  const expected = (githubAlertLabels[kind] || kind).toLowerCase();
+  const firstElement = Array.from(clone.children).find((child): child is HTMLElement => child instanceof HTMLElement);
+  if (!firstElement) return;
+
+  const tag = firstElement.tagName.toLowerCase();
+  const text = (firstElement.textContent || "").trim().toLowerCase();
+  if (clone.children.length > 1 && (tag === "p" || /^h[1-6]$/.test(tag)) && text === expected) firstElement.remove();
+}
+
+function serializeGithubAlertBody(node: HTMLElement) {
+  const parts = Array.from(node.childNodes)
+    .map((child) => {
+      if (child instanceof HTMLElement) return turndown.turndown(child.outerHTML).trim();
+      return (child.textContent || "").trim();
+    })
+    .filter(Boolean);
+  return parts.join("\n\n").trim();
+}
+
 turndown.addRule("htmlBlock", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "html-block",
   replacement: (_content, node) => {
@@ -1022,6 +1131,7 @@ const editor = useEditor({
   extensions: [
     StarterKit.configure({
       heading: false,
+      blockquote: false,
       codeBlock: false,
       horizontalRule: false,
       strike: false,
@@ -1034,6 +1144,8 @@ const editor = useEditor({
     TyporaHeading.configure({
       levels: [1, 2, 3, 4, 5, 6],
     }),
+    TyporaBlockquote,
+    GithubAlertInput,
     Link.configure({ openOnClick: false }),
     Image,
     Table.configure({ resizable: true }),
@@ -1086,6 +1198,17 @@ const editor = useEditor({
       if (event.key === "Enter") {
         if (continueTaskItem(view)) {
           event.preventDefault();
+          return true;
+        }
+
+        const blockquoteTr = convertBlockquoteMarkdown(view.state, {
+          force: true,
+          onlySelectionBlock: true,
+          insertParagraph: true,
+        });
+        if (blockquoteTr) {
+          event.preventDefault();
+          view.dispatch(blockquoteTr.scrollIntoView());
           return true;
         }
 
@@ -1170,7 +1293,10 @@ const editor = useEditor({
           if (view.hasFocus()) return;
           if (convertPendingInlineMarkdown(view)) return;
 
-          const blockTr = convertHorizontalRuleMarkdown(view.state, { force: true }) || convertMarkdownHeading(view.state, { force: true });
+          const blockTr =
+            convertBlockquoteMarkdown(view.state, { force: true }) ||
+            convertHorizontalRuleMarkdown(view.state, { force: true }) ||
+            convertMarkdownHeading(view.state, { force: true });
           if (blockTr) view.dispatch(blockTr);
         }, 0);
         return false;
@@ -1856,6 +1982,7 @@ function convertPendingMarkdownBeforeMouseSelection(view: any, event: MouseEvent
   if (!clickPos || !isClickOutsideSelectionBlock(view.state, clickPos.pos)) return false;
 
   let tr =
+    convertBlockquoteMarkdown(view.state, { force: true, onlySelectionBlock: true }) ||
     convertHorizontalRuleMarkdown(view.state, { force: true, onlySelectionBlock: true }) ||
     convertMarkdownHeading(view.state, { force: true, onlySelectionBlock: true }) ||
     convertInlineCodeSyntax(view.state, { onlySelectionBlock: true }) ||
@@ -2140,6 +2267,89 @@ function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: n
   tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos));
   if (markType) tr = tr.removeStoredMark(markType);
   return tr.setStoredMarks([]);
+}
+
+function convertBlockquoteMarkdown(
+  state: any,
+  options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean } = {},
+) {
+  const { force = false, onlySelectionBlock = false, insertParagraph = false } = options;
+  const blockquote = state.schema.nodes.blockquote;
+  const paragraph = state.schema.nodes.paragraph;
+  if (!blockquote || !paragraph) return null;
+
+  let tr = state.tr;
+  let converted = false;
+  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
+  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (converted) return false;
+    if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
+    if (!force && state.selection.from >= pos && state.selection.from <= pos + node.nodeSize) return true;
+
+    const parentPos = state.doc.resolve(pos);
+    const blockquoteRange = findParentBlockquote(parentPos);
+    const insideBlockquote = Boolean(blockquoteRange);
+    const text = node.textContent.trim();
+    const canConvertInnerAlert = insideBlockquote && blockquoteRange && !blockquoteRange.node.attrs.alert;
+    const alertMatch = canConvertInnerAlert
+      ? text.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i)
+      : text.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i);
+    const quoteMatch = text.match(/^>\s+(.+)$/);
+
+    if (alertMatch) {
+      const kind = alertMatch[1].toLowerCase();
+      const body = (alertMatch[2] || "").trim();
+      const bodyParagraph = body ? paragraph.create(null, state.schema.text(body)) : paragraph.create();
+      const content = [bodyParagraph];
+
+      if (blockquoteRange) {
+        const alertNode = blockquote.create({ ...blockquoteRange.node.attrs, alert: kind }, content);
+        tr = tr.replaceWith(
+          blockquoteRange.pos,
+          blockquoteRange.pos + blockquoteRange.node.nodeSize,
+          alertNode,
+        );
+        const selectionPos = blockquoteRange.pos + 2 + body.length;
+        tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos));
+      } else {
+        const alertNode = blockquote.create({ alert: kind }, content);
+        tr = tr.replaceWith(pos, pos + node.nodeSize, alertNode);
+        const selectionPos = pos + 2 + body.length;
+        tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos));
+      }
+      converted = true;
+      return false;
+    }
+
+    if (!insideBlockquote && quoteMatch) {
+      const quote = blockquote.create(null, paragraph.create(null, state.schema.text(quoteMatch[1])));
+      tr = tr.replaceWith(pos, pos + node.nodeSize, quote);
+      if (insertParagraph) {
+        const after = pos + quote.nodeSize;
+        tr = tr.insert(after, paragraph.create());
+        tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
+      }
+      converted = true;
+      return false;
+    }
+
+    return true;
+  });
+
+  return converted ? tr : null;
+}
+
+function findParentBlockquote($pos: any) {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node?.type?.name === "blockquote") {
+      return { node, pos: $pos.before(depth) };
+    }
+  }
+  return null;
 }
 
 function convertMarkdownHeading(

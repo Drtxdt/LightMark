@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import ts from "typescript";
+import ts from "../node_modules/typescript/lib/typescript.js";
 
 const sourcePath = path.resolve("src/utils/markdown.ts");
 const source = fs.readFileSync(sourcePath, "utf8");
@@ -95,6 +95,24 @@ HTML 内含公式：<span>$a^2 + b^2 = c^2$</span>
 ---
 
 下文`;
+  const githubAlertSample = `> [!NOTE]
+> 这是 **Note** 内容。
+
+> [!WARNING]
+> 第一行
+> 第二行带 $E = mc^2$。
+
+> [!CAUTION]
+> 小心 <span style="color:red;">HTML</span>。`;
+  const blockquoteSample = `> 普通引用
+
+> [!NOTE]
+> 提示内容`;
+  const githubAlertSingleBodySample = `> [!NOTE]
+> ddd`;
+  const githubAlertMarkerBodySample = `> [!NOTE]
+> [!TIP]
+> 这里的 TIP 标记只是正文`;
   const rawHtmlSample = `输入框：<input type="checkbox" checked>
 
 未闭合标签测试：<span style="color:red;">这里没有闭合
@@ -118,6 +136,13 @@ function hello() {
   const blockPreviewHtml = renderMarkdown(blockHtmlSample);
   const horizontalEditorHtml = renderMarkdownForEditor(horizontalRuleSample);
   const horizontalPreviewHtml = renderMarkdown(horizontalRuleSample);
+  const alertEditorHtml = renderMarkdownForEditor(githubAlertSample);
+  const alertPreviewHtml = renderMarkdown(githubAlertSample);
+  const blockquoteEditorHtml = renderMarkdownForEditor(blockquoteSample);
+  const blockquotePreviewHtml = renderMarkdown(blockquoteSample);
+  const singleBodyAlertEditorHtml = renderMarkdownForEditor(githubAlertSingleBodySample);
+  const markerBodyAlertEditorHtml = renderMarkdownForEditor(githubAlertMarkerBodySample);
+  const markerBodyAlertPreviewHtml = renderMarkdown(githubAlertMarkerBodySample);
   const rawEditorHtml = renderMarkdownForEditor(rawHtmlSample);
   const rawPreviewHtml = renderMarkdown(rawHtmlSample);
   const examplePath = path.resolve("example/inline-html-test.md");
@@ -179,6 +204,24 @@ function hello() {
     [blockPreviewHtml.includes("<p>段落后面继续正常 Markdown。</p>"), "preview keeps markdown after block html outside html block"],
     [horizontalEditorHtml.includes("<hr"), "editor renders markdown horizontal rules"],
     [horizontalPreviewHtml.includes("<hr"), "preview renders markdown horizontal rules"],
+    [alertEditorHtml.includes('class="markdown-alert markdown-alert-note"'), "editor renders GitHub note alert class"],
+    [alertEditorHtml.includes('data-alert="warning"'), "editor preserves GitHub alert kind"],
+    [!alertEditorHtml.includes("markdown-alert-title"), "editor does not render GitHub alert titles as editable content"],
+    [!alertEditorHtml.includes("<p>Note</p>") && !alertPreviewHtml.includes("<p>Note</p>"), "GitHub alert title is not stored as body text"],
+    [alertEditorHtml.includes("<strong>Note</strong>"), "editor renders markdown inside GitHub alerts"],
+    [alertPreviewHtml.includes('class="markdown-alert markdown-alert-caution"'), "preview renders GitHub caution alert class"],
+    [alertPreviewHtml.includes("katex") && alertPreviewHtml.includes("E = mc"), "preview renders math inside GitHub alerts"],
+    [alertPreviewHtml.includes('style="color: red"'), "preview renders safe inline html inside GitHub alerts"],
+    [blockquoteEditorHtml.includes("<blockquote>") && blockquoteEditorHtml.includes("普通引用"), "editor renders ordinary blockquotes"],
+    [blockquotePreviewHtml.includes("<blockquote>") && blockquotePreviewHtml.includes("普通引用"), "preview renders ordinary blockquotes"],
+    [blockquoteEditorHtml.includes('class="markdown-alert markdown-alert-note"'), "editor renders GitHub alert after ordinary blockquote"],
+    [(blockquoteEditorHtml.match(/markdown-alert-title/g) || []).length === 0, "GitHub alerts do not render editable title placeholders"],
+    [!blockquoteEditorHtml.includes("[!NOTE]") && !blockquotePreviewHtml.includes("[!NOTE]"), "GitHub alert markers are hidden after render"],
+    [(singleBodyAlertEditorHtml.match(/ddd/g) || []).length === 1, "GitHub alert body renders exactly once"],
+    [!singleBodyAlertEditorHtml.includes("<p>Note</p>"), "GitHub alert single body does not receive a title paragraph"],
+    [markerBodyAlertEditorHtml.includes('markdown-alert-note') && !markerBodyAlertEditorHtml.includes('markdown-alert-tip'), "GitHub alert body marker does not override editor alert kind"],
+    [markerBodyAlertPreviewHtml.includes('markdown-alert-note') && !markerBodyAlertPreviewHtml.includes('markdown-alert-tip'), "GitHub alert body marker does not override preview alert kind"],
+    [markerBodyAlertEditorHtml.includes("[!TIP]") && markerBodyAlertPreviewHtml.includes("[!TIP]"), "GitHub alert body marker remains plain text"],
     [rawEditorHtml.includes('data-type="raw-html"'), "editor preserves unsupported html as raw placeholders"],
     [rawEditorHtml.includes('&lt;input type=&quot;checkbox&quot; checked&gt;'), "editor stores raw input source"],
     [rawEditorHtml.includes('&lt;!-- this is a comment --&gt;'), "editor stores html comments as raw source"],

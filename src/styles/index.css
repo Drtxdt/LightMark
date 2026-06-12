@@ -1149,6 +1149,303 @@ sub {
   color: #b9b3a8;
 }
 
+.dark .ProseMirror .markdown-alert,
+.dark .ProseMirror blockquote[data-alert],
+.dark .markdown-preview .markdown-alert,
+.dark .markdown-preview blockquote[data-alert],
+.dark .large-doc-render .markdown-alert,
+.dark .large-doc-render blockquote[data-alert] {
+  background: #1f242b;
+}
+
+.ProseMirror blockquote p:first-of-type::before,
+.ProseMirror blockquote p:first-of-type::after,
+.ProseMirror blockquote p:last-of-type::before,
+.ProseMirror blockquote p:last-of-type::after,
+.markdown-preview blockquote p:first-of-type::before,
+.markdown-preview blockquote p:first-of-type::after,
+.markdown-preview blockquote p:last-of-type::before,
+.markdown-preview blockquote p:last-of-type::after,
+.large-doc-render blockquote p:first-of-type::before,
+.large-doc-render blockquote p:first-of-type::after,
+.large-doc-render blockquote p:last-of-type::before,
+.large-doc-render blockquote p:last-of-type::after {
+  content: none !important;
+}
+
+.ProseMirror .markdown-alert,
+.ProseMirror blockquote[data-alert],
+.markdown-preview .markdown-alert,
+.markdown-preview blockquote[data-alert],
+.large-doc-render .markdown-alert,
+.large-doc-render blockquote[data-alert] {
+  margin: 1rem 0;
+  padding: 0.65rem 1rem;
+  border-left: 4px solid #8c959f;
+  border-radius: 0 6px 6px 0;
+  background: #f6f8fa;
+  color: inherit;
+}
+
+.ProseMirror .markdown-alert > .markdown-alert-title,
+.markdown-preview .markdown-alert > .markdown-alert-title,
+.large-doc-render .markdown-alert > .markdown-alert-title {
+  margin: 0 0 0.5rem;
+  font-weight: 700;
+}
+
+.ProseMirror .markdown-alert::before,
+.ProseMirror blockquote[data-alert]::before,
+.markdown-preview .markdown-alert::before,
+.markdown-preview blockquote[data-alert]::before,
+.large-doc-render .markdown-alert::before,
+.large-doc-render blockquote[data-alert]::before {
+  display: block;
+  margin: 0 0 0.45rem;
+  font-weight: 700;
+  line-height: 1.4;
+  pointer-events: none;
+  user-select: none;
+}
+
+.ProseMirror .markdown-alert > :first-child,
+.ProseMirror blockquote[data-alert] > :first-child,
+.markdown-preview .markdown-alert > :first-child,
+.markdown-preview blockquote[data-alert] > :first-child,
+.large-doc-render .markdown-alert > :first-child,
+.large-doc-render blockquote[data-alert] > :first-child {
+  margin-top: 0;
+}
+
+.ProseMirror .markdown-alert > :last-child,
+.ProseMirror blockquote[data-alert] > :last-child,
+.markdown-preview .markdown-alert > :last-child,
+.markdown-preview blockquote[data-alert] > :last-child,
+.large-doc-render .markdown-alert > :last-child,
+.large-doc-render blockquote[data-alert] > :last-child {
+  margin-bottom: 0;
+}
+
+.ProseMirror .markdown-alert-note,
+.ProseMirror blockquote[data-alert="note"],
+.markdown-preview .markdown-alert-note,
+.markdown-preview blockquote[data-alert="note"],
+.large-doc-render .markdown-alert-note,
+.large-doc-render blockquote[data-alert="note"] {
+  border-left-color: #0969da;
+  background: #f0f6ff;
+}
+
+.ProseMirror .markdown-alert-tip,
+.ProseMirror blockquote[data-alert="tip"],
+.markdown-preview .markdown-alert-tip,
+.markdown-preview blockquote[data-alert="tip"],
+.large-doc-render .markdown-alert-tip,
+.large-doc-render blockquote[data-alert="tip"] {
+  border-left-color: #1a7f37;
+  background: #f0fff4;
+}
+
+.ProseMirror .markdown-alert-important,
+.ProseMirror blockquote[data-alert="important"],
+.markdown-preview .markdown-alert-important,
+.markdown-preview blockquote[data-alert="important"],
+.large-doc-render .markdown-alert-important,
+.large-doc-render blockquote[data-alert="important"] {
+  border-left-color: #8250df;
+  background: #f6f0ff;
+}
+
+.ProseMirror .markdown-alert-warning,
+.ProseMirror blockquote[data-alert="warning"],
+.markdown-preview .markdown-alert-warning,
+.markdown-preview blockquote[data-alert="warning"],
+.large-doc-render .markdown-alert-warning,
+.large-doc-render blockquote[data-alert="warning"] {
+  border-left-color: #bf8700;
+  background: #fff8c5;
+}
+
+.ProseMirror .markdown-alert-caution,
+.ProseMirror blockquote[data-alert="caution"],
+.markdown-preview .markdown-alert-caution,
+.markdown-preview blockquote[data-alert="caution"],
+.large-doc-render .markdown-alert-caution,
+.large-doc-render blockquote[data-alert="caution"] {
+  border-left-color: #cf222e;
+  background: #fff1f1;
+}
+
+.ProseMirror .markdown-alert-note > .markdown-alert-title,
+.markdown-preview .markdown-alert-note > .markdown-alert-title,
+.large-doc-render .markdown-alert-note > .markdown-alert-title,
+.ProseMirror .markdown-alert-note::before,
+.ProseMirror blockquote[data-alert="note"]::before,
+.markdown-preview .markdown-alert-note::before,
+.markdown-preview blockquote[data-alert="note"]::before,
+.large-doc-render .markdown-alert-note::before,
+.large-doc-render blockquote[data-alert="note"]::before {
+  content: "Note";
+  color: #0969da;
+}
+
+.ProseMirror .markdown-alert-tip > .markdown-alert-title,
+.markdown-preview .markdown-alert-tip > .markdown-alert-title,
+.large-doc-render .markdown-alert-tip > .markdown-alert-title,
+.ProseMirror .markdown-alert-tip::before,
+.ProseMirror blockquote[data-alert="tip"]::before,
+.markdown-preview .markdown-alert-tip::before,
+.markdown-preview blockquote[data-alert="tip"]::before,
+.large-doc-render .markdown-alert-tip::before,
+.large-doc-render blockquote[data-alert="tip"]::before {
+  content: "Tip";
+  color: #1a7f37;
+}
+
+.ProseMirror .markdown-alert-important > .markdown-alert-title,
+.markdown-preview .markdown-alert-important > .markdown-alert-title,
+.large-doc-render .markdown-alert-important > .markdown-alert-title,
+.ProseMirror .markdown-alert-important::before,
+.ProseMirror blockquote[data-alert="important"]::before,
+.markdown-preview .markdown-alert-important::before,
+.markdown-preview blockquote[data-alert="important"]::before,
+.large-doc-render .markdown-alert-important::before,
+.large-doc-render blockquote[data-alert="important"]::before {
+  content: "Important";
+  color: #8250df;
+}
+
+.ProseMirror .markdown-alert-warning > .markdown-alert-title,
+.markdown-preview .markdown-alert-warning > .markdown-alert-title,
+.large-doc-render .markdown-alert-warning > .markdown-alert-title,
+.ProseMirror .markdown-alert-warning::before,
+.ProseMirror blockquote[data-alert="warning"]::before,
+.markdown-preview .markdown-alert-warning::before,
+.markdown-preview blockquote[data-alert="warning"]::before,
+.large-doc-render .markdown-alert-warning::before,
+.large-doc-render blockquote[data-alert="warning"]::before {
+  content: "Warning";
+  color: #9a6700;
+}
+
+.ProseMirror .markdown-alert-caution > .markdown-alert-title,
+.markdown-preview .markdown-alert-caution > .markdown-alert-title,
+.large-doc-render .markdown-alert-caution > .markdown-alert-title,
+.ProseMirror .markdown-alert-caution::before,
+.ProseMirror blockquote[data-alert="caution"]::before,
+.markdown-preview .markdown-alert-caution::before,
+.markdown-preview blockquote[data-alert="caution"]::before,
+.large-doc-render .markdown-alert-caution::before,
+.large-doc-render blockquote[data-alert="caution"]::before {
+  content: "Caution";
+  color: #cf222e;
+}
+
+.dark .ProseMirror .markdown-alert-note > .markdown-alert-title,
+.dark .markdown-preview .markdown-alert-note > .markdown-alert-title,
+.dark .large-doc-render .markdown-alert-note > .markdown-alert-title,
+.dark .ProseMirror .markdown-alert-note::before,
+.dark .ProseMirror blockquote[data-alert="note"]::before,
+.dark .markdown-preview .markdown-alert-note::before,
+.dark .markdown-preview blockquote[data-alert="note"]::before,
+.dark .large-doc-render .markdown-alert-note::before,
+.dark .large-doc-render blockquote[data-alert="note"]::before {
+  color: #58a6ff;
+}
+
+.dark .ProseMirror .markdown-alert-note,
+.dark .ProseMirror blockquote[data-alert="note"],
+.dark .markdown-preview .markdown-alert-note,
+.dark .markdown-preview blockquote[data-alert="note"],
+.dark .large-doc-render .markdown-alert-note,
+.dark .large-doc-render blockquote[data-alert="note"] {
+  background: #101d2e;
+}
+
+.dark .ProseMirror .markdown-alert-tip > .markdown-alert-title,
+.dark .markdown-preview .markdown-alert-tip > .markdown-alert-title,
+.dark .large-doc-render .markdown-alert-tip > .markdown-alert-title,
+.dark .ProseMirror .markdown-alert-tip::before,
+.dark .ProseMirror blockquote[data-alert="tip"]::before,
+.dark .markdown-preview .markdown-alert-tip::before,
+.dark .markdown-preview blockquote[data-alert="tip"]::before,
+.dark .large-doc-render .markdown-alert-tip::before,
+.dark .large-doc-render blockquote[data-alert="tip"]::before {
+  color: #3fb950;
+}
+
+.dark .ProseMirror .markdown-alert-tip,
+.dark .ProseMirror blockquote[data-alert="tip"],
+.dark .markdown-preview .markdown-alert-tip,
+.dark .markdown-preview blockquote[data-alert="tip"],
+.dark .large-doc-render .markdown-alert-tip,
+.dark .large-doc-render blockquote[data-alert="tip"] {
+  background: #10281a;
+}
+
+.dark .ProseMirror .markdown-alert-important > .markdown-alert-title,
+.dark .markdown-preview .markdown-alert-important > .markdown-alert-title,
+.dark .large-doc-render .markdown-alert-important > .markdown-alert-title,
+.dark .ProseMirror .markdown-alert-important::before,
+.dark .ProseMirror blockquote[data-alert="important"]::before,
+.dark .markdown-preview .markdown-alert-important::before,
+.dark .markdown-preview blockquote[data-alert="important"]::before,
+.dark .large-doc-render .markdown-alert-important::before,
+.dark .large-doc-render blockquote[data-alert="important"]::before {
+  color: #a371f7;
+}
+
+.dark .ProseMirror .markdown-alert-important,
+.dark .ProseMirror blockquote[data-alert="important"],
+.dark .markdown-preview .markdown-alert-important,
+.dark .markdown-preview blockquote[data-alert="important"],
+.dark .large-doc-render .markdown-alert-important,
+.dark .large-doc-render blockquote[data-alert="important"] {
+  background: #21182f;
+}
+
+.dark .ProseMirror .markdown-alert-warning > .markdown-alert-title,
+.dark .markdown-preview .markdown-alert-warning > .markdown-alert-title,
+.dark .large-doc-render .markdown-alert-warning > .markdown-alert-title,
+.dark .ProseMirror .markdown-alert-warning::before,
+.dark .ProseMirror blockquote[data-alert="warning"]::before,
+.dark .markdown-preview .markdown-alert-warning::before,
+.dark .markdown-preview blockquote[data-alert="warning"]::before,
+.dark .large-doc-render .markdown-alert-warning::before,
+.dark .large-doc-render blockquote[data-alert="warning"]::before {
+  color: #d29922;
+}
+
+.dark .ProseMirror .markdown-alert-warning,
+.dark .ProseMirror blockquote[data-alert="warning"],
+.dark .markdown-preview .markdown-alert-warning,
+.dark .markdown-preview blockquote[data-alert="warning"],
+.dark .large-doc-render .markdown-alert-warning,
+.dark .large-doc-render blockquote[data-alert="warning"] {
+  background: #2d250b;
+}
+
+.dark .ProseMirror .markdown-alert-caution > .markdown-alert-title,
+.dark .markdown-preview .markdown-alert-caution > .markdown-alert-title,
+.dark .large-doc-render .markdown-alert-caution > .markdown-alert-title,
+.dark .ProseMirror .markdown-alert-caution::before,
+.dark .ProseMirror blockquote[data-alert="caution"]::before,
+.dark .markdown-preview .markdown-alert-caution::before,
+.dark .markdown-preview blockquote[data-alert="caution"]::before,
+.dark .large-doc-render .markdown-alert-caution::before,
+.dark .large-doc-render blockquote[data-alert="caution"]::before {
+  color: #f85149;
+}
+
+.dark .ProseMirror .markdown-alert-caution,
+.dark .ProseMirror blockquote[data-alert="caution"],
+.dark .markdown-preview .markdown-alert-caution,
+.dark .markdown-preview blockquote[data-alert="caution"],
+.dark .large-doc-render .markdown-alert-caution,
+.dark .large-doc-render blockquote[data-alert="caution"] {
+  background: #2d1517;
+}
+
 .ProseMirror a,
 .markdown-preview a {
   color: #4183c4;

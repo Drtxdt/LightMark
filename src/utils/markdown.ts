@@ -1,4 +1,5 @@
 import MarkdownIt from "markdown-it";
+import type Token from "markdown-it/lib/token.mjs";
 import markdownItKatex from "markdown-it-katex";
 import hljs from "highlight.js";
 import {
@@ -63,6 +64,19 @@ export function buildExportHtml(title: string, body: string) {
     pre { overflow: auto; padding: 16px; border-radius: 8px; background: #1b1a18; color: #e8e5df; }
     code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid #d5d0c6; color: #756f66; }
+    .markdown-alert { margin: 16px 0; padding: 8px 16px; border-left: 4px solid #8c959f; border-radius: 0 6px 6px 0; background: #f6f8fa; }
+    .markdown-alert::before { display: block; margin: 0 0 8px; font-weight: 700; line-height: 1.4; }
+    .markdown-alert-title { display: none; }
+    .markdown-alert-note { border-left-color: #0969da; background: #f0f6ff; }
+    .markdown-alert-note::before { content: "Note"; color: #0969da; }
+    .markdown-alert-tip { border-left-color: #1a7f37; background: #f0fff4; }
+    .markdown-alert-tip::before { content: "Tip"; color: #1a7f37; }
+    .markdown-alert-important { border-left-color: #8250df; background: #f6f0ff; }
+    .markdown-alert-important::before { content: "Important"; color: #8250df; }
+    .markdown-alert-warning { border-left-color: #bf8700; background: #fff8c5; }
+    .markdown-alert-warning::before { content: "Warning"; color: #9a6700; }
+    .markdown-alert-caution { border-left-color: #cf222e; background: #fff1f1; }
+    .markdown-alert-caution::before { content: "Caution"; color: #cf222e; }
     img { max-width: 100%; }
     a { color: inherit; text-decoration-color: #b9b3a8; text-underline-offset: 3px; }
   </style>
@@ -154,6 +168,7 @@ function enhanceMarkdownForRender(markdown: string, stash?: (html: string) => st
 
 function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLightMarkInternal?: boolean } = {}) {
   instance.linkify.set({ fuzzyLink: true });
+  instance.core.ruler.after("block", "lightmark_github_alerts", (state) => transformGithubAlerts(state.tokens, state.Token, state.md, state.env));
 
   instance.renderer.rules.text = (tokens, idx) => renderInlineEnhancements(instance.utils.escapeHtml(tokens[idx].content));
   instance.renderer.rules.html_inline = (tokens, idx) => {
@@ -194,6 +209,30 @@ function convertTaskItems(markdown: string) {
     const isChecked = checked.toLowerCase() === "x";
     return `${indent}${marker} <span data-task-item="${isChecked ? "checked" : "unchecked"}">${text || "&nbsp;"}</span>`;
   });
+}
+
+function transformGithubAlerts(tokens: Token[], _TokenCtor: typeof Token, parser: MarkdownIt, env: unknown) {
+  for (let index = 0; index < tokens.length - 3; index += 1) {
+    if (tokens[index].type !== "blockquote_open") continue;
+
+    const paragraphOpen = tokens[index + 1];
+    const inline = tokens[index + 2];
+    const paragraphClose = tokens[index + 3];
+    if (paragraphOpen?.type !== "paragraph_open" || inline?.type !== "inline" || paragraphClose?.type !== "paragraph_close") continue;
+
+    const match = inline.content.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?:\n([\s\S]*))?$/i);
+    if (!match) continue;
+
+    const kind = match[1].toLowerCase();
+    const rest = (match[2] || "").trimStart();
+
+    tokens[index].attrJoin("class", `markdown-alert markdown-alert-${kind}`);
+    tokens[index].attrSet("data-alert", kind);
+    const children: Token[] = [];
+    parser.inline.parse(rest, parser, env, children);
+    inline.content = "";
+    inline.children = children;
+  }
 }
 
 function isLightMarkInternalPlaceholder(html: string) {
