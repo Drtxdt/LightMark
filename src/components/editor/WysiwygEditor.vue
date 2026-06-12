@@ -40,6 +40,13 @@ const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
+const githubAlertKinds = [
+  { kind: "note", label: "Note" },
+  { kind: "tip", label: "Tip" },
+  { kind: "important", label: "Important" },
+  { kind: "warning", label: "Warning" },
+  { kind: "caution", label: "Caution" },
+] as const;
 const githubAlertLabels: Record<string, string> = {
   note: "Note",
   tip: "Tip",
@@ -1554,6 +1561,19 @@ function insertTaskItem() {
   activeEditor.commands.insertContent(renderMarkdownForEditor("- [ ] "));
 }
 
+function insertGithubAlert(kind: string) {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return;
+  const selectedText = getSelectedPlainText().trim();
+  const body = selectedText || "警示内容";
+  const quotedBody = body
+    .split(/\r?\n/)
+    .map((line) => `> ${line}`)
+    .join("\n");
+  const markdown = `> [!${kind.toUpperCase()}]\n${quotedBody}`;
+  activeEditor.commands.insertContent(renderMarkdownForEditor(markdown));
+}
+
 function setHeadingLevel(level: number | null) {
   const chain = (editor.value as any)?.chain().focus();
   if (!chain) return;
@@ -2654,6 +2674,20 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
         </div>
 
         <div class="lm-menu-separator"></div>
+        <div class="lm-menu-sub">
+          <button class="lm-menu-item">GitHub 警示框</button>
+          <div class="lm-menu-pop">
+            <button
+              v-for="alert in githubAlertKinds"
+              :key="alert.kind"
+              class="lm-menu-item"
+              @click="runMenuCommand(() => insertGithubAlert(alert.kind))"
+            >
+              {{ alert.label }}
+            </button>
+          </div>
+        </div>
+
         <div class="lm-menu-sub">
           <button class="lm-menu-item" :class="{ 'lm-menu-disabled': !canUseTableMenu }">表格</button>
           <div class="lm-menu-pop lm-menu-pop-wide" v-if="canUseTableMenu">
