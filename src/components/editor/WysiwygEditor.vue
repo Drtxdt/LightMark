@@ -1249,9 +1249,10 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
       title: parsed.title,
       editing: false,
     };
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
     errorMessage = "";
     sourceVisible = false;
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
+    render();
     return true;
   };
   const selectImage = () => {
