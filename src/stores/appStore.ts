@@ -24,7 +24,7 @@ export const appStore = reactive({
   isDirty: false,
   editorMode: "wysiwyg" as EditorMode,
   recentFiles: [] as string[],
-  theme: "system" as ThemeMode,
+  theme: "light" as ThemeMode,
   commandPaletteOpen: false,
   wordCountOpen: false,
   statusMessage: "",
@@ -44,7 +44,7 @@ export function setContent(content: string, dirty = true) {
 export async function loadConfig() {
   const config = await invoke<AppConfig>("read_app_config");
   appStore.recentFiles = config.recentFiles ?? [];
-  appStore.theme = config.theme ?? "system";
+  appStore.theme = normalizeTheme(config.theme);
   resetOpenDocument();
   appStore.currentWorkspace = "";
   appStore.fileTree = [];
@@ -199,10 +199,17 @@ export async function setTheme(theme: ThemeMode) {
 }
 
 export function applyTheme() {
-  const dark =
-    appStore.theme === "dark" ||
-    (appStore.theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.classList.toggle("dark", dark);
+  document.documentElement.classList.toggle("dark", appStore.theme === "dark");
+}
+
+function normalizeTheme(theme: ThemeMode | undefined) {
+  if (theme === "light" || theme === "dark") return theme;
+  return currentSystemTheme();
+}
+
+function currentSystemTheme(): Exclude<ThemeMode, "system"> {
+  if (typeof window === "undefined" || !window.matchMedia) return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function rememberRecentFile(path: string) {

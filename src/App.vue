@@ -30,7 +30,6 @@ onMounted(async () => {
   unbindPreventUiSelectAll = bindShortcut("ctrl+a", (event) => {
     if (isEditableTarget(event.target)) return false;
   });
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
   window.addEventListener("paste", handleGlobalImagePaste);
   window.addEventListener("dragover", handleGlobalImageDragOver);
   window.addEventListener("drop", handleGlobalImageDrop);

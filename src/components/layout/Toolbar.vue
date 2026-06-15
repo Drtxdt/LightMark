@@ -10,7 +10,9 @@ import {
   setTheme,
   switchMode,
 } from "../../stores/appStore";
+import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
+import type { ThemeMode } from "../../types";
 
 async function run(action: () => Promise<void> | void) {
   try {
@@ -30,6 +32,10 @@ async function exportHtml() {
   });
   appStore.statusMessage = `已导出：${target}`;
 }
+
+function toggleTheme(theme: "light" | "dark") {
+  void run(() => setTheme(theme as ThemeMode));
+}
 </script>
 
 <template>
@@ -48,11 +54,11 @@ async function exportHtml() {
       <span class="max-w-[360px] truncate text-sm text-ink-500 dark:text-ink-300">
         {{ currentFileName }}<span v-if="appStore.isDirty"> *</span>
       </span>
-      <select class="select" :value="appStore.theme" @change="setTheme(($event.target as HTMLSelectElement).value as any)">
-        <option value="system">跟随系统</option>
-        <option value="light">浅色</option>
-        <option value="dark">深色</option>
-      </select>
+      <ThemeToggle
+        :model-value="appStore.theme === 'dark' ? 'dark' : 'light'"
+        size="md"
+        @update:model-value="toggleTheme"
+      />
     </div>
   </header>
 </template>
