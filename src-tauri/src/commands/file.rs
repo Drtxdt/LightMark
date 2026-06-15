@@ -301,11 +301,20 @@ pub fn save_asset_file(
 }
 
 #[tauri::command]
-pub fn image_paths_to_markdown(markdown_path: String, paths: Vec<String>) -> Result<String, String> {
+pub fn image_paths_to_markdown(
+    markdown_path: String,
+    paths: Vec<String>,
+    use_relative_path: Option<bool>,
+    ensure_dot_slash: Option<bool>,
+    escape_path: Option<bool>,
+) -> Result<String, String> {
     let markdown_path = PathBuf::from(markdown_path);
     let document_dir = markdown_path
         .parent()
         .ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+    let use_relative_path = use_relative_path.unwrap_or(true);
+    let ensure_dot_slash = ensure_dot_slash.unwrap_or(false);
+    let escape_path = escape_path.unwrap_or(true);
 
     let snippets = paths
         .into_iter()
@@ -314,13 +323,22 @@ pub fn image_paths_to_markdown(markdown_path: String, paths: Vec<String>) -> Res
             if !is_image_file(&image_path) {
                 return None;
             }
-            let reference = relative_path(document_dir, &image_path);
+            let reference = if use_relative_path {
+                normalize_relative_reference(&relative_path(document_dir, &image_path), ensure_dot_slash)
+            } else {
+                path_to_string(image_path.clone())
+            };
             let alt = image_path
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or("image");
-            Some(format!("![{}]({})", alt, markdown_path_url(&reference)))
+            let source = if escape_path {
+                markdown_path_url(&reference)
+            } else {
+                reference.replace('\\', "/")
+            };
+            Some(format!("![{}]({})", alt, source))
         })
         .collect::<Vec<_>>();
 
@@ -450,6 +468,23 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> String {
         ".".to_string()
     } else {
         parts.join("/")
+    }
+}
+
+fn normalize_relative_reference(reference: &str, ensure_dot_slash: bool) -> String {
+    let normalized = reference.replace('\\', "/");
+    if !ensure_dot_slash {
+        return normalized;
+    }
+    if normalized == "."
+        || normalized.starts_with("./")
+        || normalized.starts_with("../")
+        || normalized.starts_with('/')
+        || normalized.contains(":/")
+    {
+        normalized
+    } else {
+        format!("./{normalized}")
     }
 }
 

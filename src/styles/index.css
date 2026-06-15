@@ -71,6 +71,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+:root {
+  --lm-editor-width: 860px;
+  --lm-editor-font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --lm-editor-font-size: 16px;
+  --lm-editor-line-height: 1.6;
+  --lm-editor-paragraph-spacing: 0.8em;
+  --lm-editor-code-font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 @layer components {
   .btn {
     @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm text-ink-700 transition-colors hover:bg-paper-100 hover:text-ink-900 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
@@ -116,13 +125,13 @@ body {
 }
 
 .cm-scroller {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-family: var(--lm-editor-code-font-family);
   line-height: 1.75;
   padding: 32px 0;
 }
 
 .cm-content {
-  max-width: 860px;
+  max-width: var(--lm-editor-width);
   margin: 0 auto;
   padding: 0 32px;
 }
@@ -163,8 +172,9 @@ body {
 .ProseMirror,
 .markdown-preview {
   color: #333333;
-  font-size: 16px;
-  line-height: 1.6;
+  font-family: var(--lm-editor-font-family);
+  font-size: var(--lm-editor-font-size);
+  line-height: var(--lm-editor-line-height);
 }
 
 .dark .ProseMirror,
@@ -184,7 +194,7 @@ body {
 .markdown-preview ol,
 .markdown-preview dl,
 .markdown-preview table {
-  margin: 0.8em 0;
+  margin: var(--lm-editor-paragraph-spacing) 0;
 }
 
 .ProseMirror ul,

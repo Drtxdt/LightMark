@@ -14,8 +14,181 @@ pub struct FileNode {
 pub struct AppConfig {
     #[serde(default)]
     pub recent_files: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub settings: AppSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default)]
+    pub general: GeneralSettings,
+    #[serde(default)]
+    pub editor: EditorSettings,
+    #[serde(default)]
+    pub markdown: MarkdownSettings,
+    #[serde(default)]
+    pub image: ImageSettings,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub export: ExportSettings,
+    #[serde(default)]
+    pub shortcuts: ShortcutSettings,
+    #[serde(default)]
+    pub advanced: AdvancedSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralSettings {
+    #[serde(default = "default_launch_behavior")]
+    pub launch_behavior: String,
+    #[serde(default)]
+    pub restore_last_file: bool,
+    #[serde(default = "default_recent_files_limit")]
+    pub recent_files_limit: u8,
+    #[serde(default)]
+    pub auto_save: bool,
+    #[serde(default = "default_auto_save_interval_minutes")]
+    pub auto_save_interval_minutes: u8,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default)]
+    pub spellcheck: bool,
+    #[serde(default = "default_spellcheck_language")]
+    pub spellcheck_language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorSettings {
+    #[serde(default = "default_editor_mode")]
+    pub default_mode: String,
+    #[serde(default = "default_true")]
+    pub auto_pair_brackets: bool,
+    #[serde(default = "default_true")]
+    pub auto_pair_markdown_syntax: bool,
+    #[serde(default)]
+    pub paste_markdown_as_plain_text: bool,
+    #[serde(default)]
+    pub focus_mode: bool,
+    #[serde(default)]
+    pub typewriter_mode: bool,
+    #[serde(default = "default_true")]
+    pub show_word_count: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownSettings {
+    #[serde(default)]
+    pub strict_mode: bool,
+    #[serde(default = "default_true")]
+    pub inline_html: bool,
+    #[serde(default = "default_true")]
+    pub block_html: bool,
+    #[serde(default = "default_true")]
+    pub math: bool,
+    #[serde(default = "default_true")]
+    pub mermaid: bool,
+    #[serde(default = "default_true")]
+    pub footnotes: bool,
+    #[serde(default = "default_true")]
+    pub toc: bool,
+    #[serde(default = "default_true")]
+    pub task_list: bool,
+    #[serde(default = "default_true")]
+    pub github_alerts: bool,
+    #[serde(default = "default_true")]
+    pub yaml_front_matter: bool,
+    #[serde(default = "default_true")]
+    pub smart_punctuation: bool,
+    #[serde(default = "default_true")]
+    pub subscript: bool,
+    #[serde(default = "default_true")]
+    pub superscript: bool,
+    #[serde(default = "default_true")]
+    pub highlight: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSettings {
+    #[serde(default = "default_image_insert_behavior")]
+    pub insert_behavior: String,
+    #[serde(default = "default_true")]
+    pub use_relative_path: bool,
+    #[serde(default)]
+    pub ensure_dot_slash: bool,
+    #[serde(default = "default_true")]
+    pub escape_path: bool,
+    #[serde(default = "default_asset_folder")]
+    pub asset_folder: String,
+    #[serde(default)]
+    pub root_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_editor_width")]
+    pub editor_width: u16,
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+    #[serde(default = "default_font_size")]
+    pub font_size: u8,
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+    #[serde(default = "default_paragraph_spacing")]
+    pub paragraph_spacing: f32,
+    #[serde(default = "default_code_font_family")]
+    pub code_font_family: String,
+    #[serde(default = "default_true")]
+    pub show_sidebar: bool,
+    #[serde(default = "default_true")]
+    pub show_outline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSettings {
+    #[serde(default = "default_export_folder")]
+    pub default_folder: String,
+    #[serde(default)]
+    pub custom_folder: String,
+    #[serde(default = "default_html_theme")]
+    pub html_theme: String,
+    #[serde(default = "default_true")]
+    pub html_include_styles: bool,
+    #[serde(default)]
+    pub allow_yaml_override: bool,
+    #[serde(default)]
+    pub open_file_after_export: bool,
+    #[serde(default)]
+    pub open_folder_after_export: bool,
+    #[serde(default)]
+    pub pandoc_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutSettings {
+    #[serde(default)]
+    pub custom_keybindings: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedSettings {
+    #[serde(default)]
+    pub debug_mode: bool,
+    #[serde(default)]
+    pub experimental_features: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,10 +199,6 @@ pub struct FileInfo {
     pub line_count: usize,
     pub is_large: bool,
     pub encoding: String,
-}
-
-fn default_theme() -> String {
-    "system".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +251,189 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             recent_files: Vec::new(),
-            theme: "system".to_string(),
+            theme: None,
+            settings: AppSettings::default(),
         }
     }
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            general: GeneralSettings::default(),
+            editor: EditorSettings::default(),
+            markdown: MarkdownSettings::default(),
+            image: ImageSettings::default(),
+            appearance: AppearanceSettings::default(),
+            export: ExportSettings::default(),
+            shortcuts: ShortcutSettings::default(),
+            advanced: AdvancedSettings::default(),
+        }
+    }
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            launch_behavior: default_launch_behavior(),
+            restore_last_file: false,
+            recent_files_limit: default_recent_files_limit(),
+            auto_save: false,
+            auto_save_interval_minutes: default_auto_save_interval_minutes(),
+            language: default_language(),
+            spellcheck: false,
+            spellcheck_language: default_spellcheck_language(),
+        }
+    }
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            default_mode: default_editor_mode(),
+            auto_pair_brackets: true,
+            auto_pair_markdown_syntax: true,
+            paste_markdown_as_plain_text: false,
+            focus_mode: false,
+            typewriter_mode: false,
+            show_word_count: true,
+        }
+    }
+}
+
+impl Default for MarkdownSettings {
+    fn default() -> Self {
+        Self {
+            strict_mode: false,
+            inline_html: true,
+            block_html: true,
+            math: true,
+            mermaid: true,
+            footnotes: true,
+            toc: true,
+            task_list: true,
+            github_alerts: true,
+            yaml_front_matter: true,
+            smart_punctuation: true,
+            subscript: true,
+            superscript: true,
+            highlight: true,
+        }
+    }
+}
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        Self {
+            insert_behavior: default_image_insert_behavior(),
+            use_relative_path: true,
+            ensure_dot_slash: false,
+            escape_path: true,
+            asset_folder: default_asset_folder(),
+            root_url: String::new(),
+        }
+    }
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            editor_width: default_editor_width(),
+            font_family: default_font_family(),
+            font_size: default_font_size(),
+            line_height: default_line_height(),
+            paragraph_spacing: default_paragraph_spacing(),
+            code_font_family: default_code_font_family(),
+            show_sidebar: true,
+            show_outline: true,
+        }
+    }
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            default_folder: default_export_folder(),
+            custom_folder: String::new(),
+            html_theme: default_html_theme(),
+            html_include_styles: true,
+            allow_yaml_override: false,
+            open_file_after_export: false,
+            open_folder_after_export: false,
+            pandoc_path: String::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_launch_behavior() -> String {
+    "blank".to_string()
+}
+
+fn default_recent_files_limit() -> u8 {
+    10
+}
+
+fn default_auto_save_interval_minutes() -> u8 {
+    5
+}
+
+fn default_language() -> String {
+    "system".to_string()
+}
+
+fn default_spellcheck_language() -> String {
+    "en-US".to_string()
+}
+
+fn default_editor_mode() -> String {
+    "wysiwyg".to_string()
+}
+
+fn default_image_insert_behavior() -> String {
+    "reference".to_string()
+}
+
+fn default_asset_folder() -> String {
+    "assets".to_string()
+}
+
+fn default_editor_width() -> u16 {
+    860
+}
+
+fn default_font_family() -> String {
+    "\"Open Sans\", \"Clear Sans\", \"Helvetica Neue\", Helvetica, Arial, sans-serif".to_string()
+}
+
+fn default_font_size() -> u8 {
+    16
+}
+
+fn default_line_height() -> f32 {
+    1.6
+}
+
+fn default_paragraph_spacing() -> f32 {
+    0.8
+}
+
+fn default_code_font_family() -> String {
+    "\"JetBrains Mono\", ui-monospace, SFMono-Regular, Consolas, monospace".to_string()
+}
+
+fn default_export_folder() -> String {
+    "auto".to_string()
+}
+
+fn default_html_theme() -> String {
+    "current".to_string()
 }

@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import { appStore } from "../../stores/appStore";
 import Sidebar from "./Sidebar.vue";
 import Toolbar from "./Toolbar.vue";
 import StatusBar from "./StatusBar.vue";
 import EditorShell from "../editor/EditorShell.vue";
 
 const sidebarWidth = ref(280);
+const gridColumns = computed(() => {
+  return appStore.settings.appearance.showSidebar ? `${sidebarWidth.value}px 4px minmax(0, 1fr)` : "minmax(0, 1fr)";
+});
 
 function startResize(event: PointerEvent) {
   const startX = event.clientX;
@@ -32,9 +36,10 @@ function startResize(event: PointerEvent) {
 <template>
   <div class="flex h-screen flex-col bg-paper-50 text-ink-900 dark:bg-paper-950 dark:text-ink-100">
     <Toolbar />
-    <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: `${sidebarWidth}px 4px minmax(0, 1fr)` }">
-      <Sidebar />
+    <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: gridColumns }">
+      <Sidebar v-if="appStore.settings.appearance.showSidebar" />
       <div
+        v-if="appStore.settings.appearance.showSidebar"
         class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
         @pointerdown="startResize"
       />

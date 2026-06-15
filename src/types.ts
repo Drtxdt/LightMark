@@ -1,6 +1,8 @@
 export type EditorMode = "wysiwyg" | "source";
 export type ThemeMode = "light" | "dark" | "system";
 export type DocumentMode = "normal" | "large";
+export type ImageInsertBehavior = "reference" | "copyToAssets";
+export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
 
 export interface FileNode {
   name: string;
@@ -11,7 +13,98 @@ export interface FileNode {
 
 export interface AppConfig {
   recentFiles: string[];
+  theme?: ThemeMode;
+  settings?: AppSettings;
+}
+
+export interface AppSettings {
+  general: GeneralSettings;
+  editor: EditorSettings;
+  markdown: MarkdownSettings;
+  image: ImageSettings;
+  appearance: AppearanceSettings;
+  export: ExportSettings;
+  shortcuts: ShortcutSettings;
+  advanced: AdvancedSettings;
+}
+
+export interface GeneralSettings {
+  launchBehavior: "blank" | "restoreLastSession" | "openWorkspace";
+  restoreLastFile: boolean;
+  recentFilesLimit: number;
+  autoSave: boolean;
+  autoSaveIntervalMinutes: number;
+  language: "system" | "zh-CN" | "en-US";
+  spellcheck: boolean;
+  spellcheckLanguage: string;
+}
+
+export interface EditorSettings {
+  defaultMode: EditorMode;
+  autoPairBrackets: boolean;
+  autoPairMarkdownSyntax: boolean;
+  pasteMarkdownAsPlainText: boolean;
+  focusMode: boolean;
+  typewriterMode: boolean;
+  showWordCount: boolean;
+}
+
+export interface MarkdownSettings {
+  strictMode: boolean;
+  inlineHtml: boolean;
+  blockHtml: boolean;
+  math: boolean;
+  mermaid: boolean;
+  footnotes: boolean;
+  toc: boolean;
+  taskList: boolean;
+  githubAlerts: boolean;
+  yamlFrontMatter: boolean;
+  smartPunctuation: boolean;
+  subscript: boolean;
+  superscript: boolean;
+  highlight: boolean;
+}
+
+export interface ImageSettings {
+  insertBehavior: ImageInsertBehavior;
+  useRelativePath: boolean;
+  ensureDotSlash: boolean;
+  escapePath: boolean;
+  assetFolder: string;
+  rootUrl: string;
+}
+
+export interface AppearanceSettings {
   theme: ThemeMode;
+  editorWidth: number;
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+  paragraphSpacing: number;
+  codeFontFamily: string;
+  showSidebar: boolean;
+  showOutline: boolean;
+}
+
+export interface ExportSettings {
+  defaultFolder: ExportDefaultFolder;
+  customFolder: string;
+  htmlTheme: "current" | "light" | "dark";
+  htmlIncludeStyles: boolean;
+  allowYamlOverride: boolean;
+  openFileAfterExport: boolean;
+  openFolderAfterExport: boolean;
+  pandocPath: string;
+}
+
+export interface ShortcutSettings {
+  customKeybindings: boolean;
+}
+
+export interface AdvancedSettings {
+  debugMode: boolean;
+  experimentalFeatures: boolean;
 }
 
 export interface OutlineItem {

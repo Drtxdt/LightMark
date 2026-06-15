@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from "vue";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
+import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import WordCountPanel from "./components/plugin/WordCountPanel.vue";
 import { activatePlugins } from "./plugins/registry";
 import { wordCountPlugin } from "./plugins/wordCountPlugin";
@@ -90,5 +91,6 @@ function handleGlobalImageDrop(event: DragEvent) {
 <template>
   <AppLayout />
   <CommandPalette v-if="appStore.commandPaletteOpen" />
+  <SettingsDialog v-if="appStore.settingsOpen" />
   <WordCountPanel v-if="appStore.wordCountOpen" />
 </template>

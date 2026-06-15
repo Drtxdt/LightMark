@@ -36,7 +36,7 @@ export async function saveImagesAsMarkdown(files: File[]) {
   const snippets: string[] = [];
   for (const file of files) {
     const relativePath = await saveImageAsset(file);
-    snippets.push(`![${imageAlt(file)}](${toMarkdownPath(relativePath)})`);
+    snippets.push(`![${imageAlt(file)}](${formatMarkdownImagePath(relativePath)})`);
   }
   await refreshFileTree().catch(() => {});
   appStore.statusMessage = `已保存 ${files.length} 张图片`;
@@ -56,6 +56,9 @@ export async function imagePathsAsMarkdown(paths: string[]) {
   const markdown = await invoke<string>("image_paths_to_markdown", {
     markdownPath: appStore.currentFilePath,
     paths,
+    useRelativePath: appStore.settings.image.useRelativePath,
+    ensureDotSlash: appStore.settings.image.ensureDotSlash,
+    escapePath: appStore.settings.image.escapePath,
   });
   appStore.statusMessage = `已插入 ${paths.length} 张图片引用`;
   return markdown;
@@ -155,8 +158,18 @@ function imageAlt(file: File) {
   return name || "image";
 }
 
-function toMarkdownPath(path: string) {
-  return path.replace(/\\/g, "/").split("/").map(encodePathSegment).join("/");
+function formatMarkdownImagePath(path: string) {
+  let normalized = path.replace(/\\/g, "/");
+  if (
+    appStore.settings.image.ensureDotSlash &&
+    !normalized.startsWith("./") &&
+    !normalized.startsWith("../") &&
+    !normalized.startsWith("/") &&
+    !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)
+  ) {
+    normalized = `./${normalized}`;
+  }
+  return appStore.settings.image.escapePath ? normalized.split("/").map(encodePathSegment).join("/") : normalized;
 }
 
 function encodePathSegment(segment: string) {

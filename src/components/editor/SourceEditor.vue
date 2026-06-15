@@ -35,7 +35,7 @@ const minimalTheme = EditorView.theme({
   },
   ".cm-content": {
     caretColor: "#1f1e1b",
-    maxWidth: "860px",
+    maxWidth: "var(--lm-editor-width)",
     margin: "0 auto",
     padding: "0 32px",
   },
@@ -58,7 +58,7 @@ const minimalTheme = EditorView.theme({
     border: "0",
   },
   ".cm-scroller": {
-    fontFamily: "\"JetBrains Mono\", ui-monospace, SFMono-Regular, Consolas, monospace",
+    fontFamily: "var(--lm-editor-code-font-family)",
     lineHeight: "1.75",
     padding: "32px 0",
   },

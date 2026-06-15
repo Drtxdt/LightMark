@@ -51,13 +51,10 @@ export function renderMarkdownForEditor(markdown: string) {
   return editorMd.render(markSpecialBlocksForEditor(markdown));
 }
 
-export function buildExportHtml(title: string, body: string) {
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${escapeHtml(title)}</title>
+export function buildExportHtml(title: string, body: string, options: { includeStyles?: boolean } = {}) {
+  const includeStyles = options.includeStyles ?? true;
+  const styles = includeStyles
+    ? `
   <style>
     body { margin: 0; background: #fbfaf7; color: #1f1e1b; font: 16px/1.78 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     main { max-width: 860px; margin: 0 auto; padding: 56px 24px; min-height: 100vh; }
@@ -79,7 +76,15 @@ export function buildExportHtml(title: string, body: string) {
     .markdown-alert-caution::before { content: "Caution"; color: #cf222e; }
     img { max-width: 100%; }
     a { color: inherit; text-decoration-color: #b9b3a8; text-underline-offset: 3px; }
-  </style>
+  </style>`
+    : "";
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  ${styles}
 </head>
 <body><main>${body}</main></body>
 </html>`;

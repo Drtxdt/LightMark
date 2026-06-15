@@ -12,13 +12,16 @@ const coreCommands = [
   { name: "打开文件", handler: () => openFile() },
   { name: "打开文件夹", handler: () => openWorkspace() },
   { name: "保存", handler: () => saveCurrentFile() },
+  { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
   {
     name: "导出 HTML",
     handler: async () => {
       if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
       await invoke("export_html", {
         path: appStore.currentFilePath,
-        html: buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent)),
+        html: buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent), {
+          includeStyles: appStore.settings.export.htmlIncludeStyles,
+        }),
       });
     },
   },

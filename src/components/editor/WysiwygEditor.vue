@@ -1381,7 +1381,7 @@ const editor = useEditor({
   content: renderMarkdownForEditorWithAssets(appStore.currentContent),
   editorProps: {
     attributes: {
-      class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[860px] px-8 pb-12 pt-6 focus:outline-none",
+      class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
       if (convertLeadingFrontMatter(view, event)) return true;

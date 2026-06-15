@@ -25,7 +25,9 @@ async function run(action: () => Promise<void> | void) {
 async function exportHtml() {
   if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
   if (appStore.documentMode === "large") throw new Error("大文件模式暂不支持全量 HTML 导出。");
-  const html = buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent));
+  const html = buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent), {
+    includeStyles: appStore.settings.export.htmlIncludeStyles,
+  });
   const target = await invoke<string>("export_html", {
     path: appStore.currentFilePath,
     html,
@@ -54,6 +56,7 @@ function toggleTheme(theme: "light" | "dark") {
       <span class="max-w-[360px] truncate text-sm text-ink-500 dark:text-ink-300">
         {{ currentFileName }}<span v-if="appStore.isDirty"> *</span>
       </span>
+      <button class="btn" title="偏好设置" @click="appStore.settingsOpen = true">设置</button>
       <ThemeToggle
         :model-value="appStore.theme === 'dark' ? 'dark' : 'light'"
         size="md"

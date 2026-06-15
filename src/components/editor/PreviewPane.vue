@@ -33,6 +33,6 @@ watch(html, renderMermaid, { immediate: true });
 
 <template>
   <div class="h-full overflow-auto bg-paper-50 dark:bg-paper-950">
-    <article class="markdown-preview prose prose-stone dark:prose-invert mx-auto max-w-[860px] px-8 py-12" v-html="html" />
+    <article class="markdown-preview prose prose-stone dark:prose-invert mx-auto max-w-[var(--lm-editor-width)] px-8 py-12" v-html="html" />
   </div>
 </template>

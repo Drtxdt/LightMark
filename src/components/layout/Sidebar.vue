@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { appStore, openFile, openWorkspace, switchMode } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
@@ -10,6 +10,13 @@ const outline = computed(() => {
   if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
   return extractOutline(appStore.currentContent);
 });
+
+watch(
+  () => appStore.settings.appearance.showOutline,
+  (showOutline) => {
+    if (!showOutline && activePane.value === "outline") activePane.value = "files";
+  },
+);
 
 async function selectFile(path: string) {
   await openFile(path);
@@ -80,6 +87,7 @@ function outlineIndent(level: number) {
     <div class="flex-none p-3 pb-2">
       <div class="flex items-center gap-1 rounded-md bg-paper-200/70 p-1 dark:bg-paper-800">
         <button
+          v-if="appStore.settings.appearance.showOutline"
           class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
           :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'files' }"
           @click="activePane = 'files'"
