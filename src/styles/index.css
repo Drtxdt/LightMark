@@ -1586,6 +1586,7 @@ sub {
 
 .ProseMirror pre,
 .markdown-preview pre {
+  position: relative;
   margin: 15px 0;
   border: 1px solid #e7eaed;
   border-radius: 3px;
@@ -1617,6 +1618,218 @@ sub {
   background: #202226;
   color: #e7e9ec;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
+}
+
+.lightmark-code-block-shell {
+  position: relative;
+  margin: 15px 0;
+  padding-top: 24px;
+}
+
+.ProseMirror .lightmark-code-block-shell > pre.lightmark-code-block {
+  margin: 0;
+}
+
+.code-language-toolbar {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  right: 0;
+  font-family: var(--lm-editor-code-font-family);
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.code-language-floating {
+  position: fixed;
+  z-index: 1200;
+  width: 96px;
+  font-family: var(--lm-editor-code-font-family);
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: auto;
+}
+
+.code-language-field {
+  width: 96px;
+  height: 22px;
+  border: 1px solid rgb(231 234 237 / 80%);
+  border-radius: 4px;
+  background: rgb(248 248 248 / 72%);
+  color: #5f6368;
+  font: inherit;
+  line-height: 1;
+  outline: none;
+  padding: 0 7px;
+  text-align: center;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.code-language-field::placeholder {
+  color: #a0a6ad;
+}
+
+.code-language-field:hover,
+.code-language-field:focus,
+.code-language-floating.is-code-language-open .code-language-field {
+  border-color: #cfd5dc;
+  background: rgb(248 248 248 / 94%);
+  color: #333333;
+}
+
+.lightmark-code-block-shell.is-code-language-active .code-language-toolbar,
+.lightmark-code-block-shell.is-code-language-open .code-language-toolbar,
+.lightmark-code-block-shell:hover .code-language-toolbar,
+.lightmark-code-block-shell:focus-within .code-language-toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.code-language-button {
+  max-width: 140px;
+  height: 22px;
+  border: 1px solid rgb(231 234 237 / 85%);
+  border-radius: 4px;
+  background: rgb(248 248 248 / 92%);
+  color: #5f6368;
+  cursor: pointer;
+  font: inherit;
+  overflow: hidden;
+  padding: 0 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-language-button:hover,
+.lightmark-code-block-shell.is-code-language-open .code-language-button,
+.code-language-floating.is-code-language-open .code-language-button {
+  border-color: #cfd5dc;
+  color: #333333;
+}
+
+.code-language-button.placeholder {
+  color: #a0a6ad;
+}
+
+.code-language-menu {
+  position: absolute;
+  top: 24px;
+  right: 0;
+  width: 190px;
+  overflow: hidden;
+  border: 1px solid #dfe3e7;
+  border-radius: 6px;
+  background: #fbfaf7;
+  box-shadow: 0 10px 28px rgb(31 30 27 / 14%);
+}
+
+.code-language-input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #e7eaed;
+  background: transparent;
+  color: #333333;
+  font: inherit;
+  line-height: 1.4;
+  outline: none;
+  padding: 8px 9px;
+}
+
+.code-language-list {
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.code-language-option {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #5f6368;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.5;
+  padding: 5px 7px;
+  text-align: center;
+}
+
+.code-language-option:hover,
+.code-language-option.active {
+  background: #eceff2;
+  color: #333333;
+}
+
+.code-language-empty {
+  color: #8a9097;
+  padding: 7px;
+}
+
+.dark .code-language-button {
+  border-color: rgb(55 58 63 / 85%);
+  background: rgb(32 34 38 / 92%);
+  color: #b7bdc4;
+}
+
+.dark .code-language-button:hover,
+.dark .lightmark-code-block-shell.is-code-language-open .code-language-button,
+.dark .code-language-floating.is-code-language-open .code-language-button {
+  border-color: #565c64;
+  color: #e7e9ec;
+}
+
+.dark .code-language-button.placeholder {
+  color: #7f8790;
+}
+
+.dark .code-language-field {
+  border-color: rgb(55 58 63 / 80%);
+  background: rgb(32 34 38 / 72%);
+  color: #b7bdc4;
+}
+
+.dark .code-language-field::placeholder {
+  color: #7f8790;
+}
+
+.dark .code-language-field:hover,
+.dark .code-language-field:focus,
+.dark .code-language-floating.is-code-language-open .code-language-field {
+  border-color: #565c64;
+  background: rgb(32 34 38 / 94%);
+  color: #e7e9ec;
+}
+
+.dark .code-language-menu {
+  border-color: #373a3f;
+  background: #202226;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 34%);
+}
+
+.dark .code-language-input {
+  border-color: #373a3f;
+  color: #e7e9ec;
+}
+
+.dark .code-language-option {
+  color: #b7bdc4;
+}
+
+.dark .code-language-option:hover,
+.dark .code-language-option.active {
+  background: #30343a;
+  color: #e7e9ec;
+}
+
+.dark .code-language-empty {
+  color: #8a9097;
 }
 
 .ProseMirror table,

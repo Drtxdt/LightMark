@@ -46,9 +46,22 @@ const contextMenu = ref({
   mode: "default" as ContextMenuMode,
   inTable: false,
 });
+const editorShell = ref<HTMLElement | null>(null);
+const codeLanguageInput = ref<HTMLInputElement | null>(null);
+const codeLanguageControl = ref({
+  visible: false,
+  open: false,
+  x: 0,
+  y: 0,
+  pos: -1,
+  language: "",
+  query: "",
+  highlightedIndex: 0,
+});
 const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
+const floatingCodeLanguageCandidates = computed(() => filterCodeLanguages(codeLanguageControl.value.query));
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
 const githubAlertKinds = [
   { kind: "note", label: "Note" },
@@ -64,6 +77,41 @@ const githubAlertLabels: Record<string, string> = {
   warning: "Warning",
   caution: "Caution",
 };
+const codeLanguageItems = [
+  { name: "plaintext", aliases: ["text", "txt", "plain"] },
+  { name: "python", aliases: ["py"] },
+  { name: "javascript", aliases: ["js", "node"] },
+  { name: "typescript", aliases: ["ts"] },
+  { name: "bash", aliases: ["sh", "shell", "zsh"] },
+  { name: "markdown", aliases: ["md"] },
+  { name: "html", aliases: ["htm"] },
+  { name: "css", aliases: [] },
+  { name: "json", aliases: [] },
+  { name: "yaml", aliases: ["yml"] },
+  { name: "rust", aliases: ["rs"] },
+  { name: "go", aliases: ["golang"] },
+  { name: "java", aliases: [] },
+  { name: "c", aliases: [] },
+  { name: "cpp", aliases: ["c++", "cc", "cxx"] },
+  { name: "csharp", aliases: ["cs", "c#"] },
+  { name: "php", aliases: [] },
+  { name: "ruby", aliases: ["rb"] },
+  { name: "swift", aliases: [] },
+  { name: "kotlin", aliases: ["kt"] },
+  { name: "sql", aliases: [] },
+  { name: "vue", aliases: [] },
+  { name: "svelte", aliases: [] },
+  { name: "dockerfile", aliases: ["docker"] },
+  { name: "xml", aliases: [] },
+  { name: "toml", aliases: [] },
+  { name: "ini", aliases: [] },
+] as const;
+const codeLanguageNames = codeLanguageItems.map((item) => item.name);
+const codeLanguageAliases = new Map<string, string>();
+codeLanguageItems.forEach((item) => {
+  codeLanguageAliases.set(item.name, item.name);
+  item.aliases.forEach((alias) => codeLanguageAliases.set(alias, item.name));
+});
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
@@ -339,6 +387,23 @@ const FencedCodeBlockInput = Extension.create({
   },
 });
 
+const LightMarkCodeBlock = CodeBlockLowlight.extend({
+  addAttributes() {
+    const parentAttributes = this.parent?.() ?? {};
+    const languageAttribute = (parentAttributes as Record<string, any>).language ?? {};
+    return {
+      ...parentAttributes,
+      language: {
+        ...languageAttribute,
+        parseHTML: (element: HTMLElement) => {
+          const language = readCodeLanguageFromElement(element);
+          return language ? normalizeCodeLanguage(language) || language : null;
+        },
+      },
+    };
+  },
+});
+
 function isLeadingFrontMatterFence(state: any) {
   const { selection } = state;
   if (!selection.empty) return false;
@@ -353,6 +418,34 @@ function isLeadingFrontMatterFence(state: any) {
 function getFencedCodeLanguage(text: string) {
   const match = text.match(/^```([A-Za-z0-9_+-]*)\s*$/);
   return match ? match[1] : null;
+}
+
+function normalizeCodeLanguage(input: string | null | undefined) {
+  const value = (input || "").trim().toLowerCase();
+  if (!value) return "";
+  return codeLanguageAliases.get(value) || "";
+}
+
+function displayCodeLanguage(input: string | null | undefined) {
+  const value = (input || "").trim();
+  return normalizeCodeLanguage(value) || value;
+}
+
+function readCodeLanguageFromElement(element: HTMLElement) {
+  const code = element.matches("code") ? element : element.querySelector("code");
+  const className = code instanceof HTMLElement ? code.className : element.className;
+  return className.match(/(?:^|\s)language-([^\s]+)/)?.[1] || element.getAttribute("data-language") || "";
+}
+
+function filterCodeLanguages(query: string) {
+  const value = query.trim().toLowerCase();
+  if (!value) return codeLanguageNames.slice(0, 12);
+  const normalized = normalizeCodeLanguage(value);
+  const exact = normalized ? [normalized] : [];
+  const matches = codeLanguageItems
+    .filter((item) => item.name.includes(value) || item.aliases.some((alias) => alias.includes(value)))
+    .map((item) => item.name);
+  return Array.from(new Set([...exact, ...matches])).slice(0, 12);
 }
 
 function convertFencedCodeBlock(view: any, event: KeyboardEvent) {
@@ -373,7 +466,8 @@ function convertFencedCodeBlock(view: any, event: KeyboardEvent) {
 
   const from = $from.before();
   const to = $from.after();
-  const codeBlock = codeBlockType.create(language ? { language } : undefined);
+  const normalizedLanguage = displayCodeLanguage(language);
+  const codeBlock = codeBlockType.create(normalizedLanguage ? { language: normalizedLanguage } : undefined);
   const tr = state.tr.replaceWith(from, to, codeBlock);
   tr.setSelection(TextSelection.create(tr.doc, from + 1));
   view.dispatch(tr.scrollIntoView());
@@ -1118,7 +1212,8 @@ turndown.addRule("fencedCodeBlock", {
   replacement: (_content, node) => {
     const code = node.firstChild?.textContent || "";
     const className = node.firstChild instanceof HTMLElement ? node.firstChild.className : "";
-    const language = className.match(/language-([^\s]+)/)?.[1] || "";
+    const sourceLanguage = className.match(/language-([^\s]+)/)?.[1] || "";
+    const language = displayCodeLanguage(sourceLanguage);
     return `\n\n\`\`\`${language}\n${code.replace(/\n$/, "")}\n\`\`\`\n\n`;
   },
 });
@@ -1330,6 +1425,248 @@ function imageMarkdownFromAttrs(attrs: Record<string, string | null | undefined>
   return `![${alt}](${src}${title})`;
 }
 
+function createCodeBlockLanguageView({ node, editor, getPos }: any) {
+  let currentNode = node;
+  let open = false;
+  let query = "";
+  let highlightedIndex = 0;
+
+  const dom = document.createElement("div");
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  const toolbar = document.createElement("div");
+  const button = document.createElement("button");
+  const menu = document.createElement("div");
+  const input = document.createElement("input");
+  const list = document.createElement("div");
+
+  dom.className = "lightmark-code-block-shell";
+  pre.className = "lightmark-code-block";
+  toolbar.className = "code-language-toolbar";
+  button.type = "button";
+  button.className = "code-language-button";
+  button.title = "选择代码语言";
+  menu.className = "code-language-menu";
+  input.className = "code-language-input";
+  input.placeholder = "搜索语言";
+  list.className = "code-language-list";
+
+  menu.append(input, list);
+  toolbar.append(button, menu);
+  pre.append(code);
+  dom.append(toolbar, pre);
+
+  const codeLanguage = () => displayCodeLanguage(currentNode.attrs.language || "");
+
+  const setLanguage = (value: string) => {
+    const typed = value.trim().toLowerCase();
+    const language = normalizeCodeLanguage(typed) || typed;
+    if (typeof getPos !== "function") return;
+    const pos = getPos();
+    if (typeof pos !== "number") return;
+    const attrs = { ...currentNode.attrs, language: language || null };
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, attrs));
+    open = false;
+    query = "";
+    highlightedIndex = 0;
+    render();
+    editor.commands.focus();
+  };
+
+  const chooseHighlighted = () => {
+    if (!query.trim()) {
+      setLanguage("");
+      return;
+    }
+    const candidates = filterCodeLanguages(query);
+    setLanguage(candidates[highlightedIndex] || query);
+  };
+
+  const isSelectionInsideCodeBlock = () => {
+    if (typeof getPos !== "function") return false;
+    const pos = getPos();
+    if (typeof pos !== "number") return false;
+    const { selection } = editor.view.state;
+    const from = pos;
+    const to = pos + currentNode.nodeSize;
+    return selection.from >= from && selection.to <= to;
+  };
+
+  const renderCandidates = () => {
+    const candidates = filterCodeLanguages(query);
+    highlightedIndex = Math.min(highlightedIndex, Math.max(candidates.length - 1, 0));
+    list.innerHTML = "";
+    candidates.forEach((language, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = index === highlightedIndex ? "code-language-option active" : "code-language-option";
+      option.textContent = language;
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        setLanguage(language);
+      });
+      list.append(option);
+    });
+    if (candidates.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "code-language-empty";
+      empty.textContent = query.trim() ? `使用 "${query.trim().toLowerCase()}"` : "输入语言";
+      list.append(empty);
+    }
+  };
+
+  const render = () => {
+    const language = codeLanguage();
+    const active = open || isSelectionInsideCodeBlock();
+    dom.className = `lightmark-code-block-shell${active ? " is-code-language-active" : ""}${open ? " is-code-language-open" : ""}`;
+    code.className = language ? `language-${language}` : "";
+    button.textContent = language || "代码语言";
+    button.classList.toggle("placeholder", !language);
+    menu.hidden = !open;
+    if (open) {
+      input.value = query;
+      renderCandidates();
+    }
+  };
+
+  const openMenu = () => {
+    open = true;
+    query = codeLanguage();
+    highlightedIndex = 0;
+    render();
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    });
+  };
+
+  const closeMenu = () => {
+    open = false;
+    query = "";
+    highlightedIndex = 0;
+    render();
+    editor.commands.focus();
+  };
+
+  const updateActive = () => {
+    if (open) return;
+    dom.classList.toggle("is-code-language-active", isSelectionInsideCodeBlock());
+  };
+  const onDocumentMouseDown = (event: MouseEvent) => {
+    if (!open) return;
+    if (event.target instanceof globalThis.Node && toolbar.contains(event.target)) return;
+    open = false;
+    query = "";
+    highlightedIndex = 0;
+    render();
+  };
+
+  const stopToolbarEvent = (event: Event) => {
+    event.stopPropagation();
+  };
+
+  toolbar.addEventListener("pointerdown", stopToolbarEvent);
+  toolbar.addEventListener("mousedown", stopToolbarEvent);
+  toolbar.addEventListener("click", stopToolbarEvent);
+  toolbar.addEventListener("keydown", stopToolbarEvent);
+  button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMenu();
+  });
+  button.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMenu();
+  });
+  input.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  input.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+  });
+  input.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  input.addEventListener("input", () => {
+    query = input.value;
+    highlightedIndex = 0;
+    renderCandidates();
+  });
+  input.addEventListener("keydown", (event) => {
+    const candidates = filterCodeLanguages(query);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      highlightedIndex = Math.min(highlightedIndex + 1, Math.max(candidates.length - 1, 0));
+      renderCandidates();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      highlightedIndex = Math.max(highlightedIndex - 1, 0);
+      renderCandidates();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      chooseHighlighted();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const candidates = filterCodeLanguages(query);
+      setLanguage(candidates[highlightedIndex] || query);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu();
+    }
+  });
+  dom.addEventListener("mouseup", updateActive);
+  dom.addEventListener("keyup", updateActive);
+  document.addEventListener("selectionchange", updateActive);
+  document.addEventListener("mousedown", onDocumentMouseDown);
+  editor.on?.("selectionUpdate", updateActive);
+  editor.on?.("focus", updateActive);
+  editor.on?.("blur", updateActive);
+  render();
+  window.setTimeout(updateActive);
+
+  return {
+    dom,
+    contentDOM: code,
+    update(nextNode: any) {
+      if (nextNode.type !== currentNode.type) return false;
+      currentNode = nextNode;
+      render();
+      updateActive();
+      return true;
+    },
+    destroy() {
+      document.removeEventListener("selectionchange", updateActive);
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+      toolbar.removeEventListener("pointerdown", stopToolbarEvent);
+      toolbar.removeEventListener("mousedown", stopToolbarEvent);
+      toolbar.removeEventListener("click", stopToolbarEvent);
+      toolbar.removeEventListener("keydown", stopToolbarEvent);
+      editor.off?.("selectionUpdate", updateActive);
+      editor.off?.("focus", updateActive);
+      editor.off?.("blur", updateActive);
+    },
+    stopEvent(event: Event) {
+      return event.target instanceof globalThis.Node && toolbar.contains(event.target);
+    },
+    ignoreMutation(mutation: any) {
+      return mutation.target instanceof globalThis.Node && toolbar.contains(mutation.target);
+    },
+  };
+}
+
 const editor = useEditor({
   enableInputRules: ["blockquote", "bulletList", "orderedList"],
   extensions: [
@@ -1341,7 +1678,7 @@ const editor = useEditor({
       strike: false,
       link: false,
     }),
-    CodeBlockLowlight.configure({
+    LightMarkCodeBlock.configure({
       lowlight,
       defaultLanguage: "plaintext",
     }),
@@ -1559,8 +1896,166 @@ const editor = useEditor({
   },
   onUpdate({ editor }) {
     setContent(editorHtmlToMarkdown(editor.getHTML()), true);
+    updateCodeLanguageControl(editor.view);
+  },
+  onSelectionUpdate({ editor }) {
+    updateCodeLanguageControl(editor.view);
+  },
+  onFocus({ editor }) {
+    updateCodeLanguageControl(editor.view);
+  },
+  onBlur() {
+    window.setTimeout(() => {
+      if (codeLanguageControl.value.open) return;
+      codeLanguageControl.value.visible = false;
+    }, 120);
   },
 });
+
+function getSelectedCodeBlock(view: any) {
+  const { selection } = view.state;
+  const { $from } = selection;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth);
+    if (node.type.name === "codeBlock") {
+      return { node, pos: $from.before(depth) };
+    }
+  }
+  return null;
+}
+
+function updateCodeLanguageControl(view = editor.value?.view) {
+  if (!view || appStore.editorMode !== "wysiwyg") {
+    codeLanguageControl.value.visible = false;
+    return;
+  }
+  const active = getSelectedCodeBlock(view);
+  if (!active) {
+    if (!codeLanguageControl.value.open) codeLanguageControl.value.visible = false;
+    return;
+  }
+  const dom = view.nodeDOM(active.pos);
+  const element =
+    dom instanceof HTMLElement
+      ? dom
+      : dom instanceof Text
+        ? dom.parentElement
+        : null;
+  if (!element) {
+    codeLanguageControl.value.visible = false;
+    return;
+  }
+  const rect = element.getBoundingClientRect();
+  const controlWidth = 96;
+  codeLanguageControl.value = {
+    ...codeLanguageControl.value,
+    visible: true,
+    x: Math.max(12, Math.min(rect.right - controlWidth, window.innerWidth - controlWidth - 12)),
+    y: Math.max(8, rect.top - 28),
+    pos: active.pos,
+    language: displayCodeLanguage(active.node.attrs.language || ""),
+  };
+}
+
+function openFloatingCodeLanguageMenu({ select = false } = {}) {
+  updateCodeLanguageControl();
+  codeLanguageControl.value.open = true;
+  codeLanguageControl.value.query = codeLanguageControl.value.language;
+  codeLanguageControl.value.highlightedIndex = 0;
+  window.setTimeout(() => {
+    codeLanguageInput.value?.focus();
+    if (select) codeLanguageInput.value?.select();
+  });
+}
+
+function closeFloatingCodeLanguageMenu({ focusEditor = true } = {}) {
+  codeLanguageControl.value.open = false;
+  codeLanguageControl.value.query = "";
+  codeLanguageControl.value.highlightedIndex = 0;
+  if (focusEditor) editor.value?.commands.focus();
+  updateCodeLanguageControl();
+}
+
+function applyFloatingCodeLanguage(value: string) {
+  const activeEditor = editor.value as any;
+  const view = activeEditor?.view;
+  if (!view) return;
+  const pos = codeLanguageControl.value.pos;
+  const node = view.state.doc.nodeAt(pos);
+  if (!node || node.type.name !== "codeBlock") return;
+  const typed = value.trim().toLowerCase();
+  const language = normalizeCodeLanguage(typed) || typed;
+  const attrs = { ...node.attrs, language: language || null };
+  view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, attrs).scrollIntoView());
+  codeLanguageControl.value.language = language;
+  closeFloatingCodeLanguageMenu();
+}
+
+function chooseFloatingCodeLanguage() {
+  const query = codeLanguageControl.value.query;
+  if (!query.trim()) {
+    applyFloatingCodeLanguage("");
+    return;
+  }
+  const candidates = floatingCodeLanguageCandidates.value;
+  applyFloatingCodeLanguage(candidates[codeLanguageControl.value.highlightedIndex] || query);
+}
+
+function handleFloatingCodeLanguageInput(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  codeLanguageControl.value.open = true;
+  codeLanguageControl.value.query = target.value;
+  codeLanguageControl.value.highlightedIndex = 0;
+}
+
+function commitFloatingCodeLanguageInput() {
+  const query = codeLanguageControl.value.open ? codeLanguageControl.value.query : codeLanguageControl.value.language;
+  applyFloatingCodeLanguage(query);
+}
+
+function handleFloatingCodeLanguageBlur() {
+  window.setTimeout(() => {
+    if (!codeLanguageControl.value.open) return;
+    commitFloatingCodeLanguageInput();
+  }, 120);
+}
+
+function handleFloatingCodeLanguageKeydown(event: KeyboardEvent) {
+  const candidates = floatingCodeLanguageCandidates.value;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    codeLanguageControl.value.highlightedIndex = Math.min(
+      codeLanguageControl.value.highlightedIndex + 1,
+      Math.max(candidates.length - 1, 0),
+    );
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    codeLanguageControl.value.highlightedIndex = Math.max(codeLanguageControl.value.highlightedIndex - 1, 0);
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    chooseFloatingCodeLanguage();
+    return;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    applyFloatingCodeLanguage(candidates[codeLanguageControl.value.highlightedIndex] || codeLanguageControl.value.query);
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeFloatingCodeLanguageMenu();
+  }
+}
+
+function handleEditorShellScroll() {
+  if (!codeLanguageControl.value.visible) return;
+  updateCodeLanguageControl();
+}
 
 async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number) {
   const markdown = await saveImagesAsMarkdown(files);
@@ -1625,10 +2120,12 @@ watch(
 
 onMounted(() => {
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.addEventListener("resize", handleEditorShellScroll);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.removeEventListener("resize", handleEditorShellScroll);
   editor.value?.destroy();
 });
 
@@ -1655,6 +2152,11 @@ function imageInsertPositionFromEventDetail(detail: ImageInsertDetail | undefine
 
 function hideContextMenu() {
   contextMenu.value.visible = false;
+}
+
+function handleEditorShellClick() {
+  hideContextMenu();
+  if (codeLanguageControl.value.open) closeFloatingCodeLanguageMenu({ focusEditor: false });
 }
 
 function isPositionInsideSelection(selection: any, pos: number) {
@@ -2907,8 +3409,54 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
 </script>
 
 <template>
-  <div class="relative h-full overflow-auto bg-paper-50 dark:bg-paper-950" @click="hideContextMenu">
+  <div
+    ref="editorShell"
+    class="relative h-full overflow-auto bg-paper-50 dark:bg-paper-950"
+    @click="handleEditorShellClick"
+    @scroll="handleEditorShellScroll"
+  >
     <EditorContent :editor="editor" />
+    <div
+      v-if="codeLanguageControl.visible"
+      class="code-language-floating"
+      :class="{ 'is-code-language-open': codeLanguageControl.open }"
+      :style="{ left: `${codeLanguageControl.x}px`, top: `${codeLanguageControl.y}px` }"
+      @pointerdown.stop
+      @mousedown.stop
+      @click.stop
+      @keydown.stop
+    >
+      <input
+        ref="codeLanguageInput"
+        class="code-language-field"
+        :class="{ placeholder: !codeLanguageControl.language && !codeLanguageControl.open }"
+        :value="codeLanguageControl.open ? codeLanguageControl.query : codeLanguageControl.language"
+        placeholder="代码语言"
+        title="代码语言"
+        spellcheck="false"
+        @focus="() => openFloatingCodeLanguageMenu()"
+        @input="handleFloatingCodeLanguageInput"
+        @keydown="handleFloatingCodeLanguageKeydown"
+        @blur="handleFloatingCodeLanguageBlur"
+      />
+      <div v-if="codeLanguageControl.open" class="code-language-menu">
+        <div class="code-language-list">
+          <button
+            v-for="(language, index) in floatingCodeLanguageCandidates"
+            :key="language"
+            type="button"
+            class="code-language-option"
+            :class="{ active: index === codeLanguageControl.highlightedIndex }"
+            @mousedown.prevent.stop="applyFloatingCodeLanguage(language)"
+          >
+            {{ language }}
+          </button>
+          <div v-if="floatingCodeLanguageCandidates.length === 0" class="code-language-empty">
+            {{ codeLanguageControl.query.trim() ? `使用 "${codeLanguageControl.query.trim().toLowerCase()}"` : "输入语言" }}
+          </div>
+        </div>
+      </div>
+    </div>
     <div
       v-if="contextMenu.visible"
       class="lm-context-menu"
