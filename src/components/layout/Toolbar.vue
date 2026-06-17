@@ -10,9 +10,10 @@ import {
   setTheme,
   switchMode,
 } from "../../stores/appStore";
+import EditorModeToggle from "./EditorModeToggle.vue";
 import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
-import type { ThemeMode } from "../../types";
+import type { EditorMode, ThemeMode } from "../../types";
 
 async function run(action: () => Promise<void> | void) {
   try {
@@ -38,6 +39,10 @@ async function exportHtml() {
 function toggleTheme(theme: "light" | "dark") {
   void run(() => setTheme(theme as ThemeMode));
 }
+
+function toggleEditorMode(mode: EditorMode) {
+  switchMode(mode);
+}
 </script>
 
 <template>
@@ -47,10 +52,11 @@ function toggleTheme(theme: "light" | "dark") {
     <button class="btn" @click="run(() => openWorkspace())">打开文件夹</button>
     <button class="btn-primary" @click="run(saveCurrentFile)">保存</button>
     <div class="mx-2 h-5 w-px bg-paper-200 dark:bg-paper-800" />
-    <div class="segmented">
-      <button :class="{ active: appStore.editorMode === 'wysiwyg' }" @click="switchMode('wysiwyg')">编辑</button>
-      <button :class="{ active: appStore.editorMode === 'source' }" :disabled="appStore.documentMode === 'large'" @click="switchMode('source')">源代码</button>
-    </div>
+    <EditorModeToggle
+      :model-value="appStore.editorMode"
+      :source-disabled="appStore.documentMode === 'large'"
+      @update:model-value="toggleEditorMode"
+    />
     <button class="btn" @click="run(exportHtml)">导出 HTML</button>
     <div class="ml-auto flex items-center gap-2">
       <span class="max-w-[360px] truncate text-sm text-ink-500 dark:text-ink-300">
