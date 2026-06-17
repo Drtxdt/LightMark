@@ -38,6 +38,19 @@ const lowlight = createLowlight(all);
 
 type ContextMenuMode = "default" | "code";
 type ImageInsertDetail = { files?: File[]; paths?: string[]; position?: { x?: number; y?: number } };
+type ToolbarEditorCommand =
+  | "bold"
+  | "italic"
+  | "code"
+  | "link"
+  | "blockquote"
+  | "orderedList"
+  | "bulletList"
+  | "taskList"
+  | "heading"
+  | "image"
+  | "alert";
+type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
 
 const contextMenu = ref({
   visible: false,
@@ -2197,14 +2210,48 @@ watch(
 
 onMounted(() => {
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   editor.value?.destroy();
 });
+
+function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetail>) {
+  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  const command = event.detail?.command;
+  switch (command) {
+    case "bold":
+    case "italic":
+    case "code":
+    case "blockquote":
+    case "orderedList":
+    case "bulletList":
+      runFormatCommand(command);
+      break;
+    case "link":
+      toggleLink();
+      break;
+    case "taskList":
+      insertTaskItem();
+      break;
+    case "heading":
+      setHeadingLevel(typeof event.detail?.value === "number" ? event.detail.value : 2);
+      break;
+    case "image":
+      insertImageByUrl();
+      break;
+    case "alert":
+      insertGithubAlert(typeof event.detail?.value === "string" ? event.detail.value : "note");
+      break;
+    default:
+      break;
+  }
+}
 
 function handleGlobalImageInsert(event: CustomEvent<ImageInsertDetail>) {
   if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
