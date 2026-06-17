@@ -499,14 +499,45 @@ sub {
 .raw-html-node,
 .raw-html-token {
   color: #9b9488;
+  cursor: pointer;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;
   white-space: pre-wrap;
 }
 
+.raw-html-node:hover {
+  background: #f5f3ee;
+}
+
 .raw-html-node-comment,
 .raw-html-comment {
   color: #a8b08c;
+}
+
+.raw-html-node-editing {
+  display: inline-block;
+  border-radius: 4px;
+  background: rgb(245 243 238 / 60%);
+  padding: 0 0.12rem;
+  vertical-align: baseline;
+}
+
+.raw-html-source-editor {
+  display: inline;
+  min-width: 2ch;
+  border: 0;
+  background: transparent;
+  color: #9b9488;
+  cursor: text;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+  line-height: 1.5;
+  outline: none;
+  white-space: pre;
+}
+
+.raw-html-source-editor-comment {
+  color: #8c9473;
 }
 
 .inline-html-node {
@@ -531,9 +562,20 @@ sub {
 
 .inline-html-rendered img {
   display: inline-block;
-  max-height: 1.6em;
-  max-width: 12rem;
-  vertical-align: text-bottom;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.inline-html-rendered video,
+.inline-html-rendered iframe {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.inline-html-rendered iframe {
+  border: 0;
+  border-radius: 6px;
 }
 
 .inline-html-node-editing {
@@ -732,8 +774,21 @@ sub {
   color: #8b8377;
 }
 
+.dark .raw-html-node:hover,
+.dark .raw-html-node-editing {
+  background: #1b1a18;
+}
+
 .dark .raw-html-node-comment,
 .dark .raw-html-comment {
+  color: #8d9b78;
+}
+
+.dark .raw-html-source-editor {
+  color: #8b8377;
+}
+
+.dark .raw-html-source-editor-comment {
   color: #8d9b78;
 }
 

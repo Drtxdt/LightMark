@@ -24,9 +24,12 @@ const inlineHtmlTags = new Set([
   "font",
   "br",
   "img",
+  "video",
+  "source",
+  "iframe",
 ]);
 
-const rawHtmlTags = new Set(["script", "iframe", "object", "embed", "input", "button", "select", "option", "label"]);
+const rawHtmlTags = new Set(["script", "object", "embed", "input", "button", "select", "option", "label"]);
 
 const blockHtmlTags = new Set([
   "p",
@@ -56,27 +59,40 @@ const blockHtmlTags = new Set([
   "hr",
 ]);
 
-const voidTags = new Set(["br", "img", "hr"]);
+const voidTags = new Set(["br", "img", "hr", "source"]);
 const globalAttributes = new Set(["class", "id", "title", "style"]);
 const tagAttributes: Record<string, Set<string>> = {
   a: new Set(["href"]),
   abbr: new Set(["title"]),
   button: new Set(["type", "disabled"]),
+  iframe: new Set(["src", "width", "height", "title", "allow", "allowfullscreen", "loading", "referrerpolicy", "sandbox"]),
   img: new Set(["src", "alt", "width", "height", "title", "class", "style"]),
   input: new Set(["type", "value", "checked", "disabled", "alt", "src", "width", "height"]),
   label: new Set(["for"]),
   option: new Set(["selected", "value"]),
+  source: new Set(["src", "type", "media", "width", "height"]),
   td: new Set(["colspan", "rowspan"]),
   th: new Set(["colspan", "rowspan"]),
+  video: new Set(["src", "poster", "width", "height", "controls", "autoplay", "muted", "loop", "playsinline", "preload"]),
 };
 const safeStyleProperties = new Set([
   "color",
   "background-color",
+  "width",
+  "height",
+  "max-width",
+  "max-height",
+  "min-width",
+  "min-height",
   "font-weight",
   "font-style",
   "text-decoration",
   "font-size",
   "font-family",
+  "display",
+  "vertical-align",
+  "object-fit",
+  "border-radius",
 ]);
 
 export function escapeHtml(value: string) {
@@ -374,13 +390,18 @@ function isAllowedAttribute(tag: string, name: string) {
 function sanitizeAttributeValue(tag: string, name: string, value: string) {
   const normalized = value.replace(/[\u0000-\u001f\u007f]/g, "").trim();
   if (name === "href") return isSafeUrl(normalized, false) ? normalized : null;
-  if (name === "src") return isSafeUrl(normalized, tag === "img") ? normalized : null;
+  if (name === "src" || name === "poster") return isSafeUrl(normalized, tag === "img") ? normalized : null;
   if (name === "style") return sanitizeStyle(normalized);
-  if (name === "type") return /^(button|checkbox|radio|text|search|email|url|number|password|submit|reset)$/i.test(normalized) ? normalized : null;
+  if (name === "type" && tag === "input") return /^(button|checkbox|radio|text|search|email|url|number|password|submit|reset)$/i.test(normalized) ? normalized : null;
   if (name === "width" || name === "height" || name === "colspan" || name === "rowspan") {
     return /^\d{1,4}%?$/.test(normalized) ? normalized : null;
   }
-  if (name === "checked" || name === "disabled" || name === "selected") return normalized || name;
+  if (name === "checked" || name === "disabled" || name === "selected" || name === "controls" || name === "autoplay" || name === "muted" || name === "loop" || name === "playsinline" || name === "allowfullscreen") return normalized || name;
+  if (name === "loading") return /^(lazy|eager)$/i.test(normalized) ? normalized : null;
+  if (name === "preload") return /^(none|metadata|auto)$/i.test(normalized) ? normalized : null;
+  if (name === "referrerpolicy") return /^(no-referrer|origin|strict-origin|same-origin|no-referrer-when-downgrade|origin-when-cross-origin|strict-origin-when-cross-origin)$/i.test(normalized) ? normalized : null;
+  if (name === "sandbox") return sanitizeSandbox(normalized);
+  if (name === "allow") return /^[a-z0-9;: *'()._-]+$/i.test(normalized) ? normalized : null;
   return normalized;
 }
 
@@ -409,6 +430,26 @@ function sanitizeStyle(value: string) {
     })
     .filter(Boolean)
     .join("; ");
+}
+
+function sanitizeSandbox(value: string) {
+  const allowed = new Set([
+    "allow-forms",
+    "allow-modals",
+    "allow-orientation-lock",
+    "allow-pointer-lock",
+    "allow-popups",
+    "allow-popups-to-escape-sandbox",
+    "allow-presentation",
+    "allow-same-origin",
+    "allow-scripts",
+    "allow-top-navigation-by-user-activation",
+  ]);
+  return value
+    .split(/\s+/)
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => allowed.has(item))
+    .join(" ");
 }
 
 function escapeRegExp(value: string) {

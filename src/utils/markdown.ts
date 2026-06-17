@@ -551,7 +551,7 @@ function isHtmlVoidBlock(tag: string) {
 }
 
 function isRawHtmlBlockTag(tag: string) {
-  return /^(script|iframe|object|embed|input|button|select|option|label)$/i.test(tag);
+  return /^(script|object|embed|input|button|select|option|label)$/i.test(tag);
 }
 
 const emojiMap: Record<string, string> = {
