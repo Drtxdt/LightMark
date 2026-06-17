@@ -2006,6 +2006,7 @@ dependencies = [
 name = "lightmark"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "rfd",
  "serde",
  "serde_json",

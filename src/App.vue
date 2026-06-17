@@ -8,11 +8,13 @@ import WordCountPanel from "./components/plugin/WordCountPanel.vue";
 import { activatePlugins } from "./plugins/registry";
 import { wordCountPlugin } from "./plugins/wordCountPlugin";
 import { appStore, applyTheme, loadConfig, saveCurrentFile } from "./stores/appStore";
+import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
+let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
 
@@ -27,6 +29,9 @@ onMounted(async () => {
   });
   unbindPalette = bindShortcut("ctrl+shift+p", () => {
     appStore.commandPaletteOpen = true;
+  });
+  unbindFind = bindShortcut("ctrl+f", () => {
+    openFindPanel();
   });
   unbindPreventUiSelectAll = bindShortcut("ctrl+a", (event) => {
     if (isEditableTarget(event.target)) return false;
@@ -52,6 +57,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unbindSave();
   unbindPalette();
+  unbindFind();
   unbindPreventUiSelectAll();
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);

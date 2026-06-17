@@ -13,6 +13,7 @@ import {
 import EditorModeToggle from "./EditorModeToggle.vue";
 import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
+import { openFindPanel } from "../../stores/findReplaceStore";
 import type { EditorMode, ThemeMode } from "../../types";
 
 type EditorCommand =
@@ -145,6 +146,9 @@ function openCommandPalette() {
     <div class="lm-toolbar-group ml-auto" aria-label="视图和导出">
       <button class="lm-toolbar-button" title="命令面板" aria-label="命令面板" @click="openCommandPalette">
         <span class="tb-ico tb-ico-command" aria-hidden="true"></span>
+      </button>
+      <button class="lm-toolbar-button" title="查找与替换 Ctrl+F" aria-label="查找与替换" @click="openFindPanel">
+        <span class="tb-ico tb-ico-find" aria-hidden="true"></span>
       </button>
       <button class="lm-toolbar-button" title="导出 HTML" aria-label="导出 HTML" @click="run(exportHtml)">
         <span class="tb-ico tb-ico-export" aria-hidden="true"></span>
@@ -509,6 +513,25 @@ function openCommandPalette() {
   border-radius: 50%;
   background: currentColor;
   box-shadow: -5px 0 0 currentColor, 5px 0 0 currentColor;
+}
+
+.tb-ico-find::before {
+  left: 2px;
+  top: 2px;
+  width: 9px;
+  height: 9px;
+  border: 1.7px solid currentColor;
+  border-radius: 50%;
+}
+
+.tb-ico-find::after {
+  right: 2px;
+  bottom: 2px;
+  width: 7px;
+  height: 1.7px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: rotate(45deg);
 }
 
 .tb-ico-export::before {

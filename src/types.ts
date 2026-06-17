@@ -154,6 +154,27 @@ export interface DirtyState {
   pendingEditCount: number;
 }
 
+export interface LargeFindOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+}
+
+export interface LargeFindMatch {
+  line: number;
+  startColumn: number;
+  endColumn: number;
+  text: string;
+  preview: string;
+}
+
+export interface LargeFindResult {
+  matches: LargeFindMatch[];
+  total: number;
+  truncated: boolean;
+  error: string;
+}
+
 export interface LargeFileState {
   sessionId: string;
   sizeBytes: number;

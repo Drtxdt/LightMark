@@ -2,15 +2,32 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers } from "@codemirror/view";
+import { EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import { appStore, setContent } from "../../stores/appStore";
+import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
+import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 let applyingExternalChange = false;
+let sourceFindMatches: TextMatch[] = [];
+
+const setSourceFindDecorations = StateEffect.define<DecorationSet>();
+const sourceFindField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setSourceFindDecorations)) return effect.value;
+    }
+    return value.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
 
 const minimalTheme = EditorView.theme({
   "&": {
@@ -132,6 +149,7 @@ function extensions() {
   return [
     lineNumbers(),
     keymap.of([]),
+    sourceFindField,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
@@ -161,6 +179,7 @@ function extensions() {
     EditorView.updateListener.of((update) => {
       if (update.docChanged && !applyingExternalChange) {
         setContent(update.state.doc.toString(), true);
+        if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
       }
     }),
   ];
@@ -209,6 +228,7 @@ onMounted(() => {
     }),
   });
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
 });
 
 watch(
@@ -225,9 +245,97 @@ watch(
 
 onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   view?.destroy();
   view = null;
 });
+
+function handleFindCommand(event: CustomEvent<string>) {
+  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  const command = event.detail || "refresh";
+  if (command === "next" || command === "previous") {
+    navigateSourceFind(command === "next" ? 1 : -1);
+    return;
+  }
+  if (command === "replaceCurrent") {
+    replaceCurrentSourceFind();
+    return;
+  }
+  if (command === "replaceAll") {
+    replaceAllSourceFind();
+    return;
+  }
+  refreshSourceFind();
+}
+
+function refreshSourceFind() {
+  if (!view) return;
+  if (!findReplaceStore.open || !findReplaceStore.query) {
+    sourceFindMatches = [];
+    setFindResult(0, -1, "");
+    applySourceFindDecorations(-1);
+    return;
+  }
+  const result = findTextMatches(view.state.doc.toString(), findReplaceStore.query, findOptions());
+  sourceFindMatches = result.matches;
+  const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeMatchIndex(findReplaceStore.currentIndex, sourceFindMatches.length);
+  setFindResult(sourceFindMatches.length, current, result.error);
+  applySourceFindDecorations(current);
+}
+
+function navigateSourceFind(delta: 1 | -1) {
+  if (!view) return;
+  refreshSourceFind();
+  if (findReplaceStore.error || sourceFindMatches.length === 0) return;
+  const current = normalizeMatchIndex(findReplaceStore.currentIndex + delta, sourceFindMatches.length);
+  const match = sourceFindMatches[current];
+  setFindResult(sourceFindMatches.length, current, "");
+  applySourceFindDecorations(current);
+  view.dispatch({
+    selection: { anchor: match.from, head: match.to },
+    effects: EditorView.scrollIntoView(match.from, { y: "center" }),
+  });
+  view.focus();
+}
+
+function replaceCurrentSourceFind() {
+  if (!view) return;
+  refreshSourceFind();
+  const current = normalizeMatchIndex(findReplaceStore.currentIndex, sourceFindMatches.length);
+  const match = sourceFindMatches[current];
+  if (!match || findReplaceStore.error) return;
+  const insert = replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex);
+  view.dispatch({
+    changes: { from: match.from, to: match.to, insert },
+    selection: { anchor: match.from + insert.length },
+    scrollIntoView: true,
+  });
+  refreshSourceFind();
+}
+
+function replaceAllSourceFind() {
+  if (!view) return;
+  refreshSourceFind();
+  if (findReplaceStore.error || sourceFindMatches.length === 0) return;
+  const changes = [...sourceFindMatches].reverse().map((match) => ({
+    from: match.from,
+    to: match.to,
+    insert: replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex),
+  }));
+  view.dispatch({ changes, scrollIntoView: true });
+  appStore.statusMessage = `已替换 ${changes.length} 处`;
+  refreshSourceFind();
+}
+
+function applySourceFindDecorations(currentIndex: number) {
+  if (!view) return;
+  const decorations = sourceFindMatches.map((match, index) =>
+    Decoration.mark({
+      class: index === currentIndex ? "lm-find-match lm-find-match-current" : "lm-find-match",
+    }).range(match.from, match.to),
+  );
+  view.dispatch({ effects: setSourceFindDecorations.of(Decoration.set(decorations, true)) });
+}
 
 function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: string[]; position?: { x?: number; y?: number } }>) {
   if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;

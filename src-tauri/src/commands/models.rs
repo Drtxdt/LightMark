@@ -247,6 +247,33 @@ pub struct DirtyState {
     pub pending_edit_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFindOptions {
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFindMatch {
+    pub line: usize,
+    pub start_column: usize,
+    pub end_column: usize,
+    pub text: String,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFindResult {
+    pub matches: Vec<LargeFindMatch>,
+    pub total: usize,
+    pub truncated: bool,
+    pub error: String,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {

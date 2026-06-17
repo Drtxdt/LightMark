@@ -12,6 +12,8 @@ pub fn run() {
             commands::file::open_large_file,
             commands::file::read_file_chunk,
             commands::file::apply_file_edits,
+            commands::file::search_large_file,
+            commands::file::replace_large_file_matches,
             commands::file::save_large_file,
             commands::file::close_large_file,
             commands::file::write_text_file,

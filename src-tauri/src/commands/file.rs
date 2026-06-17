@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::RegexBuilder;
 use rfd::FileDialog;
 
 use super::models::{
-    DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeOutlineItem, TextEdit,
+    DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeOutlineItem, LargeFindMatch,
+    LargeFindOptions, LargeFindResult, TextEdit,
 };
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -155,6 +157,112 @@ pub fn apply_file_edits(session_id: String, edits: Vec<TextEdit>) -> Result<Dirt
         is_dirty: !session.edits.is_empty(),
         pending_edit_count: session.edits.len(),
     })
+}
+
+#[tauri::command]
+pub fn search_large_file(
+    session_id: String,
+    query: String,
+    options: LargeFindOptions,
+    start_line: Option<usize>,
+    limit: Option<usize>,
+) -> Result<LargeFindResult, String> {
+    if query.is_empty() {
+        return Ok(LargeFindResult {
+            matches: Vec::new(),
+            total: 0,
+            truncated: false,
+            error: String::new(),
+        });
+    }
+
+    let session = sessions()
+        .lock()
+        .map_err(|_| "Large file session lock was poisoned.".to_string())?
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "Large file session was not found.".to_string())?;
+
+    let matcher = LargeMatcher::new(&query, &options);
+    if let Err(error) = matcher {
+        return Ok(LargeFindResult {
+            matches: Vec::new(),
+            total: 0,
+            truncated: false,
+            error,
+        });
+    }
+    let matcher = matcher?;
+    let limit = limit.unwrap_or(2000).max(1);
+    let start_line = start_line.unwrap_or(0);
+    let file = File::open(&session.path)
+        .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?;
+    let reader = BufReader::new(file);
+    let mut matches = Vec::new();
+    let mut total = 0_usize;
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| format!("Failed to scan {}: {err}", session.path.display()))?;
+        if line_index < start_line {
+            continue;
+        }
+        for item in matcher.find_line(&line, line_index) {
+            total += 1;
+            if matches.len() < limit {
+                matches.push(item);
+            }
+        }
+    }
+
+    Ok(LargeFindResult {
+        truncated: total > matches.len(),
+        matches,
+        total,
+        error: String::new(),
+    })
+}
+
+#[tauri::command]
+pub fn replace_large_file_matches(
+    session_id: String,
+    query: String,
+    replacement: String,
+    options: LargeFindOptions,
+    current_match: Option<LargeFindMatch>,
+) -> Result<DirtyState, String> {
+    if query.is_empty() {
+        return Ok(DirtyState {
+            is_dirty: false,
+            pending_edit_count: sessions()
+                .lock()
+                .map_err(|_| "Large file session lock was poisoned.".to_string())?
+                .get(&session_id)
+                .map(|session| session.edits.len())
+                .unwrap_or(0),
+        });
+    }
+
+    let session = sessions()
+        .lock()
+        .map_err(|_| "Large file session lock was poisoned.".to_string())?
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "Large file session was not found.".to_string())?;
+
+    let matcher = LargeMatcher::new(&query, &options)?;
+    let edits = if let Some(item) = current_match {
+        vec![TextEdit {
+            start_line: item.line,
+            start_column: item.start_column,
+            end_line: item.line,
+            end_column: item.end_column,
+            text: matcher.replace_text(&item.text, &replacement),
+        }]
+    } else {
+        collect_large_replace_edits(&session.path, &matcher, &replacement)?
+    };
+
+    apply_file_edits(session_id, edits)
 }
 
 #[tauri::command]
@@ -582,6 +690,170 @@ fn scan_line_offsets(path: &Path) -> Result<Vec<u64>, String> {
         offsets.pop();
     }
     Ok(offsets)
+}
+
+enum LargeMatcher {
+    Literal {
+        query: String,
+        normalized_query: String,
+        case_sensitive: bool,
+        whole_word: bool,
+    },
+    Regex {
+        regex: regex::Regex,
+        whole_word: bool,
+    },
+}
+
+impl LargeMatcher {
+    fn new(query: &str, options: &LargeFindOptions) -> Result<Self, String> {
+        if options.regex {
+            let regex = RegexBuilder::new(query)
+                .case_insensitive(!options.case_sensitive)
+                .build()
+                .map_err(|err| err.to_string())?;
+            return Ok(Self::Regex {
+                regex,
+                whole_word: options.whole_word,
+            });
+        }
+
+        Ok(Self::Literal {
+            query: query.to_string(),
+            normalized_query: if options.case_sensitive {
+                query.to_string()
+            } else {
+                query.to_lowercase()
+            },
+            case_sensitive: options.case_sensitive,
+            whole_word: options.whole_word,
+        })
+    }
+
+    fn find_line(&self, line: &str, line_index: usize) -> Vec<LargeFindMatch> {
+        match self {
+            Self::Literal {
+                query,
+                normalized_query,
+                case_sensitive,
+                whole_word,
+            } => find_literal_line(line, line_index, query, normalized_query, *case_sensitive, *whole_word),
+            Self::Regex { regex, whole_word } => regex
+                .find_iter(line)
+                .filter(|item| item.start() < item.end())
+                .filter(|item| !*whole_word || is_whole_word_bytes(line, item.start(), item.end()))
+                .map(|item| large_find_match(line, line_index, item.start(), item.end()))
+                .collect(),
+        }
+    }
+
+    fn replace_text(&self, value: &str, replacement: &str) -> String {
+        match self {
+            Self::Regex { regex, .. } => regex.replace(value, replacement).to_string(),
+            _ => replacement.to_string(),
+        }
+    }
+}
+
+fn find_literal_line(
+    line: &str,
+    line_index: usize,
+    query: &str,
+    normalized_query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+) -> Vec<LargeFindMatch> {
+    let source = if case_sensitive {
+        line.to_string()
+    } else {
+        line.to_lowercase()
+    };
+    let mut matches = Vec::new();
+    let mut from = 0_usize;
+    while from <= source.len() {
+        let Some(relative) = source[from..].find(normalized_query) else {
+            break;
+        };
+        let start = from + relative;
+        let end = start + normalized_query.len();
+        if !whole_word || is_whole_word_bytes(line, start, end) {
+            matches.push(large_find_match(line, line_index, start, end));
+        }
+        from = end.max(start + query.len().max(1));
+    }
+    matches
+}
+
+fn collect_large_replace_edits(
+    path: &Path,
+    matcher: &LargeMatcher,
+    replacement: &str,
+) -> Result<Vec<TextEdit>, String> {
+    let file = File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut edits = Vec::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| format!("Failed to scan {}: {err}", path.display()))?;
+        let matches = matcher.find_line(&line, line_index);
+        if !matches.is_empty() {
+            let next = replace_line_matches(&line, &matches, matcher, replacement);
+            edits.push(TextEdit {
+                start_line: line_index,
+                start_column: 0,
+                end_line: line_index,
+                end_column: line.chars().count(),
+                text: next,
+            });
+        }
+    }
+
+    edits.sort_by_key(|edit| (edit.start_line, edit.start_column));
+    Ok(edits)
+}
+
+fn replace_line_matches(
+    line: &str,
+    matches: &[LargeFindMatch],
+    matcher: &LargeMatcher,
+    replacement: &str,
+) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut next = String::new();
+    let mut cursor = 0_usize;
+    for item in matches {
+        next.extend(chars[cursor..item.start_column].iter());
+        next.push_str(&matcher.replace_text(&item.text, replacement));
+        cursor = item.end_column;
+    }
+    next.extend(chars[cursor..].iter());
+    next
+}
+
+fn large_find_match(line: &str, line_index: usize, start: usize, end: usize) -> LargeFindMatch {
+    LargeFindMatch {
+        line: line_index,
+        start_column: byte_to_char_column(line, start),
+        end_column: byte_to_char_column(line, end),
+        text: line[start..end].to_string(),
+        preview: line.chars().take(180).collect(),
+    }
+}
+
+fn byte_to_char_column(value: &str, byte_index: usize) -> usize {
+    value[..byte_index].chars().count()
+}
+
+fn is_whole_word_bytes(value: &str, start: usize, end: usize) -> bool {
+    let before = value[..start].chars().next_back();
+    let after = value[end..].chars().next();
+    !is_word_char(before) && !is_word_char(after)
+}
+
+fn is_word_char(value: Option<char>) -> bool {
+    value
+        .map(|char| char.is_alphanumeric() || char == '_')
+        .unwrap_or(false)
 }
 
 fn scan_outline(path: &Path) -> Result<Vec<LargeOutlineItem>, String> {

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { appStore, applyLargeFileEdits, readLargeFileChunk } from "../../stores/appStore";
-import type { LargeOutlineItem, TextEdit } from "../../types";
+import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
+import type { DirtyState, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 
 type LineRecord = {
@@ -29,12 +31,17 @@ const viewportStartLine = ref(0);
 const editingKey = ref("");
 const editingText = ref("");
 const loading = ref(false);
+const largeFindMatches = ref<LargeFindMatch[]>([]);
+const largeFindTruncated = ref(false);
 const loadedStartLine = ref(0);
 const loadedEndLine = ref(0);
 let activeRequestId = 0;
 let queuedStartLine: number | null = null;
 let scrollFrame = 0;
 const renderCache = new Map<string, string>();
+const findCommandListener = (event: Event) => {
+  void handleFindCommand(event as CustomEvent<string>);
+};
 
 const largeFile = computed(() => appStore.largeFile);
 const totalLines = computed(() => largeFile.value?.totalLines ?? 0);
@@ -63,10 +70,12 @@ watch(
 
 onMounted(() => {
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
+  window.addEventListener("lightmark:find-command", findCommandListener);
 });
 
 onUnmounted(() => {
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
+  window.removeEventListener("lightmark:find-command", findCommandListener);
   if (scrollFrame) cancelAnimationFrame(scrollFrame);
 });
 
@@ -224,6 +233,105 @@ async function toggleTask(line: number) {
   await applyLargeFileEdits([edit]);
 }
 
+async function handleFindCommand(event: CustomEvent<string>) {
+  if (appStore.documentMode !== "large" || !largeFile.value) return;
+  const command = event.detail || "refresh";
+  if (command === "next" || command === "previous") {
+    await navigateLargeFind(command === "next" ? 1 : -1);
+    return;
+  }
+  if (command === "replaceCurrent") {
+    await replaceLargeFind(true);
+    return;
+  }
+  if (command === "replaceAll") {
+    await replaceLargeFind(false);
+    return;
+  }
+  await refreshLargeFind();
+}
+
+async function refreshLargeFind() {
+  if (!largeFile.value || !findReplaceStore.open || !findReplaceStore.query) {
+    largeFindMatches.value = [];
+    largeFindTruncated.value = false;
+    setFindResult(0, -1, "");
+    return;
+  }
+  findReplaceStore.busy = true;
+  try {
+    const result = await invoke<LargeFindResult>("search_large_file", {
+      sessionId: largeFile.value.sessionId,
+      query: findReplaceStore.query,
+      options: findOptions(),
+      startLine: 0,
+      limit: 5000,
+    });
+    largeFindMatches.value = result.matches;
+    largeFindTruncated.value = result.truncated;
+    const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeLargeFindIndex(findReplaceStore.currentIndex, result.matches.length);
+    setFindResult(result.total, current, result.error);
+    if (result.truncated) appStore.statusMessage = "查找结果较多，仅加载前 5000 项用于跳转。";
+  } catch (error) {
+    setFindResult(0, -1, String(error));
+  } finally {
+    findReplaceStore.busy = false;
+  }
+}
+
+async function navigateLargeFind(delta: 1 | -1) {
+  if (!largeFile.value) return;
+  if (largeFindMatches.value.length === 0 || findReplaceStore.error) await refreshLargeFind();
+  if (largeFindMatches.value.length === 0 || findReplaceStore.error) return;
+  const current = normalizeLargeFindIndex(findReplaceStore.currentIndex + delta, largeFindMatches.value.length);
+  const match = largeFindMatches.value[current];
+  setFindResult(findReplaceStore.total, current, "");
+  viewportStartLine.value = Math.max(0, match.line - 20);
+  if (scroller.value) scroller.value.scrollTop = Math.max(0, match.line - 6) * lineHeight;
+  await loadAround(viewportStartLine.value);
+}
+
+async function replaceLargeFind(currentOnly: boolean) {
+  if (!largeFile.value) return;
+  if (currentOnly && largeFindMatches.value.length === 0) await refreshLargeFind();
+  const current = normalizeLargeFindIndex(findReplaceStore.currentIndex, largeFindMatches.value.length);
+  const match = currentOnly ? largeFindMatches.value[current] : null;
+  if (currentOnly && !match) return;
+  findReplaceStore.busy = true;
+  try {
+    const state = await invoke<DirtyState>("replace_large_file_matches", {
+      sessionId: largeFile.value.sessionId,
+      query: findReplaceStore.query,
+      replacement: findReplaceStore.replaceText,
+      options: findOptions(),
+      currentMatch: match,
+    });
+    appStore.isDirty = state.isDirty;
+    appStore.statusMessage = currentOnly ? "已替换当前匹配" : `已登记全部替换，待保存编辑：${state.pendingEditCount}`;
+    renderCache.clear();
+    await refreshLargeFind();
+    await loadAround(viewportStartLine.value);
+  } catch (error) {
+    setFindResult(findReplaceStore.total, findReplaceStore.currentIndex, String(error));
+  } finally {
+    findReplaceStore.busy = false;
+  }
+}
+
+function normalizeLargeFindIndex(index: number, total: number) {
+  if (total <= 0) return -1;
+  return ((index % total) + total) % total;
+}
+
+function blockFindClass(block: MarkdownBlock) {
+  if (!findReplaceStore.open || largeFindMatches.value.length === 0) return "";
+  const current = largeFindMatches.value[normalizeLargeFindIndex(findReplaceStore.currentIndex, largeFindMatches.value.length)];
+  if (current && current.line >= block.startLine && current.line <= block.endLine) return "large-doc-block-current-find";
+  return largeFindMatches.value.some((item) => item.line >= block.startLine && item.line <= block.endLine)
+    ? "large-doc-block-find"
+    : "";
+}
+
 function blockEdit(block: MarkdownBlock, text: string): TextEdit {
   return {
     startLine: block.startLine,
@@ -343,6 +451,7 @@ function handleJumpLine(event: CustomEvent<number>) {
             v-for="block in blocks"
             :key="block.key"
             class="large-doc-block group"
+            :class="blockFindClass(block)"
             :data-line-start="block.startLine"
             @dblclick="startEditing(block)"
           >
@@ -378,6 +487,15 @@ function handleJumpLine(event: CustomEvent<number>) {
 
 .large-doc-block:hover {
   background: rgba(214, 211, 205, 0.24);
+}
+
+.large-doc-block-find {
+  background: rgba(80, 120, 180, 0.09);
+}
+
+.large-doc-block-current-find {
+  background: rgba(70, 116, 190, 0.17);
+  box-shadow: inset 3px 0 0 rgba(70, 116, 190, 0.72);
 }
 
 .large-doc-render :deep(*) {

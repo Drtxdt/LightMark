@@ -14,10 +14,12 @@ import { TableRow } from "@tiptap/extension-table-row";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
-import { AllSelection, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
+import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { appStore, setContent } from "../../stores/appStore";
+import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
+import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import {
@@ -51,6 +53,7 @@ type ToolbarEditorCommand =
   | "image"
   | "alert";
 type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
+type EditorFindMatch = TextMatch & { docFrom: number; docTo: number };
 
 const contextMenu = ref({
   visible: false,
@@ -1069,6 +1072,32 @@ const TyporaSourceMarkers = Extension.create({
   },
 });
 
+const FindReplaceDecorations = Extension.create({
+  name: "findReplaceDecorations",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("lightmarkFindReplace"),
+        props: {
+          decorations(state) {
+            if (!findReplaceStore.open || !findReplaceStore.query) return null;
+            const matches = collectWysiwygFindMatches(state);
+            if (matches.error || matches.items.length === 0) return null;
+            const current = normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
+            const decorations = matches.items.map((match, index) =>
+              Decoration.inline(match.docFrom, match.docTo, {
+                class: index === current ? "lm-find-match lm-find-match-current" : "lm-find-match",
+              }),
+            );
+            return DecorationSet.create(state.doc, decorations);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 const TyporaInlineCode = Extension.create({
   name: "typoraInlineCode",
 
@@ -1803,6 +1832,7 @@ const editor = useEditor({
     TyporaHorizontalRule,
     FrontMatterInput,
     FencedCodeBlockInput,
+    FindReplaceDecorations,
     TyporaSourceMarkers,
   ],
   content: renderMarkdownForEditorWithAssets(appStore.currentContent),
@@ -1987,6 +2017,7 @@ const editor = useEditor({
   onUpdate({ editor }) {
     setContent(editorHtmlToMarkdown(editor.getHTML()), true);
     updateCodeLanguageControl(editor.view);
+    if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
   },
   onSelectionUpdate({ editor }) {
     updateCodeLanguageControl(editor.view);
@@ -2211,15 +2242,147 @@ watch(
 onMounted(() => {
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
+  window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
+  window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   editor.value?.destroy();
 });
+
+function handleFindCommand(event: CustomEvent<string>) {
+  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  const command = event.detail || "refresh";
+  if (command === "next" || command === "previous") {
+    navigateWysiwygFind(command === "next" ? 1 : -1);
+    return;
+  }
+  if (command === "replaceCurrent") {
+    replaceCurrentWysiwygFind();
+    return;
+  }
+  if (command === "replaceAll") {
+    replaceAllWysiwygFind();
+    return;
+  }
+  refreshWysiwygFind();
+}
+
+function refreshWysiwygFind() {
+  const view = editor.value?.view;
+  if (!view) return;
+  const matches = collectWysiwygFindMatches(view.state);
+  const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
+  setFindResult(matches.items.length, current, matches.error);
+  view.dispatch(view.state.tr.setMeta("lightmarkFindRefresh", Date.now()));
+}
+
+function navigateWysiwygFind(delta: 1 | -1) {
+  const view = editor.value?.view;
+  if (!view) return;
+  const matches = collectWysiwygFindMatches(view.state);
+  if (matches.error || matches.items.length === 0) {
+    setFindResult(0, -1, matches.error);
+    view.dispatch(view.state.tr.setMeta("lightmarkFindRefresh", Date.now()));
+    return;
+  }
+
+  const current = normalizeMatchIndex(findReplaceStore.currentIndex + delta, matches.items.length);
+  const match = matches.items[current];
+  setFindResult(matches.items.length, current, "");
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, match.docFrom, match.docTo)).scrollIntoView());
+}
+
+function replaceCurrentWysiwygFind() {
+  const view = editor.value?.view;
+  if (!view) return;
+  const matches = collectWysiwygFindMatches(view.state);
+  const current = normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
+  const match = matches.items[current];
+  if (!match || matches.error) {
+    setFindResult(matches.items.length, current, matches.error);
+    return;
+  }
+  const replacement = replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex);
+  view.dispatch(view.state.tr.insertText(replacement, match.docFrom, match.docTo).scrollIntoView());
+  window.setTimeout(refreshWysiwygFind, 0);
+}
+
+function replaceAllWysiwygFind() {
+  const view = editor.value?.view;
+  if (!view) return;
+  const matches = collectWysiwygFindMatches(view.state);
+  if (matches.error || matches.items.length === 0) {
+    setFindResult(0, -1, matches.error);
+    return;
+  }
+  let tr = view.state.tr;
+  for (const match of [...matches.items].reverse()) {
+    tr = tr.insertText(replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex), match.docFrom, match.docTo);
+  }
+  view.dispatch(tr.scrollIntoView());
+  appStore.statusMessage = `已替换 ${matches.items.length} 处`;
+  window.setTimeout(refreshWysiwygFind, 0);
+}
+
+function collectWysiwygFindMatches(state: any): { items: EditorFindMatch[]; error: string } {
+  if (!findReplaceStore.open || !findReplaceStore.query) return { items: [], error: "" };
+  const items: EditorFindMatch[] = [];
+  let error = "";
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (!node.isTextblock) return true;
+    const block = flattenTextblock(node, pos);
+    if (!block.text) return false;
+    const result = findTextMatches(block.text, findReplaceStore.query, findOptions());
+    if (result.error) {
+      error = result.error;
+      return false;
+    }
+    result.matches.forEach((match) => {
+      const docFrom = textOffsetToDocPos(block.segments, match.from);
+      const docTo = textOffsetToDocPos(block.segments, match.to);
+      if (docFrom !== null && docTo !== null && docFrom < docTo) {
+        items.push({ ...match, docFrom, docTo });
+      }
+    });
+    return false;
+  });
+
+  return { items, error };
+}
+
+function flattenTextblock(node: any, pos: number) {
+  const segments: Array<{ from: number; text: string; start: number; end: number }> = [];
+  let text = "";
+  node.descendants((child: any, childPos: number) => {
+    if (!child.isText || !child.text) return true;
+    const start = text.length;
+    text += child.text;
+    segments.push({
+      from: pos + 1 + childPos,
+      text: child.text,
+      start,
+      end: text.length,
+    });
+    return false;
+  });
+  return { text, segments };
+}
+
+function textOffsetToDocPos(segments: Array<{ from: number; text: string; start: number; end: number }>, offset: number) {
+  for (const segment of segments) {
+    if (offset >= segment.start && offset <= segment.end) {
+      return segment.from + offset - segment.start;
+    }
+  }
+  const last = segments[segments.length - 1];
+  return last && offset === last.end ? last.from + last.text.length : null;
+}
 
 function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetail>) {
   if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
