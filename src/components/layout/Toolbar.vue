@@ -75,7 +75,7 @@ function openCommandPalette() {
 </script>
 
 <template>
-  <header class="lm-toolbar">
+  <header class="lm-toolbar" :class="{ 'lm-toolbar-dark': appStore.activeTheme === 'dark' }">
     <div class="lm-toolbar-group" aria-label="文件">
       <button class="lm-toolbar-button" title="新建" aria-label="新建" @click="run(createNewFile)">
         <span class="tb-ico tb-ico-new" aria-hidden="true"></span>
@@ -92,6 +92,7 @@ function openCommandPalette() {
     </div>
 
     <EditorModeToggle
+      :class="{ 'editor-mode-toggle-dark': appStore.activeTheme === 'dark' }"
       :model-value="appStore.editorMode"
       :source-disabled="appStore.documentMode === 'large'"
       @update:model-value="toggleEditorMode"
@@ -161,7 +162,7 @@ function openCommandPalette() {
       </button>
       <span class="toolbar-theme-wrap">
         <ThemeToggle
-          :model-value="appStore.theme === 'dark' ? 'dark' : 'light'"
+          :model-value="appStore.activeTheme"
           size="md"
           @update:model-value="toggleTheme"
         />
@@ -568,37 +569,45 @@ function openCommandPalette() {
   transform: rotate(45deg);
 }
 
-:global(.dark) .lm-toolbar {
+:global(.dark) .lm-toolbar,
+.lm-toolbar-dark {
   border-bottom-color: rgb(41 37 34 / 92%);
   background:
     linear-gradient(180deg, rgb(20 19 17 / 98%), rgb(28 26 23 / 94%));
 }
 
-:global(.dark) .lm-toolbar-group {
+:global(.dark) .lm-toolbar-group,
+.lm-toolbar-dark .lm-toolbar-group {
   border-color: rgb(76 70 62 / 70%);
   background: rgb(32 29 26 / 76%);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
 }
 
-:global(.dark) .lm-toolbar-button {
+:global(.dark) .lm-toolbar-button,
+.lm-toolbar-dark .lm-toolbar-button {
   color: #b9b3a8;
 }
 
 :global(.dark) .lm-toolbar-button:hover:not(:disabled),
-:global(.dark) .lm-toolbar-button:focus-visible:not(:disabled) {
+:global(.dark) .lm-toolbar-button:focus-visible:not(:disabled),
+.lm-toolbar-dark .lm-toolbar-button:hover:not(:disabled),
+.lm-toolbar-dark .lm-toolbar-button:focus-visible:not(:disabled) {
   background: rgb(255 255 255 / 8%);
   color: #f2eee6;
 }
 
-:global(.dark) .lm-toolbar-button.primary {
+:global(.dark) .lm-toolbar-button.primary,
+.lm-toolbar-dark .lm-toolbar-button.primary {
   color: #e1c49c;
 }
 
-:global(.dark) .lm-toolbar-split {
+:global(.dark) .lm-toolbar-split,
+.lm-toolbar-dark .lm-toolbar-split {
   background: rgb(76 70 62 / 82%);
 }
 
-:global(.dark) .lm-toolbar-title {
+:global(.dark) .lm-toolbar-title,
+.lm-toolbar-dark .lm-toolbar-title {
   color: #aaa196;
 }
 </style>

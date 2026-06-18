@@ -291,7 +291,8 @@ function handleKeydown(event: KeyboardEvent) {
   --toggle-track: rgba(245, 243, 238, 0.62);
 }
 
-:global(.dark) .editor-mode-toggle {
+:global(.dark) .editor-mode-toggle,
+.editor-mode-toggle-dark {
   --toggle-track: rgba(38, 36, 33, 0.86);
   --toggle-border: rgba(89, 84, 76, 0.78);
   --toggle-ink: #f1eadf;
@@ -308,15 +309,18 @@ function handleKeydown(event: KeyboardEvent) {
     0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
-:global(.dark) .editor-mode-toggle-slider {
+:global(.dark) .editor-mode-toggle-slider,
+.editor-mode-toggle-dark .editor-mode-toggle-slider {
   border-color: rgba(111, 103, 92, 0.7);
 }
 
-:global(.dark) .page-line {
+:global(.dark) .page-line,
+.editor-mode-toggle-dark .page-line {
   background: rgba(201, 166, 109, 0.24);
 }
 
-:global(.dark) .page-fold {
+:global(.dark) .page-fold,
+.editor-mode-toggle-dark .page-fold {
   background: linear-gradient(135deg, rgba(75, 68, 59, 0.95), rgba(35, 31, 27, 0.9));
   box-shadow: -1px 1px 2px rgba(0, 0, 0, 0.28);
 }

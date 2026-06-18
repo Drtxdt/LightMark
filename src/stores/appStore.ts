@@ -28,6 +28,7 @@ export const appStore = reactive({
   editorMode: "wysiwyg" as EditorMode,
   recentFiles: [] as string[],
   theme: "light" as ThemeMode,
+  activeTheme: "light" as Exclude<ThemeMode, "system">,
   settings: defaultSettings(),
   settingsOpen: false,
   commandPaletteOpen: false,
@@ -217,6 +218,7 @@ export async function setTheme(theme: ThemeMode) {
 
 export function applyTheme() {
   const activeTheme = normalizeTheme(appStore.theme);
+  appStore.activeTheme = activeTheme;
   document.documentElement.classList.toggle("dark", activeTheme === "dark");
   applyAppearance();
 }
