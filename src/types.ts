@@ -8,6 +8,9 @@ export interface PendingModeCursor {
   targetMode: EditorMode;
   markdownAnchor: number;
   markdownHead: number;
+  markdownLine?: number;
+  markdownColumn?: number;
+  markdownLineText?: string;
   reason: "mode-switch";
 }
 

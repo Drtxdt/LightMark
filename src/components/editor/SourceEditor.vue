@@ -257,10 +257,14 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
   if (appStore.editorMode !== "source" || event.detail?.to !== "wysiwyg" || !view) return;
   setContent(view.state.doc.toString(), true);
   const selection = view.state.selection.main;
+  const line = view.state.doc.lineAt(selection.anchor);
   appStore.pendingModeCursor = {
     targetMode: "wysiwyg",
     markdownAnchor: selection.anchor,
     markdownHead: selection.head,
+    markdownLine: line.number,
+    markdownColumn: selection.anchor - line.from,
+    markdownLineText: line.text,
     reason: "mode-switch",
   };
 }

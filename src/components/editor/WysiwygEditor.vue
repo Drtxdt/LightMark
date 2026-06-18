@@ -205,6 +205,7 @@ codeLanguageItems.forEach((item) => {
   codeLanguageAliases.set(item.name, item.name);
   item.aliases.forEach((alias) => codeLanguageAliases.set(alias, item.name));
 });
+let pendingWysiwygRestoreTimer: number | null = null;
 
 const TyporaHeading = Heading.extend({
   addInputRules() {
@@ -2235,12 +2236,20 @@ watch(
   () => {
     if (appStore.editorMode === "wysiwyg") {
       editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
+      schedulePendingWysiwygCursorRestore();
     }
   },
 );
 
+watch(
+  () => editor.value,
+  () => {
+    schedulePendingWysiwygCursorRestore();
+  },
+);
+
 onMounted(() => {
-  restorePendingWysiwygCursor();
+  schedulePendingWysiwygCursorRestore();
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
@@ -2254,6 +2263,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
+  if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
 });
 
@@ -2273,25 +2283,144 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
 
 function restorePendingWysiwygCursor() {
   const pending = appStore.pendingModeCursor;
-  if (!pending || pending.targetMode !== "wysiwyg") return;
-  appStore.pendingModeCursor = null;
+  if (!pending || pending.targetMode !== "wysiwyg") return false;
+  const view = editor.value?.view;
+  if (!view) return false;
   window.requestAnimationFrame(() => {
-    const view = editor.value?.view;
-    if (!view) return;
-    const anchor = markdownOffsetToDocPos(view.state, pending.markdownAnchor, appStore.currentContent);
-    const head = markdownOffsetToDocPos(view.state, pending.markdownHead, appStore.currentContent);
-    const docSize = view.state.doc.content.size;
-    const safeAnchor = clampDocPos(anchor, docSize);
-    const safeHead = clampDocPos(head, docSize);
-    let tr = view.state.tr;
-    try {
-      tr = tr.setSelection(TextSelection.create(view.state.doc, safeAnchor, safeHead));
-    } catch {
-      tr = tr.setSelection(TextSelection.near(view.state.doc.resolve(safeAnchor)));
+    const activeView = editor.value?.view;
+    if (!activeView || appStore.pendingModeCursor !== pending) return;
+    const target = findWysiwygScrollTarget(activeView, pending, appStore.currentContent);
+    if (target) {
+      target.scrollIntoView({ block: "center", inline: "nearest" });
+    } else {
+      const scrollPos = markdownOffsetToDocPos(activeView.state, pending.markdownAnchor, appStore.currentContent);
+      scrollWysiwygPositionIntoView(activeView, scrollPos);
     }
-    view.dispatch(tr.scrollIntoView());
-    view.focus();
+    if (appStore.pendingModeCursor === pending) appStore.pendingModeCursor = null;
   });
+  return true;
+}
+
+function schedulePendingWysiwygCursorRestore(attempt = 0) {
+  if (!appStore.pendingModeCursor || appStore.pendingModeCursor.targetMode !== "wysiwyg") return;
+  if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
+  pendingWysiwygRestoreTimer = window.setTimeout(() => {
+    pendingWysiwygRestoreTimer = null;
+    if (restorePendingWysiwygCursor()) return;
+    if (attempt < 8) schedulePendingWysiwygCursorRestore(attempt + 1);
+  }, attempt === 0 ? 0 : 24);
+}
+
+function scrollWysiwygPositionIntoView(view: any, pos: number) {
+  window.requestAnimationFrame(() => {
+    try {
+      const dom = view.domAtPos(clampDocPos(pos, view.state.doc.content.size)).node;
+      const element = dom instanceof Element ? dom : dom.parentElement;
+      element?.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {
+      view.dom.querySelector(".ProseMirror-selectednode")?.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+  });
+}
+
+function findWysiwygScrollTarget(view: any, pending: any, markdown: string) {
+  const blocks = collectWysiwygScrollBlocks(view.dom);
+  if (blocks.length === 0) return null;
+  const lineText = findNearbySourceLineText(markdown, pending.markdownLine, pending.markdownLineText);
+  const needle = normalizeSourceLineForSearch(lineText);
+  const expectedRatio = sourceLineRatio(markdown, pending.markdownLine);
+
+  if (needle.length >= 2) {
+    const matches = blocks.filter((block) => normalizeDomTextForSearch(block.textContent || "").includes(needle));
+    if (matches.length > 0) return chooseNearestBlockByRatio(blocks, matches, expectedRatio);
+  }
+
+  if (typeof pending.markdownLine === "number") {
+    return blocks[Math.max(0, Math.min(blocks.length - 1, Math.round(expectedRatio * (blocks.length - 1))))] ?? null;
+  }
+  return null;
+}
+
+function collectWysiwygScrollBlocks(root: HTMLElement) {
+  const selector = [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "li",
+    "blockquote",
+    "pre",
+    "table",
+    "figure",
+    "section[data-type]",
+    "[data-type='inline-html']",
+    "[data-type='raw-html']",
+    ".typora-image-node",
+    ".html-block-node",
+    ".markdown-alert",
+  ].join(",");
+  return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter((element) => root.contains(element));
+}
+
+function chooseNearestBlockByRatio(allBlocks: HTMLElement[], matches: HTMLElement[], expectedRatio: number) {
+  if (matches.length === 1) return matches[0];
+  const denominator = Math.max(allBlocks.length - 1, 1);
+  return matches
+    .map((block) => ({ block, distance: Math.abs(allBlocks.indexOf(block) / denominator - expectedRatio) }))
+    .sort((left, right) => left.distance - right.distance)[0]?.block ?? matches[0];
+}
+
+function findNearbySourceLineText(markdown: string, lineNumber?: number, lineText?: string) {
+  if (lineText && normalizeSourceLineForSearch(lineText).length >= 2) return lineText;
+  if (!lineNumber) return lineText || "";
+  const lines = markdown.split(/\r?\n/);
+  const index = Math.max(0, Math.min(lines.length - 1, lineNumber - 1));
+  for (let radius = 0; radius <= 4; radius += 1) {
+    const candidates = radius === 0 ? [index] : [index - radius, index + radius];
+    for (const candidate of candidates) {
+      const text = lines[candidate] || "";
+      if (normalizeSourceLineForSearch(text).length >= 2) return text;
+    }
+  }
+  return lineText || "";
+}
+
+function sourceLineRatio(markdown: string, lineNumber?: number) {
+  if (!lineNumber) return 0;
+  const total = Math.max(markdown.split(/\r?\n/).length, 1);
+  return Math.max(0, Math.min(1, (lineNumber - 1) / Math.max(total - 1, 1)));
+}
+
+function normalizeSourceLineForSearch(value: string) {
+  return normalizeDomTextForSearch(
+    value
+      .replace(/^ {0,3}> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i, "")
+      .replace(/^ {0,3}>\s?/g, "")
+      .replace(/^ {0,3}#{1,6}\s+/g, "")
+      .replace(/^(\s*)([-*+]|\d+\.)\s+\[[ xX]\]\s+/g, "")
+      .replace(/^(\s*)([-*+]|\d+\.)\s+/g, "")
+      .replace(/^ {0,3}(```|~~~).*$/g, "")
+      .replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, "$1")
+      .replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, "$1")
+      .replace(/\[\^([^\]\n]+)\]/g, "$1")
+      .replace(/`([^`\n]*)`/g, "$1")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/__([^_\n]+)__/g, "$1")
+      .replace(/\*([^*\n]+)\*/g, "$1")
+      .replace(/_([^_\n]+)_/g, "$1")
+      .replace(/~~([^~\n]+)~~/g, "$1")
+      .replace(/==([^=\n]+)==/g, "$1")
+      .replace(/\$([^$\n]+)\$/g, "$1")
+      .replace(/<[^>\n]+>/g, "")
+      .replace(/^\|?|\|?$/g, ""),
+  );
+}
+
+function normalizeDomTextForSearch(value: string) {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function handleFindCommand(event: CustomEvent<string>) {
