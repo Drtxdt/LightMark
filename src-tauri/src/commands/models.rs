@@ -173,6 +173,26 @@ pub struct ExportSettings {
     pub open_folder_after_export: bool,
     #[serde(default)]
     pub pandoc_path: String,
+    #[serde(default = "default_true")]
+    pub prefer_bundled_pandoc: bool,
+    #[serde(default = "default_pdf_engine")]
+    pub pdf_engine: String,
+    #[serde(default = "default_pdf_paper_size")]
+    pub pdf_paper_size: String,
+    #[serde(default = "default_pdf_margin")]
+    pub pdf_margin: String,
+    #[serde(default)]
+    pub docx_reference_doc: String,
+    #[serde(default)]
+    pub epub_cover_image: String,
+    #[serde(default)]
+    pub epub_css: String,
+    #[serde(default)]
+    pub custom_pandoc_format: String,
+    #[serde(default = "default_custom_pandoc_extension")]
+    pub custom_pandoc_extension: String,
+    #[serde(default)]
+    pub custom_pandoc_args: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -389,6 +409,16 @@ impl Default for ExportSettings {
             open_file_after_export: false,
             open_folder_after_export: false,
             pandoc_path: String::new(),
+            prefer_bundled_pandoc: true,
+            pdf_engine: default_pdf_engine(),
+            pdf_paper_size: default_pdf_paper_size(),
+            pdf_margin: default_pdf_margin(),
+            docx_reference_doc: String::new(),
+            epub_cover_image: String::new(),
+            epub_css: String::new(),
+            custom_pandoc_format: String::new(),
+            custom_pandoc_extension: default_custom_pandoc_extension(),
+            custom_pandoc_args: String::new(),
         }
     }
 }
@@ -459,6 +489,22 @@ fn default_code_font_family() -> String {
 
 fn default_export_folder() -> String {
     "auto".to_string()
+}
+
+fn default_pdf_paper_size() -> String {
+    "a4".to_string()
+}
+
+fn default_pdf_engine() -> String {
+    "xelatex".to_string()
+}
+
+fn default_pdf_margin() -> String {
+    "20mm".to_string()
+}
+
+fn default_custom_pandoc_extension() -> String {
+    ".html".to_string()
 }
 
 fn default_html_theme() -> String {

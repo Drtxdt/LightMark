@@ -4,6 +4,7 @@ import { appStore } from "../../stores/appStore";
 import Sidebar from "./Sidebar.vue";
 import Toolbar from "./Toolbar.vue";
 import StatusBar from "./StatusBar.vue";
+import ExportStatusStrip from "./ExportStatusStrip.vue";
 import EditorShell from "../editor/EditorShell.vue";
 import FindReplacePanel from "../find/FindReplacePanel.vue";
 import { findReplaceStore } from "../../stores/findReplaceStore";
@@ -38,6 +39,7 @@ function startResize(event: PointerEvent) {
 <template>
   <div class="flex h-screen flex-col bg-paper-50 text-ink-900 dark:bg-paper-950 dark:text-ink-100">
     <Toolbar />
+    <ExportStatusStrip />
     <FindReplacePanel v-if="findReplaceStore.open" />
     <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: gridColumns }">
       <Sidebar v-if="appStore.settings.appearance.showSidebar" />

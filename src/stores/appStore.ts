@@ -6,6 +6,8 @@ import type {
   DirtyState,
   DocumentMode,
   EditorMode,
+  ExportStatus,
+  ExportTargetId,
   ImageInsertBehavior,
   FileChunk,
   FileInfo,
@@ -34,6 +36,10 @@ export const appStore = reactive({
   commandPaletteOpen: false,
   wordCountOpen: false,
   pendingModeCursor: null as PendingModeCursor | null,
+  exportStatus: {
+    status: "idle",
+    message: "",
+  } as ExportStatus,
   statusMessage: "",
 });
 
@@ -240,6 +246,43 @@ export async function resetSettings() {
   appStore.statusMessage = "设置已重置";
 }
 
+export function startExportStatus(targetId: ExportTargetId, targetLabel: string) {
+  appStore.exportStatus = {
+    status: "running",
+    targetId,
+    targetLabel,
+    message: `正在导出 ${targetLabel}`,
+    startedAt: Date.now(),
+  };
+}
+
+export function completeExportStatus(path: string) {
+  appStore.exportStatus = {
+    ...appStore.exportStatus,
+    status: "success",
+    path,
+    message: "导出完成",
+    completedAt: Date.now(),
+  };
+}
+
+export function failExportStatus(error: unknown) {
+  appStore.exportStatus = {
+    ...appStore.exportStatus,
+    status: "error",
+    message: "导出失败",
+    error: error instanceof Error ? error.message : String(error),
+    completedAt: Date.now(),
+  };
+}
+
+export function clearExportStatus() {
+  appStore.exportStatus = {
+    status: "idle",
+    message: "",
+  };
+}
+
 export function defaultSettings(): AppSettings {
   return {
     general: {
@@ -305,6 +348,16 @@ export function defaultSettings(): AppSettings {
       openFileAfterExport: false,
       openFolderAfterExport: false,
       pandocPath: "",
+      preferBundledPandoc: true,
+      pdfEngine: "xelatex",
+      pdfPaperSize: "a4",
+      pdfMargin: "20mm",
+      docxReferenceDoc: "",
+      epubCoverImage: "",
+      epubCss: "",
+      customPandocFormat: "",
+      customPandocExtension: ".html",
+      customPandocArgs: "",
     },
     shortcuts: {
       customKeybindings: false,
@@ -351,7 +404,19 @@ function normalizeSettings(config: AppConfig) {
       lineHeight: clampNumber(source.appearance?.lineHeight, 1.2, 2.4, defaults.appearance.lineHeight),
       paragraphSpacing: clampNumber(source.appearance?.paragraphSpacing, 0, 2, defaults.appearance.paragraphSpacing),
     },
-    export: { ...defaults.export, ...source.export },
+    export: {
+      ...defaults.export,
+      ...source.export,
+      defaultFolder:
+        source.export?.defaultFolder === "sameFolder" || source.export?.defaultFolder === "custom"
+          ? source.export.defaultFolder
+          : defaults.export.defaultFolder,
+      htmlTheme:
+        source.export?.htmlTheme === "light" || source.export?.htmlTheme === "dark"
+          ? source.export.htmlTheme
+          : defaults.export.htmlTheme,
+      customPandocExtension: normalizeExportExtension(source.export?.customPandocExtension, defaults.export.customPandocExtension),
+    },
     shortcuts: { ...defaults.shortcuts, ...source.shortcuts },
     advanced: { ...defaults.advanced, ...source.advanced },
   } satisfies AppSettings;
@@ -359,6 +424,12 @@ function normalizeSettings(config: AppConfig) {
 
 function normalizeThemeValue(theme: ThemeMode | undefined) {
   return theme === "light" || theme === "dark" || theme === "system" ? theme : undefined;
+}
+
+function normalizeExportExtension(value: string | undefined, fallback: string) {
+  const trimmed = value?.trim();
+  if (!trimmed) return fallback;
+  return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
 }
 
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number) {

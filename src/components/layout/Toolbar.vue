@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { invoke } from "@tauri-apps/api/core";
+import { ref } from "vue";
 import { currentFileName } from "../../stores/appStore";
 import {
   appStore,
@@ -12,8 +12,8 @@ import {
 } from "../../stores/appStore";
 import EditorModeToggle from "./EditorModeToggle.vue";
 import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
-import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
 import { openFindPanel } from "../../stores/findReplaceStore";
+import { exportTargets, runDocumentExport } from "../../utils/export";
 import type { EditorMode, ThemeMode } from "../../types";
 
 type EditorCommand =
@@ -29,6 +29,10 @@ type EditorCommand =
   | "image"
   | "alert";
 
+const exportMenuOpen = ref(false);
+const primaryExportTargets = exportTargets.filter((target) => ["pdf", "html", "docx", "png"].includes(target.id));
+const secondaryExportTargets = exportTargets.filter((target) => !primaryExportTargets.includes(target));
+
 async function run(action: () => Promise<void> | void) {
   try {
     await action();
@@ -37,17 +41,9 @@ async function run(action: () => Promise<void> | void) {
   }
 }
 
-async function exportHtml() {
-  if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
-  if (appStore.documentMode === "large") throw new Error("大文件模式暂不支持全量 HTML 导出。");
-  const html = buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent), {
-    includeStyles: appStore.settings.export.htmlIncludeStyles,
-  });
-  const target = await invoke<string>("export_html", {
-    path: appStore.currentFilePath,
-    html,
-  });
-  appStore.statusMessage = `已导出：${target}`;
+async function runExport(target: (typeof exportTargets)[number]) {
+  exportMenuOpen.value = false;
+  await runDocumentExport(target);
 }
 
 function toggleTheme(theme: "light" | "dark") {
@@ -151,12 +147,40 @@ function openCommandPalette() {
       <button class="lm-toolbar-button" title="查找与替换 Ctrl+F" aria-label="查找与替换" @click="openFindPanel">
         <span class="tb-ico tb-ico-find" aria-hidden="true"></span>
       </button>
-      <button class="lm-toolbar-button" title="导出 HTML" aria-label="导出 HTML" @click="run(exportHtml)">
-        <span class="tb-ico tb-ico-export" aria-hidden="true"></span>
-      </button>
-      <button class="lm-toolbar-button disabled-soft" title="导出 PDF，未来版本实现" aria-label="导出 PDF，未来版本实现" disabled>
-        <span class="tb-ico tb-ico-pdf" aria-hidden="true">P</span>
-      </button>
+      <div class="lm-export-menu-wrap">
+        <button
+          class="lm-toolbar-button"
+          title="导出"
+          aria-label="导出"
+          :disabled="appStore.exportStatus.status === 'running'"
+          @click="exportMenuOpen = !exportMenuOpen"
+        >
+          <span class="tb-ico tb-ico-export" aria-hidden="true"></span>
+        </button>
+        <div v-if="exportMenuOpen" class="lm-export-menu" @mouseleave="exportMenuOpen = false">
+          <button
+            v-for="target in primaryExportTargets"
+            :key="target.id"
+            class="lm-export-menu-item"
+            :disabled="appStore.exportStatus.status === 'running'"
+            @click="run(() => runExport(target))"
+          >
+            <span>{{ target.label }}</span>
+            <small>.{{ target.extension }}</small>
+          </button>
+          <div class="lm-export-menu-separator"></div>
+          <button
+            v-for="target in secondaryExportTargets"
+            :key="target.id"
+            class="lm-export-menu-item"
+            :disabled="appStore.exportStatus.status === 'running'"
+            @click="run(() => runExport(target))"
+          >
+            <span>{{ target.label }}</span>
+            <small>.{{ target.extension }}</small>
+          </button>
+        </div>
+      </div>
       <button class="lm-toolbar-button" title="偏好设置" aria-label="偏好设置" @click="appStore.settingsOpen = true">
         <span class="tb-ico tb-ico-settings" aria-hidden="true"></span>
       </button>
@@ -274,6 +298,64 @@ function openCommandPalette() {
 .toolbar-theme-wrap {
   display: inline-flex;
   margin-left: 4px;
+}
+
+.lm-export-menu-wrap {
+  position: relative;
+  display: inline-grid;
+}
+
+.lm-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 60;
+  display: grid;
+  width: 230px;
+  max-height: min(68vh, 440px);
+  overflow: auto;
+  border: 1px solid rgb(219 213 202 / 88%);
+  border-radius: 10px;
+  background: rgb(255 254 251 / 98%);
+  padding: 6px;
+  box-shadow: 0 14px 36px rgb(49 45 40 / 16%);
+}
+
+.lm-export-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 8px 9px;
+  color: #403b34;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.lm-export-menu-item:hover,
+.lm-export-menu-item:focus-visible {
+  background: rgb(120 113 108 / 11%);
+  outline: none;
+}
+
+.lm-export-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.lm-export-menu-item small {
+  color: #8a8276;
+  font: 12px/1 "JetBrains Mono", ui-monospace, monospace;
+}
+
+.lm-export-menu-separator {
+  height: 1px;
+  margin: 5px 3px;
+  background: rgb(219 213 202 / 78%);
 }
 
 .tb-ico {
@@ -609,5 +691,34 @@ function openCommandPalette() {
 :global(.dark) .lm-toolbar-title,
 .lm-toolbar-dark .lm-toolbar-title {
   color: #aaa196;
+}
+
+:global(.dark) .lm-export-menu,
+.lm-toolbar-dark .lm-export-menu {
+  border-color: rgb(76 70 62 / 86%);
+  background: rgb(32 29 26 / 98%);
+  box-shadow: 0 16px 42px rgb(0 0 0 / 34%);
+}
+
+:global(.dark) .lm-export-menu-item,
+.lm-toolbar-dark .lm-export-menu-item {
+  color: #e5ded2;
+}
+
+:global(.dark) .lm-export-menu-item:hover,
+:global(.dark) .lm-export-menu-item:focus-visible,
+.lm-toolbar-dark .lm-export-menu-item:hover,
+.lm-toolbar-dark .lm-export-menu-item:focus-visible {
+  background: rgb(255 255 255 / 8%);
+}
+
+:global(.dark) .lm-export-menu-item small,
+.lm-toolbar-dark .lm-export-menu-item small {
+  color: #aaa196;
+}
+
+:global(.dark) .lm-export-menu-separator,
+.lm-toolbar-dark .lm-export-menu-separator {
+  background: rgb(76 70 62 / 82%);
 }
 </style>

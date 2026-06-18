@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { appStore, openFile, openWorkspace, saveCurrentFile, switchMode } from "../../stores/appStore";
 import { pluginCommands } from "../../plugins/registry";
-import { buildExportHtml, renderMarkdown } from "../../utils/markdown";
-import { currentFileName } from "../../stores/appStore";
+import { exportTargets, runDocumentExport } from "../../utils/export";
 
 const query = ref("");
 
@@ -13,18 +11,12 @@ const coreCommands = [
   { name: "打开文件夹", handler: () => openWorkspace() },
   { name: "保存", handler: () => saveCurrentFile() },
   { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
-  {
-    name: "导出 HTML",
+  ...exportTargets.map((target) => ({
+    name: `导出：${target.label}`,
     handler: async () => {
-      if (!appStore.currentFilePath) throw new Error("请先打开 Markdown 文件再导出。");
-      await invoke("export_html", {
-        path: appStore.currentFilePath,
-        html: buildExportHtml(currentFileName.value, renderMarkdown(appStore.currentContent), {
-          includeStyles: appStore.settings.export.htmlIncludeStyles,
-        }),
-      });
+      await runDocumentExport(target);
     },
-  },
+  })),
   { name: "切换编辑/源代码", handler: () => switchMode(appStore.editorMode === "source" ? "wysiwyg" : "source") },
 ];
 

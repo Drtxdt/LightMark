@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { appStore, defaultSettings, resetSettings, updateSettings } from "../../stores/appStore";
-import type { AppSettings } from "../../types";
+import { detectPandoc } from "../../utils/export";
+import type { AppSettings, PandocStatus } from "../../types";
 
 type SettingsSection =
   | "general"
@@ -16,6 +17,7 @@ type SettingsSection =
 const activeSection = ref<SettingsSection>("general");
 const localSettings = ref<AppSettings>(cloneSettings(appStore.settings));
 const saveState = ref("");
+const pandocStatus = ref<PandocStatus | null>(null);
 
 const sections: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "general", label: "基础", description: "启动、自动保存、语言和拼写" },
@@ -46,6 +48,10 @@ watch(
   { deep: true },
 );
 
+onMounted(() => {
+  void refreshPandocStatus();
+});
+
 async function persist() {
   try {
     saveState.value = "正在保存...";
@@ -57,6 +63,15 @@ async function persist() {
   } catch (error) {
     saveState.value = String(error);
   }
+}
+
+async function refreshPandocStatus() {
+  pandocStatus.value = await detectPandoc(localSettings.value.export).catch(() => ({
+    available: false,
+    path: "",
+    version: "",
+    source: "missing" as const,
+  }));
 }
 
 async function resetAll() {
@@ -300,31 +315,100 @@ function cloneSettings(settings: AppSettings): AppSettings {
 
           <div v-else-if="activeSection === 'export'" class="settings-stack">
             <div class="settings-group">
-              <h4>HTML 导出</h4>
-              <label class="settings-row disabled-row">
-                <span><b>默认导出位置</b><small>LightMark 当前仍使用保存对话框。</small></span>
-                <select v-model="localSettings.export.defaultFolder" class="select" disabled>
+              <h4>通用</h4>
+              <label class="settings-row">
+                <span><b>默认导出位置</b><small>保存对话框仍会出现，这里决定初始目录。</small></span>
+                <select v-model="localSettings.export.defaultFolder" class="settings-input" @change="persist">
                   <option value="auto">自动</option>
                   <option value="sameFolder">当前文件同目录</option>
                   <option value="custom">自定义目录</option>
                 </select>
               </label>
               <label class="settings-row">
+                <span><b>自定义目录</b><small>默认导出位置选择“自定义目录”时使用。</small></span>
+                <input v-model="localSettings.export.customFolder" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>导出后打开文件</b><small>成功导出后用系统默认应用打开文件。</small></span>
+                <input v-model="localSettings.export.openFileAfterExport" type="checkbox" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>导出后打开所在位置</b><small>未启用打开文件时，导出后在文件管理器中定位。</small></span>
+                <input v-model="localSettings.export.openFolderAfterExport" type="checkbox" @change="persist" />
+              </label>
+            </div>
+            <div class="settings-group">
+              <h4>HTML / PNG</h4>
+              <label class="settings-row">
                 <span><b>HTML 包含样式</b><small>当前导出使用内置样式；关闭项预留给无样式 HTML。</small></span>
                 <input v-model="localSettings.export.htmlIncludeStyles" type="checkbox" @change="persist" />
               </label>
-              <label class="settings-row disabled-row">
-                <span><b>允许 YAML 覆盖导出设置</b><small>Typora 兼容项，后续用于 per-file export config。</small></span>
-                <input v-model="localSettings.export.allowYamlOverride" type="checkbox" disabled />
+              <label class="settings-row">
+                <span><b>HTML 主题</b><small>第一版导出样式以 LightMark 内置主题为准。</small></span>
+                <select v-model="localSettings.export.htmlTheme" class="settings-input" @change="persist">
+                  <option value="current">跟随当前主题</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
               </label>
             </div>
             <div class="settings-group">
               <h4>Pandoc / PDF / Word</h4>
-              <label class="settings-row disabled-row">
-                <span><b>Pandoc 路径</b><small>Word、PDF、EPUB、LaTeX 等导出预留。</small></span>
-                <input v-model="localSettings.export.pandocPath" class="settings-input" disabled />
+              <label class="settings-row">
+                <span><b>优先使用内置 Pandoc</b><small>LightMark 会先使用随应用提供的 Pandoc；填写自定义路径时自定义路径优先。</small></span>
+                <input v-model="localSettings.export.preferBundledPandoc" type="checkbox" @change="persist" />
               </label>
-              <p class="settings-note">PDF、Word、OpenOffice、RTF、EPUB、LaTeX、Wiki、RST、Textile、OPML、RevealJS 和自定义命令导出先在 UI 中占位，等导出链路实现后再启用。</p>
+              <label class="settings-row">
+                <span><b>Pandoc 路径</b><small>留空时使用内置 Pandoc 或 PATH 中的 pandoc。</small></span>
+                <input v-model="localSettings.export.pandocPath" class="settings-input" @change="persist" />
+              </label>
+              <div class="settings-row">
+                <span>
+                  <b>Pandoc 状态</b>
+                  <small>{{ pandocStatus?.available ? `${pandocStatus.version} · ${pandocStatus.source} · ${pandocStatus.path}` : "未检测到 Pandoc" }}</small>
+                </span>
+                <button class="btn-small" @click="refreshPandocStatus">重新检测</button>
+              </div>
+              <label class="settings-row">
+                <span><b>PDF Engine</b><small>默认 xelatex，适合中文；也可填 wkhtmltopdf、weasyprint 等。</small></span>
+                <input v-model="localSettings.export.pdfEngine" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>PDF 纸张</b><small>传递给 Pandoc 变量 papersize。</small></span>
+                <input v-model="localSettings.export.pdfPaperSize" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>PDF 边距</b><small>传递给 Pandoc 变量 margin，例如 20mm。</small></span>
+                <input v-model="localSettings.export.pdfMargin" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>DOCX 样式参考文档</b><small>对应 Pandoc --reference-doc。</small></span>
+                <input v-model="localSettings.export.docxReferenceDoc" class="settings-input" @change="persist" />
+              </label>
+            </div>
+            <div class="settings-group">
+              <h4>EPUB / 自定义 Pandoc</h4>
+              <label class="settings-row">
+                <span><b>EPUB 封面图片</b><small>对应 Pandoc --epub-cover-image。</small></span>
+                <input v-model="localSettings.export.epubCoverImage" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>EPUB CSS</b><small>对应 Pandoc --css。</small></span>
+                <input v-model="localSettings.export.epubCss" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>Custom Pandoc 格式</b><small>对应 Pandoc --to；留空时由输出扩展名推断。</small></span>
+                <input v-model="localSettings.export.customPandocFormat" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>Custom Pandoc 扩展名</b><small>例如 .html、.typ、.asciidoc。</small></span>
+                <input v-model="localSettings.export.customPandocExtension" class="settings-input" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>Custom Pandoc 额外参数</b><small>支持简单引号分组，例如 --toc --metadata title="Demo"。</small></span>
+                <input v-model="localSettings.export.customPandocArgs" class="settings-input" @change="persist" />
+              </label>
+              <p class="settings-note">自定义 shell 命令和 YAML 覆盖导出设置暂不启用；Pandoc 导出会显示失败命令和 stderr，便于排查。</p>
             </div>
           </div>
 

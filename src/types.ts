@@ -3,6 +3,26 @@ export type ThemeMode = "light" | "dark" | "system";
 export type DocumentMode = "normal" | "large";
 export type ImageInsertBehavior = "reference" | "copyToAssets";
 export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
+export type ExportTargetKind = "native-html" | "native-image" | "native-pdf" | "pandoc";
+export type ExportRunStatus = "idle" | "running" | "success" | "error";
+export type ExportTargetId =
+  | "html"
+  | "htmlPlain"
+  | "png"
+  | "pdf"
+  | "pdfPandoc"
+  | "docx"
+  | "odt"
+  | "rtf"
+  | "epub"
+  | "latex"
+  | "mediawiki"
+  | "rst"
+  | "textile"
+  | "opml"
+  | "revealjs"
+  | "markdownSpec"
+  | "customPandoc";
 
 export interface PendingModeCursor {
   targetMode: EditorMode;
@@ -106,6 +126,63 @@ export interface ExportSettings {
   openFileAfterExport: boolean;
   openFolderAfterExport: boolean;
   pandocPath: string;
+  preferBundledPandoc: boolean;
+  pdfEngine: string;
+  pdfPaperSize: string;
+  pdfMargin: string;
+  docxReferenceDoc: string;
+  epubCoverImage: string;
+  epubCss: string;
+  customPandocFormat: string;
+  customPandocExtension: string;
+  customPandocArgs: string;
+}
+
+export interface ExportTarget {
+  id: ExportTargetId;
+  label: string;
+  extension: string;
+  kind: ExportTargetKind;
+  requiresPandoc: boolean;
+  enabled: boolean;
+  disabledReason?: string;
+}
+
+export interface ExportRequest {
+  target: ExportTargetId;
+  currentPath: string;
+  title: string;
+  markdown: string;
+  html?: string;
+  plainHtml?: string;
+  settings: ExportSettings;
+}
+
+export interface ExportResult {
+  path: string;
+  format: ExportTargetId;
+  usedPandocPath?: string;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+}
+
+export interface ExportStatus {
+  status: ExportRunStatus;
+  targetId?: ExportTargetId;
+  targetLabel?: string;
+  path?: string;
+  message: string;
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface PandocStatus {
+  available: boolean;
+  path: string;
+  version: string;
+  source: "bundled" | "custom" | "path" | "missing";
 }
 
 export interface ShortcutSettings {

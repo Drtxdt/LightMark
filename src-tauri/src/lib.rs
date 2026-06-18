@@ -21,7 +21,9 @@ pub fn run() {
             commands::file::image_paths_to_markdown,
             commands::file::list_markdown_files,
             commands::file::create_markdown_file,
-            commands::export::export_html,
+            commands::export::export_document,
+            commands::export::save_export_bytes,
+            commands::export::detect_pandoc,
             commands::config::read_app_config,
             commands::config::write_app_config,
         ])
