@@ -12,6 +12,7 @@ import type {
   FileNode,
   LargeFileSession,
   LargeFileState,
+  PendingModeCursor,
   TextEdit,
   ThemeMode,
 } from "../types";
@@ -31,6 +32,7 @@ export const appStore = reactive({
   settingsOpen: false,
   commandPaletteOpen: false,
   wordCountOpen: false,
+  pendingModeCursor: null as PendingModeCursor | null,
   statusMessage: "",
 });
 
@@ -169,6 +171,14 @@ export function switchMode(mode: EditorMode) {
   if (appStore.documentMode === "large") {
     appStore.editorMode = "wysiwyg";
     return;
+  }
+  if (mode === appStore.editorMode) return;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("lightmark:capture-mode-cursor", {
+        detail: { from: appStore.editorMode, to: mode },
+      }),
+    );
   }
   appStore.editorMode = mode;
 }
@@ -396,6 +406,7 @@ function resetOpenDocument() {
   appStore.largeFile = null;
   appStore.isDirty = false;
   appStore.editorMode = "wysiwyg";
+  appStore.pendingModeCursor = null;
   appStore.statusMessage = "";
 }
 

@@ -4,6 +4,13 @@ export type DocumentMode = "normal" | "large";
 export type ImageInsertBehavior = "reference" | "copyToAssets";
 export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
 
+export interface PendingModeCursor {
+  targetMode: EditorMode;
+  markdownAnchor: number;
+  markdownHead: number;
+  reason: "mode-switch";
+}
+
 export interface FileNode {
   name: string;
   path: string;

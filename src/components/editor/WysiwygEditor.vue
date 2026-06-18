@@ -2240,6 +2240,8 @@ watch(
 );
 
 onMounted(() => {
+  restorePendingWysiwygCursor();
+  window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
@@ -2247,12 +2249,50 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   editor.value?.destroy();
 });
+
+function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string }>) {
+  const activeEditor = editor.value;
+  if (appStore.editorMode !== "wysiwyg" || event.detail?.to !== "source" || !activeEditor) return;
+  const markdown = editorHtmlToMarkdown(activeEditor.getHTML());
+  setContent(markdown, true);
+  const { anchor, head } = activeEditor.view.state.selection;
+  appStore.pendingModeCursor = {
+    targetMode: "source",
+    markdownAnchor: docPosToMarkdownOffset(activeEditor.view.state, anchor, markdown),
+    markdownHead: docPosToMarkdownOffset(activeEditor.view.state, head, markdown),
+    reason: "mode-switch",
+  };
+}
+
+function restorePendingWysiwygCursor() {
+  const pending = appStore.pendingModeCursor;
+  if (!pending || pending.targetMode !== "wysiwyg") return;
+  appStore.pendingModeCursor = null;
+  window.requestAnimationFrame(() => {
+    const view = editor.value?.view;
+    if (!view) return;
+    const anchor = markdownOffsetToDocPos(view.state, pending.markdownAnchor, appStore.currentContent);
+    const head = markdownOffsetToDocPos(view.state, pending.markdownHead, appStore.currentContent);
+    const docSize = view.state.doc.content.size;
+    const safeAnchor = clampDocPos(anchor, docSize);
+    const safeHead = clampDocPos(head, docSize);
+    let tr = view.state.tr;
+    try {
+      tr = tr.setSelection(TextSelection.create(view.state.doc, safeAnchor, safeHead));
+    } catch {
+      tr = tr.setSelection(TextSelection.near(view.state.doc.resolve(safeAnchor)));
+    }
+    view.dispatch(tr.scrollIntoView());
+    view.focus();
+  });
+}
 
 function handleFindCommand(event: CustomEvent<string>) {
   if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
@@ -2863,6 +2903,123 @@ function editorHtmlToMarkdown(html: string) {
     markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
   });
   return normalizeLeadingImageWhitespace(markdown);
+}
+
+function docPosToMarkdownOffset(state: any, pos: number, markdown: string) {
+  const docSize = state.doc.content.size;
+  const target = clampDocPos(pos, docSize);
+  if (target <= 0) return 0;
+  const prefix = trimSyntheticMarkdownClosers(serializeDocRangeToMarkdown(state, 0, target), state, target);
+  return clampMarkdownOffset(prefix.length, markdown);
+}
+
+function trimSyntheticMarkdownClosers(prefix: string, state: any, pos: number) {
+  const marks = activeMarksAtDocPos(state, pos);
+  let next = prefix;
+  if (marks.has("link")) next = next.replace(/\]\([^)\n]*\)$/, "");
+  if (marks.has("bold")) next = trimSuffix(next, "**");
+  if (marks.has("strike")) next = trimSuffix(next, "~~");
+  if (marks.has("highlight")) next = trimSuffix(next, "==");
+  if (marks.has("code")) next = trimSuffix(next, "`");
+  if (marks.has("italic")) next = trimSuffix(next, "*");
+  if (marks.has("superscript")) next = trimSuffix(next, "^");
+  if (marks.has("subscript")) next = trimSuffix(next, "~");
+  return next;
+}
+
+function activeMarksAtDocPos(state: any, pos: number) {
+  const docSize = state.doc.content.size;
+  const safePos = clampDocPos(pos, docSize);
+  const resolved = state.doc.resolve(safePos);
+  const marks = new Set<string>((resolved.marks?.() || []).map((mark: any) => mark.type.name));
+  const before = safePos > 0 ? state.doc.resolve(safePos - 1).marks?.() || [] : [];
+  before.forEach((mark: any) => marks.add(mark.type.name));
+  return marks;
+}
+
+function trimSuffix(value: string, suffix: string) {
+  return value.endsWith(suffix) ? value.slice(0, -suffix.length) : value;
+}
+
+function serializeDocRangeToMarkdown(state: any, from: number, to: number) {
+  if (to <= from) return "";
+  const slice = state.doc.slice(from, to);
+  const serializer = DOMSerializer.fromSchema(state.schema);
+  const div = document.createElement("div");
+  div.appendChild(serializer.serializeFragment(slice.content));
+  return editorHtmlToMarkdown(div.innerHTML);
+}
+
+function markdownOffsetToDocPos(state: any, offset: number, markdown: string) {
+  const targetPlainOffset = plainMarkdownLength(markdown.slice(0, clampMarkdownOffset(offset, markdown)));
+  return textOffsetToDocumentPos(state, targetPlainOffset);
+}
+
+function textOffsetToDocumentPos(state: any, targetOffset: number) {
+  let remaining = Math.max(0, targetOffset);
+  let fallbackPos = 1;
+  let found: number | null = null;
+
+  state.doc.descendants((node: any, pos: number) => {
+    if (found !== null) return false;
+    if (node.isText && typeof node.text === "string") {
+      fallbackPos = pos + node.nodeSize;
+      if (remaining <= node.text.length) {
+        found = pos + remaining;
+        return false;
+      }
+      remaining -= node.text.length;
+      return false;
+    }
+    if (node.isBlock && pos > 0) {
+      fallbackPos = pos + 1;
+      if (remaining === 0 && node.isTextblock) {
+        found = pos + 1;
+        return false;
+      }
+      if (pos > 0 && remaining > 0) remaining -= 1;
+    }
+    return true;
+  });
+
+  return found ?? fallbackPos;
+}
+
+function plainMarkdownLength(markdown: string) {
+  return markdownToPlainText(markdown).length;
+}
+
+function markdownToPlainText(markdown: string) {
+  return markdown
+    .replace(/^---\s*\n[\s\S]*?\n---\s*(?=\n|$)/, "")
+    .replace(/```[\w#+.-]*\n([\s\S]*?)\n```/g, "$1")
+    .replace(/\$\$\s*\n?([\s\S]*?)\n?\s*\$\$/g, "$1")
+    .replace(/^> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/gim, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^(\s*)([-*+]|\d+\.)\s+\[[ xX]\]\s+/gm, "")
+    .replace(/^(\s*)([-*+]|\d+\.)\s+/gm, "")
+    .replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, "$1")
+    .replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, "$1")
+    .replace(/\[\^([^\]\n]+)\]/g, "$1")
+    .replace(/`([^`\n]*)`/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/_([^_\n]+)_/g, "$1")
+    .replace(/~~([^~\n]+)~~/g, "$1")
+    .replace(/==([^=\n]+)==/g, "$1")
+    .replace(/\$([^$\n]+)\$/g, "$1")
+    .replace(/<[^>\n]+>/g, "")
+    .replace(/\n{2,}/g, "\n");
+}
+
+function clampMarkdownOffset(value: number, markdown: string) {
+  return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, markdown.length));
+}
+
+function clampDocPos(value: number, docSize: number) {
+  return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, docSize));
 }
 
 function normalizeLeadingImageWhitespace(markdown: string) {

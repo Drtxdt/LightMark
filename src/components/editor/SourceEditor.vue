@@ -227,6 +227,8 @@ onMounted(() => {
       extensions: extensions(),
     }),
   });
+  restorePendingSourceCursor();
+  window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
 });
@@ -244,11 +246,45 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   view?.destroy();
   view = null;
 });
+
+function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string }>) {
+  if (appStore.editorMode !== "source" || event.detail?.to !== "wysiwyg" || !view) return;
+  setContent(view.state.doc.toString(), true);
+  const selection = view.state.selection.main;
+  appStore.pendingModeCursor = {
+    targetMode: "wysiwyg",
+    markdownAnchor: selection.anchor,
+    markdownHead: selection.head,
+    reason: "mode-switch",
+  };
+}
+
+function restorePendingSourceCursor() {
+  const pending = appStore.pendingModeCursor;
+  if (!view || !pending || pending.targetMode !== "source") return;
+  appStore.pendingModeCursor = null;
+  const docLength = view.state.doc.length;
+  const anchor = clampOffset(pending.markdownAnchor, docLength);
+  const head = clampOffset(pending.markdownHead, docLength);
+  window.requestAnimationFrame(() => {
+    if (!view) return;
+    view.dispatch({
+      selection: { anchor, head },
+      effects: EditorView.scrollIntoView(anchor, { y: "center" }),
+    });
+    view.focus();
+  });
+}
+
+function clampOffset(value: number, max: number) {
+  return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, max));
+}
 
 function handleFindCommand(event: CustomEvent<string>) {
   if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
