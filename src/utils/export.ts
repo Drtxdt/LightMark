@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import mermaid from "mermaid";
+import katexCss from "katex/dist/katex.min.css?raw";
 import type {
   ExportRequest,
   ExportResult,
@@ -9,7 +11,17 @@ import type {
   PandocStatus,
 } from "../types";
 import { appStore, completeExportStatus, currentFileName, failExportStatus, startExportStatus } from "../stores/appStore";
+import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
+
+const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+
+let exportExtraStylesCache: string | null = null;
+let katexExportCssCache: string | null = null;
 
 export const exportTargets: ExportTarget[] = [
   { id: "pdf", label: "PDF", extension: "pdf", kind: "native-pdf", requiresPandoc: false, enabled: true },
@@ -64,12 +76,14 @@ export async function exportCurrentDocument(input: {
 }) {
   if (!input.currentPath) throw new Error("请先打开 Markdown 文件再导出。");
 
-  const body = renderMarkdown(input.markdown);
   const theme = exportTheme(input.settings);
+  const body = await renderExportBody(input.markdown, theme);
+  const extraStyles = await getExportExtraStyles();
   const styledHtml = buildExportHtml(currentFileName.value, body, {
-    includeStyles: input.target === "htmlPlain" ? false : input.settings.htmlIncludeStyles,
+    includeStyles: shouldIncludeExportStyles(input.target, input.settings),
     theme,
     currentPath: input.currentPath,
+    extraStyles,
   });
   const plainHtml = buildExportHtml(currentFileName.value, body, { includeStyles: false, theme, currentPath: input.currentPath });
 
@@ -96,6 +110,147 @@ export async function exportCurrentDocument(input: {
 function exportTheme(settings: ExportSettings) {
   if (settings.htmlTheme === "light" || settings.htmlTheme === "dark") return settings.htmlTheme;
   return document.documentElement.classList.contains("dark") ? "dark" : "light";
+}
+
+function shouldIncludeExportStyles(target: ExportTargetId, settings: ExportSettings) {
+  if (target === "htmlPlain") return false;
+  if (target === "html") return settings.htmlIncludeStyles;
+  return true;
+}
+
+async function renderExportBody(markdown: string, theme: "light" | "dark") {
+  const withMermaid = await renderMermaidForExport(renderMarkdown(markdown), theme);
+  return normalizeKatexForExport(withMermaid);
+}
+
+async function renderMermaidForExport(html: string, theme: "light" | "dark") {
+  const parser = new DOMParser();
+  const documentHtml = parser.parseFromString(`<main>${html}</main>`, "text/html");
+  const nodes = Array.from(documentHtml.querySelectorAll<HTMLElement>("pre.mermaid"));
+  if (nodes.length === 0) return html;
+
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: theme === "dark" ? "dark" : "default",
+  });
+
+  for (const [index, node] of nodes.entries()) {
+    const code = node.textContent || "";
+    const wrapper = documentHtml.createElement("div");
+    if (!code.trim()) {
+      wrapper.className = "mermaid-export mermaid-export-error";
+      wrapper.textContent = "空 Mermaid 图表";
+      node.replaceWith(wrapper);
+      continue;
+    }
+
+    try {
+      const result = await mermaid.render(`lightmark-export-mermaid-${Date.now()}-${index}`, code);
+      wrapper.className = "mermaid-export";
+      wrapper.innerHTML = result.svg;
+      node.replaceWith(wrapper);
+    } catch (error) {
+      wrapper.className = "mermaid-export-error";
+      wrapper.innerHTML = `<strong>Mermaid 渲染失败</strong>\n${escapeHtml(code)}\n\n${escapeHtml(error instanceof Error ? error.message : String(error))}`;
+      node.replaceWith(wrapper);
+    }
+  }
+
+  return documentHtml.querySelector("main")?.innerHTML ?? html;
+}
+
+function normalizeKatexForExport(html: string) {
+  const parser = new DOMParser();
+  const documentHtml = parser.parseFromString(`<main>${html}</main>`, "text/html");
+  documentHtml.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
+    const elementChildren = Array.from(paragraph.children);
+    const hasOnlyWhitespaceText = Array.from(paragraph.childNodes).every((node) => {
+      return node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim();
+    });
+    const onlyChild = elementChildren[0];
+    if (elementChildren.length === 1 && hasOnlyWhitespaceText && onlyChild.classList.contains("katex-display")) {
+      onlyChild.classList.add("katex-display-export");
+      paragraph.replaceWith(onlyChild);
+    }
+  });
+  return documentHtml.querySelector("main")?.innerHTML ?? html;
+}
+
+async function getExportExtraStyles() {
+  if (exportExtraStylesCache) return exportExtraStylesCache;
+  exportExtraStylesCache = `${await getKatexExportCss()}\n${exportCssFixups}`;
+  return exportExtraStylesCache;
+}
+
+const exportCssFixups = `
+.markdown-preview pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  background: transparent;
+  color: inherit;
+}
+.markdown-preview .katex {
+  color: inherit;
+  overflow-wrap: normal;
+}
+.markdown-preview .katex-display-export {
+  overflow-x: auto;
+  overflow-y: hidden;
+  break-inside: avoid;
+}
+`;
+
+async function getKatexExportCss() {
+  if (katexExportCssCache) return katexExportCssCache;
+  const fontDataUrls = new Map<string, string>();
+  const css = katexCss.replace(/url\(fonts\/([^)]+?\.woff2)\)/g, (_match, fileName: string) => {
+    const normalized = fileName.replace(/["']/g, "");
+    const fontUrl = fontUrlForKatexFile(normalized);
+    if (!fontUrl) return "url(fonts/" + fileName + ")";
+    const cached = fontDataUrls.get(normalized);
+    if (cached) return `url(${cached})`;
+    return `url(__LIGHTMARK_KATEX_FONT_${normalized}__)`;
+  });
+
+  let next = css;
+  const files = Array.from(new Set(Array.from(css.matchAll(/url\(fonts\/([^)]+?\.woff2)\)/g)).map((match) => match[1].replace(/["']/g, ""))));
+  for (const fileName of files) {
+    const fontUrl = fontUrlForKatexFile(fileName);
+    if (!fontUrl) continue;
+    const dataUrl = await assetUrlToDataUrl(fontUrl, "font/woff2");
+    fontDataUrls.set(fileName, dataUrl);
+    next = next.split(`__LIGHTMARK_KATEX_FONT_${fileName}__`).join(dataUrl);
+  }
+  next = stripKatexNonWoffFallbacks(next);
+  katexExportCssCache = next;
+  return next;
+}
+
+function fontUrlForKatexFile(fileName: string) {
+  const entry = Object.entries(katexFontUrls).find(([path]) => path.endsWith(`/fonts/${fileName}`) || path.endsWith(`\\fonts\\${fileName}`));
+  return typeof entry?.[1] === "string" ? entry[1] : "";
+}
+
+async function assetUrlToDataUrl(url: string, mime: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`无法加载导出字体资源：${url}`);
+  const buffer = await response.arrayBuffer();
+  return `data:${mime};base64,${arrayBufferToBase64(buffer)}`;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function stripKatexNonWoffFallbacks(css: string) {
+  return css.replace(/,url\(fonts\/[^)]+?\.(?:woff|ttf)\) format\("(?:woff|truetype)"\)/g, "");
 }
 
 async function exportHtmlAsPng(currentPath: string, html: string, settings: ExportSettings): Promise<ExportResult> {

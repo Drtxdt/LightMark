@@ -173,7 +173,7 @@ fn export_html_pdf(request: ExportRequest) -> Result<ExportResult, String> {
         "--disable-extensions".to_string(),
         "--no-pdf-header-footer".to_string(),
         "--run-all-compositor-stages-before-draw".to_string(),
-        "--virtual-time-budget=1000".to_string(),
+        "--virtual-time-budget=3000".to_string(),
         format!("--user-data-dir={}", profile_path.to_string_lossy()),
         format!("--print-to-pdf={}", temp_pdf_path.to_string_lossy()),
         path_to_file_url(&temp_path),

@@ -2,6 +2,7 @@ import MarkdownIt from "markdown-it";
 import type Token from "markdown-it/lib/token.mjs";
 import markdownItKatex from "markdown-it-katex";
 import hljs from "highlight.js";
+import katex from "katex";
 import {
   escapeAttribute,
   escapeHtml,
@@ -54,7 +55,7 @@ export function renderMarkdownForEditor(markdown: string) {
 export function buildExportHtml(
   title: string,
   body: string,
-  options: { includeStyles?: boolean; theme?: "light" | "dark"; currentPath?: string } = {},
+  options: { includeStyles?: boolean; theme?: "light" | "dark"; currentPath?: string; extraStyles?: string } = {},
 ) {
   const includeStyles = options.includeStyles ?? true;
   const isDark = options.theme === "dark";
@@ -96,10 +97,15 @@ export function buildExportHtml(
     code:not(pre code) { border-radius: 5px; background: var(--lm-code-bg); color: var(--lm-code-text); padding: 0.12em 0.34em; font-size: 0.92em; }
     pre { overflow: auto; margin: 1em 0; padding: 16px; border: 1px solid ${isDark ? "#39352f" : "#e0dbd1"}; border-radius: 8px; background: ${isDark ? "#171613" : "#f6f3ed"}; color: var(--lm-code-text); page-break-inside: avoid; }
     pre code { display: block; padding: 0; background: transparent; color: inherit; font-size: 0.9em; line-height: 1.65; white-space: pre; }
-    .hljs-comment, .hljs-quote { color: ${isDark ? "#8b949e" : "#7d776d"}; }
-    .hljs-keyword, .hljs-selector-tag, .hljs-subst { color: ${isDark ? "#ff7b72" : "#9f3a38"}; }
-    .hljs-string, .hljs-title, .hljs-section, .hljs-attribute { color: ${isDark ? "#a5d6ff" : "#2f6f8f"}; }
-    .hljs-number, .hljs-literal, .hljs-variable, .hljs-template-variable { color: ${isDark ? "#79c0ff" : "#8057a8"}; }
+    .hljs { background: transparent; color: var(--lm-code-text); }
+    .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-tag, .hljs-doctag { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
+    .hljs-name, .hljs-title, .hljs-section, .hljs-function .hljs-title { color: ${isDark ? "#b392f0" : "#6f42c1"}; }
+    .hljs-string, .hljs-literal, .hljs-template-variable, .hljs-regexp { color: ${isDark ? "#9ecbff" : "#032f62"}; }
+    .hljs-attribute, .hljs-variable, .hljs-property, .hljs-params { color: ${isDark ? "#ffab70" : "#e36209"}; }
+    .hljs-comment, .hljs-quote { color: ${isDark ? "#959da5" : "#6a737d"}; }
+    .hljs-meta, .hljs-subst { color: ${isDark ? "#f97583" : "#735c0f"}; }
+    .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
+    .hljs-type, .hljs-class .hljs-title { color: ${isDark ? "#85e89d" : "#22863a"}; }
     img { max-width: 100%; height: auto; vertical-align: middle; }
     table { width: 100%; border-collapse: collapse; font-size: 0.95em; }
     th, td { border: 1px solid var(--lm-border); padding: 8px 10px; }
@@ -123,14 +129,19 @@ export function buildExportHtml(
     .markdown-alert-caution { border-left-color: #cf222e; background: #fff1f1; }
     .markdown-alert-caution::before { content: "Caution"; color: #cf222e; }
     ${isDark ? `.markdown-alert-note { background: #182231; } .markdown-alert-tip { background: #17261c; } .markdown-alert-important { background: #241d34; } .markdown-alert-warning { background: #2d2614; } .markdown-alert-caution { background: #2c1c1c; }` : ""}
-    .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+    .mermaid-export { display: flex; justify-content: center; margin: 1.2em 0; page-break-inside: avoid; }
+    .mermaid-export svg { max-width: 100%; height: auto; }
+    .mermaid-export-error { margin: 1em 0; white-space: pre-wrap; }
     @page { size: A4; margin: 20mm; }
     @media print {
       html, body { background: #fff; color: #222; }
       main.markdown-preview { max-width: none; padding: 0; }
-      h1, h2, h3, h4, h5, h6, pre, blockquote, table, .markdown-alert { break-inside: avoid; }
+      pre { overflow: visible; white-space: pre-wrap; }
+      pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+      h1, h2, h3, h4, h5, h6, pre, blockquote, table, .markdown-alert, .mermaid-export, .katex-display, .katex-display-export { break-inside: avoid; }
       a { color: inherit; }
     }
+    ${options.extraStyles ?? ""}
   </style>`
     : "";
   return `<!doctype html>
@@ -237,6 +248,7 @@ function enhanceMarkdownForRender(markdown: string, stash?: (html: string) => st
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
   next = convertFootnotes(next);
+  next = renderLatexMathForMarkdown(next, stash);
   next = renderRawHtmlForPreview(next, stash);
   next = convertTaskItems(next);
   next = convertDefinitionLists(next);
@@ -485,6 +497,60 @@ function protectInlineMath(markdown: string, stash: (html: string) => string) {
     .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
       return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
     });
+}
+
+function renderLatexMathForMarkdown(markdown: string, stashRenderedHtml?: (html: string) => string) {
+  const placeholders: string[] = [];
+  const stash = (value: string) => {
+    const token = `@@LIGHTMARK_LATEX_PROTECTED_${placeholders.length}@@`;
+    placeholders.push(value);
+    return token;
+  };
+  const render = (tex: string, displayMode: boolean) => {
+    const html = renderKatexHtml(tex, displayMode);
+    return stashRenderedHtml ? stashRenderedHtml(html) : html;
+  };
+
+  let next = markdown
+    .replace(/```[\s\S]*?```/g, (code) => stash(code))
+    .replace(/`[^`\n]*`/g, (code) => stash(code));
+
+  next = next.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    return `${prefix}\n${render(tex.trim(), true)}\n`;
+  });
+  next = next.replace(/(^|\n)\s*\\\[\s*\n?([\s\S]*?)\n?\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
+    return `${prefix}\n${render(tex.trim(), true)}\n`;
+  });
+  next = next.replace(/(^|\n)\s*\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?|split)\}\s*\n?([\s\S]*?)\n?\s*\\end\{\2\}\s*(?=\n|$)/g, (_match, prefix, environment, tex) => {
+    return `${prefix}\n${render(`\\begin{${environment}}\n${tex.trim()}\n\\end{${environment}}`, true)}\n`;
+  });
+  next = next.replace(/\\\(([\s\S]*?)\\\)/g, (_match, tex) => {
+    return render(tex.trim(), false);
+  });
+  next = next.replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
+    return `${prefix}${render(tex.trim(), false)}`;
+  });
+  next = next.replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
+    return `${prefix}${render(tex.trim(), false)}`;
+  });
+
+  placeholders.forEach((value, index) => {
+    next = next.split(`@@LIGHTMARK_LATEX_PROTECTED_${index}@@`).join(value);
+  });
+  return next;
+}
+
+function renderKatexHtml(tex: string, displayMode: boolean) {
+  if (!tex.trim()) return "";
+  try {
+    return katex.renderToString(tex, {
+      displayMode,
+      throwOnError: false,
+      strict: false,
+    });
+  } catch {
+    return `<span class="math-render-error">${escapeHtml(tex)}</span>`;
+  }
 }
 
 function normalizeLatexMathDelimiters(markdown: string) {
