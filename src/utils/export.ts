@@ -204,24 +204,17 @@ const exportCssFixups = `
 async function getKatexExportCss() {
   if (katexExportCssCache) return katexExportCssCache;
   const fontDataUrls = new Map<string, string>();
-  const css = katexCss.replace(/url\(fonts\/([^)]+?\.woff2)\)/g, (_match, fileName: string) => {
-    const normalized = fileName.replace(/["']/g, "");
-    const fontUrl = fontUrlForKatexFile(normalized);
-    if (!fontUrl) return "url(fonts/" + fileName + ")";
-    const cached = fontDataUrls.get(normalized);
-    if (cached) return `url(${cached})`;
-    return `url(__LIGHTMARK_KATEX_FONT_${normalized}__)`;
-  });
-
-  let next = css;
-  const files = Array.from(new Set(Array.from(css.matchAll(/url\(fonts\/([^)]+?\.woff2)\)/g)).map((match) => match[1].replace(/["']/g, ""))));
+  const files = Array.from(new Set(Array.from(katexCss.matchAll(/url\((["']?)fonts\/([^)"']+?\.woff2)\1\)/g)).map((match) => match[2])));
   for (const fileName of files) {
     const fontUrl = fontUrlForKatexFile(fileName);
     if (!fontUrl) continue;
     const dataUrl = await assetUrlToDataUrl(fontUrl, "font/woff2");
     fontDataUrls.set(fileName, dataUrl);
-    next = next.split(`__LIGHTMARK_KATEX_FONT_${fileName}__`).join(dataUrl);
   }
+  let next = katexCss.replace(/url\((["']?)fonts\/([^)"']+?\.woff2)\1\)/g, (match, _quote: string, fileName: string) => {
+    const dataUrl = fontDataUrls.get(fileName);
+    return dataUrl ? `url(${dataUrl})` : match;
+  });
   next = stripKatexNonWoffFallbacks(next);
   katexExportCssCache = next;
   return next;
