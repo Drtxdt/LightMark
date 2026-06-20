@@ -273,7 +273,6 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
     return renderInlineMarkdownInHtml(content);
   };
 
-  const defaultFenceRenderer = instance.renderer.rules.fence;
   instance.renderer.rules.fence = (tokens, idx, options, env, self) => {
     const token = tokens[idx];
     const language = token.info.trim().split(/\s+/)[0];
@@ -281,8 +280,18 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
       const content = instance.utils.escapeHtml(token.content);
       return `<pre class="mermaid">${content}</pre>`;
     }
-    return defaultFenceRenderer ? defaultFenceRenderer(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+    const content = trimFenceStructuralTrailingNewline(token.content);
+    if (options.highlight) {
+      const highlighted = options.highlight(content, language, token.attrs ? self.renderAttrs(token) : "");
+      if (highlighted) return highlighted;
+    }
+    const className = language ? ` class="language-${escapeAttribute(language)}"` : "";
+    return `<pre><code${className}>${instance.utils.escapeHtml(content)}</code></pre>\n`;
   };
+}
+
+function trimFenceStructuralTrailingNewline(content: string) {
+  return content.endsWith("\n") ? content.slice(0, -1) : content;
 }
 
 function renderInlineEnhancements(html: string) {

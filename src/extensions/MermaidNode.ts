@@ -9,11 +9,7 @@ type MermaidAttrs = {
 
 let mermaidId = 0;
 
-mermaid.initialize({
-  startOnLoad: false,
-  securityLevel: "strict",
-  theme: "neutral",
-});
+configureMermaid();
 
 export const MermaidNode = Node.create({
   name: "mermaidDiagram",
@@ -128,6 +124,7 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     dom.appendChild(body);
 
     try {
+      configureMermaid();
       const id = `lightmark-mermaid-${++mermaidId}`;
       const result = await mermaid.render(id, code);
       body.innerHTML = result.svg;
@@ -234,6 +231,7 @@ async function renderMermaid(target: HTMLElement, code: string) {
 
   target.classList.remove("mermaid-node-empty");
   try {
+    configureMermaid();
     const id = `lightmark-mermaid-${++mermaidId}`;
     const result = await mermaid.render(id, code);
     target.innerHTML = result.svg;
@@ -243,6 +241,14 @@ async function renderMermaid(target: HTMLElement, code: string) {
     pre.textContent = code;
     target.replaceChildren(pre);
   }
+}
+
+function configureMermaid() {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
+  });
 }
 
 function setBlockSelectionAfter(editor: any, getPos: NodeViewPosition) {
