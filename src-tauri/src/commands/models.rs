@@ -269,6 +269,36 @@ pub struct DirtyState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DraftRecord {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub pending_edits: Option<Vec<TextEdit>>,
+    #[serde(default)]
+    pub file_mtime: Option<u64>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    pub updated_at: u64,
+    #[serde(default)]
+    pub editor_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSnapshot {
+    pub exists: bool,
+    #[serde(default)]
+    pub mtime: Option<u64>,
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LargeFindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,

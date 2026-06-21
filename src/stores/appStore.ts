@@ -1,5 +1,6 @@
 import { computed, reactive } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { checkDraftForOpenedFile, clearActiveDraft, flushCurrentDraft } from "./draftStore";
 import type {
   AppConfig,
   AppSettings,
@@ -93,6 +94,7 @@ export async function openWorkspace(folder?: string) {
 export async function openFile(path?: string) {
   const selected = path ?? (await invoke<string | null>("open_file_dialog"));
   if (!selected) return;
+  await flushCurrentDraft();
   if (selected !== appStore.currentFilePath && !(await confirmDiscardOrSave())) return;
   await closeLargeFileSession();
   resetOpenDocument();
@@ -124,6 +126,7 @@ export async function openFile(path?: string) {
     appStore.statusMessage = "";
   }
   rememberRecentFile(selected);
+  await checkDraftForOpenedFile(selected);
   await persistConfig();
 }
 
@@ -136,6 +139,7 @@ export async function saveCurrentFile() {
     appStore.largeFile.pendingEdits = [];
     appStore.isDirty = state.isDirty;
     appStore.statusMessage = "大文件已保存";
+    await clearActiveDraft();
     rememberRecentFile(appStore.currentFilePath);
     await refreshFileTree();
     await persistConfig();
@@ -155,6 +159,7 @@ export async function saveCurrentFile() {
     content: appStore.currentContent,
   });
   appStore.isDirty = false;
+  await clearActiveDraft();
   rememberRecentFile(appStore.currentFilePath);
   await refreshFileTree();
   await persistConfig();

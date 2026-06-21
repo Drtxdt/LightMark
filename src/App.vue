@@ -12,6 +12,7 @@ import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
 import { syncWindowChrome } from "./utils/windowChrome";
+import { recoverStartupDrafts, startDraftAutosave, stopDraftAutosave } from "./stores/draftStore";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
@@ -19,6 +20,7 @@ let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
 let unwatchWindowChrome = () => {};
+let unwatchDraftAutosave = () => {};
 
 onMounted(async () => {
   activatePlugins([wordCountPlugin]);
@@ -26,12 +28,20 @@ onMounted(async () => {
     appStore.statusMessage = String(error);
   });
   applyTheme();
+  startDraftAutosave();
+  await recoverStartupDrafts();
   unwatchWindowChrome = watch(
     () => [currentFileName.value, appStore.activeTheme] as const,
     ([fileName, theme]) => {
       syncWindowChrome(fileName, theme);
     },
     { immediate: true },
+  );
+  unwatchDraftAutosave = watch(
+    () => [appStore.settings.general.autoSave, appStore.settings.general.autoSaveIntervalMinutes] as const,
+    () => {
+      startDraftAutosave();
+    },
   );
   unbindSave = bindShortcut("ctrl+s", () => {
     saveCurrentFile().catch((error) => (appStore.statusMessage = String(error)));
@@ -69,6 +79,8 @@ onUnmounted(() => {
   unbindFind();
   unbindPreventUiSelectAll();
   unwatchWindowChrome();
+  unwatchDraftAutosave();
+  stopDraftAutosave();
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);

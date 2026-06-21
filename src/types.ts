@@ -241,6 +241,24 @@ export interface DirtyState {
   pendingEditCount: number;
 }
 
+export interface DraftRecord {
+  id: string;
+  kind: "file" | "untitled" | "large";
+  path?: string;
+  content?: string;
+  pendingEdits?: TextEdit[];
+  fileMtime?: number;
+  fileSize?: number;
+  updatedAt: number;
+  editorMode?: EditorMode;
+}
+
+export interface FileSnapshot {
+  exists: boolean;
+  mtime?: number;
+  size?: number;
+}
+
 export interface LargeFindOptions {
   caseSensitive: boolean;
   wholeWord: boolean;

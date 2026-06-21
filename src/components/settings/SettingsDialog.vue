@@ -151,13 +151,20 @@ function cloneSettings(settings: AppSettings): AppSettings {
             </div>
             <div class="settings-group">
               <h4>保存与语言</h4>
-              <label class="settings-row disabled-row">
-                <span><b>自动保存</b><small>Typora Windows/Linux 支持定时自动保存；LightMark 暂未启用后台保存。</small></span>
-                <input v-model="localSettings.general.autoSave" type="checkbox" disabled />
+              <label class="settings-row">
+                <span><b>自动保存草稿</b><small>定时写入 LightMark 私有草稿目录，不直接覆盖原文件。</small></span>
+                <input v-model="localSettings.general.autoSave" type="checkbox" @change="persist" />
               </label>
-              <label class="settings-row disabled-row">
-                <span><b>自动保存间隔</b><small>Typora 默认 5 分钟。</small></span>
-                <input v-model.number="localSettings.general.autoSaveIntervalMinutes" class="settings-number" type="number" disabled />
+              <label class="settings-row">
+                <span><b>自动保存间隔</b><small>默认 5 分钟，范围 1-60 分钟。</small></span>
+                <input
+                  v-model.number="localSettings.general.autoSaveIntervalMinutes"
+                  class="settings-number"
+                  type="number"
+                  min="1"
+                  max="60"
+                  @change="persist"
+                />
               </label>
               <label class="settings-row disabled-row">
                 <span><b>拼写检查</b><small>保留 Typora 的拼写检查入口，后续接系统拼写或 Hunspell。</small></span>
