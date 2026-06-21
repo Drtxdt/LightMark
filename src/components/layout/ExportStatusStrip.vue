@@ -1,10 +1,28 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { appStore, clearExportStatus } from "../../stores/appStore";
+import { getExportThemePalette } from "../../utils/exportTheme";
 
 const visible = computed(() => appStore.exportStatus.status !== "idle");
 const isRunning = computed(() => appStore.exportStatus.status === "running");
 const statusClass = computed(() => `export-status-strip-${appStore.exportStatus.status}`);
+const statusStyle = computed(() => {
+  const palette = getExportThemePalette(appStore.activeTheme === "dark" ? "dark" : "light");
+  return {
+    "--export-status-bg": palette.statusBg,
+    "--export-status-text": palette.statusText,
+    "--export-status-muted": palette.statusMuted,
+    "--export-status-muted-soft": palette.statusMutedSoft,
+    "--export-status-border": palette.statusBorder,
+    "--export-status-hover": palette.statusHover,
+    "--export-status-running": palette.statusRunning,
+    "--export-status-running-soft": palette.statusRunningSoft,
+    "--export-status-success": palette.statusSuccess,
+    "--export-status-success-soft": palette.statusSuccessSoft,
+    "--export-status-error": palette.statusError,
+    "--export-status-error-soft": palette.statusErrorSoft,
+  };
+});
 
 function close() {
   if (isRunning.value) return;
@@ -14,7 +32,7 @@ function close() {
 
 <template>
   <Transition name="export-status">
-    <div v-if="visible" class="export-status-strip" :class="statusClass" role="status" aria-live="polite">
+    <div v-if="visible" class="export-status-strip" :class="statusClass" :style="statusStyle" role="status" aria-live="polite">
       <div v-if="isRunning" class="export-status-progress" aria-hidden="true"></div>
       <div class="export-status-inner">
         <span class="export-status-dot" aria-hidden="true"></span>
@@ -48,9 +66,9 @@ function close() {
   position: relative;
   min-height: 34px;
   overflow: hidden;
-  border-bottom: 1px solid rgb(220 214 203 / 76%);
-  background: rgb(250 248 244 / 94%);
-  color: #5f574c;
+  border-bottom: 1px solid var(--export-status-border);
+  background: var(--export-status-bg);
+  color: var(--export-status-text);
 }
 
 .export-status-inner {
@@ -69,23 +87,24 @@ function close() {
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #9a8f80;
-  box-shadow: 0 0 0 3px rgb(154 143 128 / 14%);
+  background: var(--export-status-muted);
+  box-shadow: 0 0 0 3px var(--export-status-muted-soft);
 }
 
 .export-status-strip-running .export-status-dot {
   animation: export-status-pulse 960ms ease-in-out infinite;
-  background: #8a6d3b;
+  background: var(--export-status-running);
+  box-shadow: 0 0 0 3px var(--export-status-running-soft);
 }
 
 .export-status-strip-success .export-status-dot {
-  background: #4f7f58;
-  box-shadow: 0 0 0 3px rgb(79 127 88 / 14%);
+  background: var(--export-status-success);
+  box-shadow: 0 0 0 3px var(--export-status-success-soft);
 }
 
 .export-status-strip-error .export-status-dot {
-  background: #b45a4f;
-  box-shadow: 0 0 0 3px rgb(180 90 79 / 14%);
+  background: var(--export-status-error);
+  box-shadow: 0 0 0 3px var(--export-status-error-soft);
 }
 
 .export-status-title {
@@ -95,7 +114,7 @@ function close() {
 
 .export-status-format {
   flex: 0 0 auto;
-  color: #8a8176;
+  color: var(--export-status-muted);
 }
 
 .export-status-path,
@@ -108,7 +127,7 @@ function close() {
 }
 
 .export-status-error {
-  color: #8f423a;
+  color: var(--export-status-error);
 }
 
 .export-status-close {
@@ -127,7 +146,7 @@ function close() {
 
 .export-status-close:hover,
 .export-status-close:focus-visible {
-  background: rgb(120 113 108 / 12%);
+  background: var(--export-status-hover);
   outline: none;
 }
 
@@ -156,7 +175,14 @@ function close() {
   inset: auto 0 0;
   height: 2px;
   background:
-    linear-gradient(90deg, transparent, rgb(138 109 59 / 0), rgb(138 109 59 / 58%), rgb(138 109 59 / 0), transparent);
+    linear-gradient(
+      90deg,
+      transparent,
+      var(--export-status-running-soft),
+      var(--export-status-running),
+      var(--export-status-running-soft),
+      transparent
+    );
   animation: export-status-sweep 1.4s ease-in-out infinite;
 }
 
@@ -171,25 +197,6 @@ function close() {
 .export-status-leave-to {
   opacity: 0;
   transform: translateY(-6px);
-}
-
-:global(.dark) .export-status-strip {
-  border-bottom-color: rgb(70 65 58 / 86%);
-  background: rgb(29 27 24 / 96%);
-  color: #cfc7b9;
-}
-
-:global(.dark) .export-status-format {
-  color: #9d9487;
-}
-
-:global(.dark) .export-status-error {
-  color: #e0a095;
-}
-
-:global(.dark) .export-status-close:hover,
-:global(.dark) .export-status-close:focus-visible {
-  background: rgb(231 225 215 / 10%);
 }
 
 @keyframes export-status-sweep {
