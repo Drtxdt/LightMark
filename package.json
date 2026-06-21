@@ -8,7 +8,10 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "tauri:build:app": "tauri build --no-bundle",
+    "tauri:build:all": "tauri build --bundles msi nsis"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
