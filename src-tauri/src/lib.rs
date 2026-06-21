@@ -26,6 +26,7 @@ pub fn run() {
             commands::export::detect_pandoc,
             commands::config::read_app_config,
             commands::config::write_app_config,
+            commands::window::sync_window_chrome,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LightMark");

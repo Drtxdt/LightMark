@@ -19,3 +19,4 @@ tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 rfd = "0.15"
 regex = "1"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }

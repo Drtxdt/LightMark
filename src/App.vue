@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
@@ -7,16 +7,18 @@ import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import WordCountPanel from "./components/plugin/WordCountPanel.vue";
 import { activatePlugins } from "./plugins/registry";
 import { wordCountPlugin } from "./plugins/wordCountPlugin";
-import { appStore, applyTheme, loadConfig, saveCurrentFile } from "./stores/appStore";
+import { appStore, applyTheme, currentFileName, loadConfig, saveCurrentFile } from "./stores/appStore";
 import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
+import { syncWindowChrome } from "./utils/windowChrome";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
 let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
+let unwatchWindowChrome = () => {};
 
 onMounted(async () => {
   activatePlugins([wordCountPlugin]);
@@ -24,6 +26,13 @@ onMounted(async () => {
     appStore.statusMessage = String(error);
   });
   applyTheme();
+  unwatchWindowChrome = watch(
+    () => [currentFileName.value, appStore.activeTheme] as const,
+    ([fileName, theme]) => {
+      syncWindowChrome(fileName, theme);
+    },
+    { immediate: true },
+  );
   unbindSave = bindShortcut("ctrl+s", () => {
     saveCurrentFile().catch((error) => (appStore.statusMessage = String(error)));
   });
@@ -59,6 +68,7 @@ onUnmounted(() => {
   unbindPalette();
   unbindFind();
   unbindPreventUiSelectAll();
+  unwatchWindowChrome();
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);
