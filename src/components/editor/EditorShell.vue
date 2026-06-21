@@ -18,9 +18,9 @@ watch(
 
 <template>
   <section class="editor-page-shell h-full min-h-0 overflow-hidden">
-    <LargeMarkdownEditor v-if="appStore.documentMode === 'large'" />
+    <LargeMarkdownEditor v-if="appStore.documentMode === 'large'" :key="appStore.activeTabId" />
     <Transition v-else :name="pageTransition">
-      <div :key="appStore.editorMode" class="editor-page">
+      <div :key="`${appStore.activeTabId}:${appStore.editorMode}`" class="editor-page">
         <WysiwygEditor v-if="appStore.editorMode === 'wysiwyg'" />
         <SourceEditor v-else />
       </div>

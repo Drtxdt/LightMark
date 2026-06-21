@@ -18,6 +18,26 @@ pub struct AppConfig {
     pub theme: Option<String>,
     #[serde(default)]
     pub settings: AppSettings,
+    #[serde(default)]
+    pub session: Option<SessionRestoreState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRestoreState {
+    #[serde(default)]
+    pub open_tabs: Vec<SessionTabState>,
+    #[serde(default)]
+    pub active_tab_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTabState {
+    pub path: String,
+    pub kind: String,
+    pub editor_mode: String,
+    pub last_active_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +350,7 @@ impl Default for AppConfig {
             recent_files: Vec::new(),
             theme: None,
             settings: AppSettings::default(),
+            session: None,
         }
     }
 }

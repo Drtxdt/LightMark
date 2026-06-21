@@ -145,6 +145,10 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 </select>
               </label>
               <label class="settings-row">
+                <span><b>恢复上次会话</b><small>启动时重新打开上次的文档标签页；未保存内容仍由草稿恢复处理。</small></span>
+                <input v-model="localSettings.general.restoreLastFile" type="checkbox" @change="persist" />
+              </label>
+              <label class="settings-row">
                 <span><b>最近文件数量</b><small>限制最近文件 JSON 列表长度。</small></span>
                 <input v-model.number="localSettings.general.recentFilesLimit" class="settings-number" type="number" min="1" max="50" @change="persist" />
               </label>

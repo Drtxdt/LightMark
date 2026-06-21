@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { reactive } from "vue";
-import { appStore, setContent } from "./appStore";
+import { appStore, createUntitledTab, setContent, switchMode } from "./appStore";
 import type { DraftRecord, FileSnapshot, TextEdit } from "../types";
 
 type DraftStatus = "idle" | "saved" | "failed" | "recoverable" | "restored";
@@ -149,14 +149,15 @@ async function restoreDraft(record: DraftRecord) {
     appStore.largeFile.pendingEdits = [...record.pendingEdits];
     appStore.isDirty = state.isDirty;
   } else {
-    setContent(record.content || "", true);
     if (record.kind === "untitled") {
-      appStore.currentFilePath = "";
+      createUntitledTab(record.content || "", true);
       untitledDraftId = record.id;
+    } else {
+      setContent(record.content || "", true);
     }
   }
   if (record.editorMode === "wysiwyg" || record.editorMode === "source") {
-    appStore.editorMode = record.editorMode;
+    switchMode(record.editorMode);
   }
   draftStore.activeDraftId = record.id;
   draftStore.status = "restored";

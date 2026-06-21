@@ -1,6 +1,7 @@
 export type EditorMode = "wysiwyg" | "source";
 export type ThemeMode = "light" | "dark" | "system";
 export type DocumentMode = "normal" | "large";
+export type DocumentTabKind = "normal" | "large" | "untitled";
 export type ImageInsertBehavior = "reference" | "copyToAssets";
 export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
 export type ExportTargetKind = "native-html" | "native-image" | "native-pdf" | "pandoc";
@@ -45,6 +46,19 @@ export interface AppConfig {
   recentFiles: string[];
   theme?: ThemeMode;
   settings?: AppSettings;
+  session?: SessionRestoreState;
+}
+
+export interface SessionRestoreState {
+  openTabs: SessionTabState[];
+  activeTabKey?: string;
+}
+
+export interface SessionTabState {
+  path: string;
+  kind: Extract<DocumentTabKind, "normal" | "large">;
+  editorMode: EditorMode;
+  lastActiveAt: number;
 }
 
 export interface AppSettings {
@@ -287,4 +301,20 @@ export interface LargeFileState {
   loadedRanges: Array<{ startLine: number; endLine: number }>;
   pendingEdits: TextEdit[];
   outline: LargeOutlineItem[];
+}
+
+export interface DocumentTab {
+  id: string;
+  kind: DocumentTabKind;
+  path: string;
+  name: string;
+  content: string;
+  documentMode: DocumentMode;
+  largeFile: LargeFileState | null;
+  isDirty: boolean;
+  editorMode: EditorMode;
+  pendingModeCursor: PendingModeCursor | null;
+  draftId?: string;
+  openedAt: number;
+  lastActiveAt: number;
 }
