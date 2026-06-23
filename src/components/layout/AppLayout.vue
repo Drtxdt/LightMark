@@ -40,9 +40,6 @@ function startResize(event: PointerEvent) {
 <template>
   <div class="flex h-screen flex-col bg-paper-50 text-ink-900 dark:bg-paper-950 dark:text-ink-100">
     <Toolbar />
-    <DocumentTabs />
-    <ExportStatusStrip />
-    <FindReplacePanel v-if="findReplaceStore.open" />
     <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: gridColumns }">
       <Sidebar v-if="appStore.settings.appearance.showSidebar" />
       <div
@@ -50,8 +47,11 @@ function startResize(event: PointerEvent) {
         class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
         @pointerdown="startResize"
       />
-      <main class="min-h-0 min-w-0 overflow-hidden bg-paper-50 dark:bg-paper-950">
-        <EditorShell />
+      <main class="flex min-h-0 min-w-0 flex-col overflow-hidden bg-paper-50 dark:bg-paper-950">
+        <DocumentTabs />
+        <ExportStatusStrip />
+        <FindReplacePanel v-if="findReplaceStore.open" />
+        <EditorShell class="min-h-0 flex-1" />
       </main>
     </div>
     <StatusBar />

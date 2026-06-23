@@ -216,6 +216,11 @@ export function createUntitledTab(content = "", dirty = false) {
   return tab;
 }
 
+export function ensureDefaultTab() {
+  if (appStore.tabs.length > 0) return;
+  createUntitledTab("", false);
+}
+
 export async function activateTab(tabId: string) {
   if (tabId === appStore.activeTabId) return;
   syncActiveTabFromProjection();
@@ -257,6 +262,7 @@ export async function closeTab(tabId: string) {
   appStore.tabs.splice(index, 1);
   if (appStore.tabs.length === 0) {
     resetOpenDocument();
+    ensureDefaultTab();
   } else {
     const next = appStore.tabs[Math.max(0, Math.min(index, appStore.tabs.length - 1))];
     projectTab(next);

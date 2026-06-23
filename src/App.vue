@@ -13,6 +13,7 @@ import {
   appStore,
   applyTheme,
   currentFileName,
+  ensureDefaultTab,
   getDirtyTabs,
   loadConfig,
   saveAllDirtyTabs,
@@ -44,6 +45,7 @@ onMounted(async () => {
   applyTheme();
   startDraftAutosave();
   await recoverStartupDrafts();
+  ensureDefaultTab();
   unwatchWindowChrome = watch(
     () => [currentFileName.value, appStore.activeTheme] as const,
     ([fileName, theme]) => {

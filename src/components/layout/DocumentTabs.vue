@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { appStore, activateTab, closeTab } from "../../stores/appStore";
+import { appStore, activateTab, closeTab, createUntitledTab } from "../../stores/appStore";
 
 const visibleTabs = computed(() => appStore.tabs);
 
@@ -18,11 +18,14 @@ async function onAuxClick(event: MouseEvent, tabId: string) {
   event.preventDefault();
   await closeTab(tabId);
 }
+
+function createTab() {
+  createUntitledTab("", false);
+}
 </script>
 
 <template>
   <nav
-    v-if="visibleTabs.length > 0"
     class="document-tabs flex h-9 flex-none items-end gap-1 overflow-x-auto border-b border-paper-200 bg-paper-100/75 px-2 pt-1 dark:border-paper-800 dark:bg-paper-900/85"
     aria-label="打开的文档"
   >
@@ -55,6 +58,14 @@ async function onAuxClick(event: MouseEvent, tabId: string) {
         ×
       </span>
     </button>
+    <button
+      class="new-tab-button mb-0 grid h-8 w-9 flex-none place-items-center rounded-t-md border border-transparent text-base leading-none text-ink-500 transition hover:bg-paper-200/70 hover:text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-300/40 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
+      title="新建未命名标签页"
+      aria-label="新建未命名标签页"
+      @click="createTab"
+    >
+      +
+    </button>
   </nav>
 </template>
 
@@ -73,5 +84,9 @@ async function onAuxClick(event: MouseEvent, tabId: string) {
 
 .tab-close {
   line-height: 1;
+}
+
+.new-tab-button {
+  font-weight: 500;
 }
 </style>
