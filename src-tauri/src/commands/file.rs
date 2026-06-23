@@ -44,6 +44,19 @@ pub fn open_folder_dialog() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+pub fn save_markdown_file_dialog(default_file_name: Option<String>) -> Result<Option<String>, String> {
+    let file_name = default_file_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("未命名.md");
+    let file = FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .set_file_name(file_name)
+        .save_file();
+    Ok(file.map(path_to_string))
+}
+
+#[tauri::command]
 pub fn read_text_file(path: String) -> Result<String, String> {
     let path = PathBuf::from(path);
     fs::read_to_string(&path).map_err(|err| format!("Failed to read {}: {err}", path.display()))

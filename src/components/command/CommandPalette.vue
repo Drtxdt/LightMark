@@ -26,7 +26,7 @@ const commands = computed(() => {
   return text ? all.filter((command) => command.name.toLowerCase().includes(text)) : all;
 });
 
-async function execute(command: { name: string; handler: () => void | Promise<void> }) {
+async function execute(command: { name: string; handler: () => unknown | Promise<unknown> }) {
   try {
     await command.handler();
     appStore.commandPaletteOpen = false;

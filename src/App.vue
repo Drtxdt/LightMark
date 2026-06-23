@@ -1,26 +1,40 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
+import AppDialog from "./components/dialog/AppDialog.vue";
 import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import WordCountPanel from "./components/plugin/WordCountPanel.vue";
 import { activatePlugins } from "./plugins/registry";
 import { wordCountPlugin } from "./plugins/wordCountPlugin";
-import { appStore, applyTheme, currentFileName, loadConfig, saveCurrentFile } from "./stores/appStore";
+import {
+  appStore,
+  applyTheme,
+  currentFileName,
+  getDirtyTabs,
+  loadConfig,
+  saveAllDirtyTabs,
+  saveCurrentFile,
+  showSaveFailure,
+} from "./stores/appStore";
 import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
 import { syncWindowChrome } from "./utils/windowChrome";
-import { recoverStartupDrafts, startDraftAutosave, stopDraftAutosave } from "./stores/draftStore";
+import { flushCurrentDraft, recoverStartupDrafts, startDraftAutosave, stopDraftAutosave } from "./stores/draftStore";
+import { showDialog } from "./stores/dialogStore";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
 let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
+let unlistenCloseRequested: (() => void) | null = null;
 let unwatchWindowChrome = () => {};
 let unwatchDraftAutosave = () => {};
+let closingBypass = false;
 
 onMounted(async () => {
   activatePlugins([wordCountPlugin]);
@@ -58,6 +72,7 @@ onMounted(async () => {
   window.addEventListener("paste", handleGlobalImagePaste);
   window.addEventListener("dragover", handleGlobalImageDragOver);
   window.addEventListener("drop", handleGlobalImageDrop);
+  unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
   unlistenTauriImageDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type !== "drop") return;
     const paths = event.payload.paths || [];
@@ -84,9 +99,72 @@ onUnmounted(() => {
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);
+  unlistenCloseRequested?.();
+  unlistenCloseRequested = null;
   unlistenTauriImageDrop?.();
   unlistenTauriImageDrop = null;
 });
+
+async function handleCloseRequested(event: { preventDefault: () => void }) {
+  if (closingBypass) return;
+  event.preventDefault();
+  const dirtyTabs = getDirtyTabs();
+  if (dirtyTabs.length === 0) {
+    await closeWindowNow();
+    return;
+  }
+
+  const result = await showDialog({
+    title: "关闭 LightMark 前保存修改？",
+    message: `${dirtyTabs.length} 个文档有未保存的修改。`,
+    details: dirtyTabs.map((tab) => tab.name),
+    cancelId: "cancel",
+    defaultId: "save",
+    buttons: [
+      { id: "cancel", label: "取消", variant: "secondary" },
+      { id: "discard", label: "不保存退出", variant: "danger" },
+      { id: "save", label: "保存全部并退出", variant: "primary" },
+    ],
+  });
+
+  if (result === "cancel") return;
+  if (result === "save") {
+    try {
+      const saved = await saveAllDirtyTabs();
+      if (!saved) return;
+    } catch (error) {
+      appStore.statusMessage = String(error);
+      await showSaveFailure(error);
+      return;
+    }
+  }
+  await closeWindowNow();
+}
+
+async function closeWindowNow() {
+  await recoverPendingDraftBeforeClose();
+  closingBypass = true;
+  const window = getCurrentWindow();
+  try {
+    await window.close();
+  } catch (closeError) {
+    try {
+      await window.destroy();
+    } catch (destroyError) {
+      closingBypass = false;
+      appStore.statusMessage = `关闭窗口失败：${destroyError || closeError}`;
+      await showSaveFailure(destroyError || closeError);
+    }
+  }
+}
+
+async function recoverPendingDraftBeforeClose() {
+  try {
+    await flushCurrentDraft();
+  } catch {
+    // Closing should not be blocked by a best-effort autosave failure when the user chose to exit.
+  }
+}
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -121,4 +199,5 @@ function handleGlobalImageDrop(event: DragEvent) {
   <CommandPalette v-if="appStore.commandPaletteOpen" />
   <SettingsDialog v-if="appStore.settingsOpen" />
   <WordCountPanel v-if="appStore.wordCountOpen" />
+  <AppDialog />
 </template>

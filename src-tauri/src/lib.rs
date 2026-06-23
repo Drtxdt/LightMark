@@ -7,6 +7,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::file::open_file_dialog,
             commands::file::open_folder_dialog,
+            commands::file::save_markdown_file_dialog,
             commands::file::read_text_file,
             commands::file::get_file_info,
             commands::file::open_large_file,

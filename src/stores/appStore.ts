@@ -1,6 +1,7 @@
 import { computed, reactive } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { checkDraftForOpenedFile, clearActiveDraft, flushCurrentDraft } from "./draftStore";
+import { alertDialog, showDialog } from "./dialogStore";
 import type {
   AppConfig,
   AppSettings,
@@ -58,6 +59,7 @@ export const currentFileName = computed(() => {
 
 export function setContent(content: string, dirty = true) {
   if (appStore.documentMode === "large") return;
+  ensureEditableTab();
   appStore.currentContent = content;
   appStore.isDirty = dirty;
   syncActiveTabFromProjection();
@@ -173,17 +175,16 @@ export async function saveCurrentFile() {
     syncActiveTabFromProjection();
     await refreshFileTree();
     await persistConfig();
-    return;
+    return true;
   }
 
   if (!appStore.currentFilePath) {
-    if (!appStore.currentWorkspace) throw new Error("请先打开一个工作区，再创建文件。");
-    const created = await invoke<string>("create_markdown_file", {
-      folder: appStore.currentWorkspace,
-      name: "未命名.md",
+    const selected = await invoke<string | null>("save_markdown_file_dialog", {
+      defaultFileName: defaultMarkdownFileName(),
     });
-    appStore.currentFilePath = created;
-    retargetActiveTab(created);
+    if (!selected) return false;
+    appStore.currentFilePath = selected;
+    retargetActiveTab(selected);
   }
   await invoke("write_text_file", {
     path: appStore.currentFilePath,
@@ -195,6 +196,7 @@ export async function saveCurrentFile() {
   syncActiveTabFromProjection();
   await refreshFileTree();
   await persistConfig();
+  return true;
 }
 
 export function createUntitledTab(content = "", dirty = false) {
@@ -231,7 +233,25 @@ export async function closeTab(tabId: string) {
   } else {
     syncActiveTabFromProjection();
   }
-  if (appStore.isDirty && !(await confirmDiscardOrSave("关闭标签页前是否保存？", "不保存并关闭标签页？"))) return;
+  if (appStore.isDirty) {
+    const action = await requestSaveDiscardCancel({
+      title: "关闭未保存的标签页？",
+      message: `“${currentFileName.value}”有未保存的修改。`,
+      saveLabel: "保存并关闭",
+      discardLabel: "不保存",
+    });
+    if (action === "cancel") return;
+    if (action === "save") {
+      try {
+        const saved = await saveCurrentFile();
+        if (!saved) return;
+      } catch (error) {
+        appStore.statusMessage = String(error);
+        await showSaveFailure(error);
+        return;
+      }
+    }
+  }
   const index = appStore.tabs.findIndex((item) => item.id === tab.id);
   await closeLargeFileSession();
   appStore.tabs.splice(index, 1);
@@ -242,6 +262,21 @@ export async function closeTab(tabId: string) {
     projectTab(next);
   }
   await persistConfig();
+}
+
+export function getDirtyTabs() {
+  syncActiveTabFromProjection();
+  return appStore.tabs.filter((tab) => tab.isDirty);
+}
+
+export async function saveAllDirtyTabs() {
+  const dirtyTabs = getDirtyTabs();
+  for (const tab of dirtyTabs) {
+    await activateTab(tab.id);
+    const saved = await saveCurrentFile();
+    if (!saved) return false;
+  }
+  return true;
 }
 
 export async function createNewFile() {
@@ -643,6 +678,21 @@ function createTab(input: {
   } satisfies DocumentTab;
 }
 
+function ensureEditableTab() {
+  if (getActiveTab() || appStore.tabs.length > 0) return;
+  const tab = createTab({
+    path: "",
+    kind: "untitled",
+    content: appStore.currentContent,
+    documentMode: "normal",
+    editorMode: appStore.settings.editor.defaultMode,
+    largeFile: null,
+    isDirty: appStore.isDirty,
+  });
+  appStore.tabs.push(tab);
+  projectTab(tab);
+}
+
 function projectTab(tab: DocumentTab) {
   appStore.activeTabId = tab.id;
   tab.lastActiveAt = Date.now();
@@ -707,6 +757,11 @@ function fileNameFromPath(path: string) {
   return path.split(/[\\/]/).pop() || path;
 }
 
+function defaultMarkdownFileName() {
+  const name = currentFileName.value.trim() || "未命名";
+  return name.endsWith(".md") || name.endsWith(".markdown") ? name : `${name}.md`;
+}
+
 function hashString(value: string) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -729,12 +784,48 @@ function rememberRecentFile(path: string) {
 
 async function confirmDiscardOrSave(saveMessage = "当前文件有未保存的修改，切换前是否保存？", discardMessage = "不保存并继续切换？") {
   if (!appStore.isDirty) return true;
-  const save = window.confirm(saveMessage);
-  if (save) {
-    await saveCurrentFile();
-    return true;
+  const action = await requestSaveDiscardCancel({
+    title: saveMessage,
+    message: discardMessage,
+    saveLabel: "保存",
+    discardLabel: "不保存",
+  });
+  if (action === "save") {
+    return await saveCurrentFile();
   }
-  return window.confirm(discardMessage);
+  return action === "discard";
+}
+
+type SaveDiscardCancelAction = "save" | "discard" | "cancel";
+
+async function requestSaveDiscardCancel(options: {
+  title: string;
+  message: string;
+  details?: string[];
+  saveLabel?: string;
+  discardLabel?: string;
+}) {
+  const result = await showDialog({
+    title: options.title,
+    message: options.message,
+    details: options.details,
+    cancelId: "cancel",
+    defaultId: "save",
+    buttons: [
+      { id: "cancel", label: "取消", variant: "secondary" },
+      { id: "discard", label: options.discardLabel ?? "不保存", variant: "danger" },
+      { id: "save", label: options.saveLabel ?? "保存", variant: "primary" },
+    ],
+  });
+  return result as SaveDiscardCancelAction;
+}
+
+export async function showSaveFailure(error: unknown) {
+  await alertDialog({
+    title: "保存失败",
+    message: error instanceof Error ? error.message : String(error),
+    tone: "danger",
+  });
 }
 
 async function closeLargeFileSession() {

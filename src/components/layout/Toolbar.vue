@@ -33,7 +33,7 @@ const exportMenuOpen = ref(false);
 const primaryExportTargets = exportTargets.filter((target) => ["pdf", "html", "docx", "png"].includes(target.id));
 const secondaryExportTargets = exportTargets.filter((target) => !primaryExportTargets.includes(target));
 
-async function run(action: () => Promise<void> | void) {
+async function run(action: () => Promise<unknown> | unknown) {
   try {
     await action();
   } catch (error) {

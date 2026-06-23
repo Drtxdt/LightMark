@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { reactive } from "vue";
 import { appStore, createUntitledTab, setContent, switchMode } from "./appStore";
+import { showDialog } from "./dialogStore";
 import type { DraftRecord, FileSnapshot, TextEdit } from "../types";
 
 type DraftStatus = "idle" | "saved" | "failed" | "recoverable" | "restored";
@@ -131,11 +132,22 @@ async function buildCurrentDraftRecord(): Promise<DraftRecord | null> {
 }
 
 async function promptRecoverDraft(record: DraftRecord, message: string) {
-  if (window.confirm(message)) {
+  const result = await showDialog({
+    title: "发现可恢复草稿",
+    message,
+    cancelId: "keep",
+    defaultId: "restore",
+    buttons: [
+      { id: "keep", label: "保留稍后处理", variant: "secondary" },
+      { id: "discard", label: "丢弃草稿", variant: "danger" },
+      { id: "restore", label: "恢复草稿", variant: "primary" },
+    ],
+  });
+  if (result === "restore") {
     await restoreDraft(record);
     return;
   }
-  if (window.confirm("是否丢弃这个草稿？选择“取消”会保留草稿，稍后仍可恢复。")) {
+  if (result === "discard") {
     await discardDraft(record.id);
   }
 }

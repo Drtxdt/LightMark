@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { appStore, defaultSettings, resetSettings, updateSettings } from "../../stores/appStore";
+import { confirmDialog } from "../../stores/dialogStore";
 import { detectPandoc } from "../../utils/export";
 import type { AppSettings, PandocStatus } from "../../types";
 
@@ -75,7 +76,13 @@ async function refreshPandocStatus() {
 }
 
 async function resetAll() {
-  if (!window.confirm("重置所有设置？最近文件列表会保留。")) return;
+  const confirmed = await confirmDialog({
+    title: "重置所有设置？",
+    message: "最近文件列表会保留，其他偏好设置将恢复默认值。",
+    confirmLabel: "重置",
+    tone: "danger",
+  });
+  if (!confirmed) return;
   localSettings.value = defaultSettings();
   await resetSettings();
 }
