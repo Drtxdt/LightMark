@@ -74,6 +74,19 @@ const codeLanguageControl = ref({
   query: "",
   highlightedIndex: 0,
 });
+const tableControl = ref({
+  visible: false,
+  resizeOpen: false,
+  moreOpen: false,
+  x: 0,
+  y: 0,
+  tablePos: -1,
+  activeColumn: -1,
+  rows: 0,
+  columns: 0,
+  resizeText: "",
+  resizeError: "",
+});
 const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
@@ -1246,6 +1259,47 @@ turndown.addRule("taskState", {
   },
 });
 
+function normalizeTableAlign(value: unknown): "left" | "center" | "right" | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "left" || normalized === "center" || normalized === "right" ? normalized : null;
+}
+
+function parseTableCellAlign(element: HTMLElement) {
+  return normalizeTableAlign(element.style.textAlign || element.getAttribute("align") || "");
+}
+
+function renderTableCellAlign(attributes: Record<string, unknown>) {
+  const textAlign = normalizeTableAlign(attributes.textAlign);
+  return textAlign ? { style: `text-align: ${textAlign};` } : {};
+}
+
+const LightMarkTableCell = TableCell.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      textAlign: {
+        default: null,
+        parseHTML: parseTableCellAlign,
+        renderHTML: renderTableCellAlign,
+      },
+    };
+  },
+});
+
+const LightMarkTableHeader = TableHeader.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      textAlign: {
+        default: null,
+        parseHTML: parseTableCellAlign,
+        renderHTML: renderTableCellAlign,
+      },
+    };
+  },
+});
+
 turndown.addRule("frontMatter", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "front-matter",
   replacement: (_content, node) => {
@@ -1366,7 +1420,7 @@ turndown.addRule("table", {
     const columnCount = Math.max(...rows.map((row) => row.length));
     const normalized = rows.map((row) => [...row, ...Array(Math.max(0, columnCount - row.length)).fill("")]);
     const header = normalized[0];
-    const divider = Array(columnCount).fill("---");
+    const divider = tableColumnAlignments(node, columnCount).map(markdownTableDividerForAlign);
     const body = normalized.slice(1);
     const lines = [header, divider, ...body].map((row) => `| ${row.join(" | ")} |`);
     return `\n\n${lines.join("\n")}\n\n`;
@@ -1811,8 +1865,8 @@ const editor = useEditor({
     MarkdownImage,
     Table.configure({ resizable: true }),
     TableRow,
-    TableHeader,
-    TableCell,
+    LightMarkTableHeader,
+    LightMarkTableCell,
     MarkdownHeading,
     InlineMath,
     InlineHtmlNode,
@@ -1982,6 +2036,12 @@ const editor = useEditor({
     },
     handleClick(view, _pos, event) {
       const target = getEventElement(event);
+      const table = target?.closest<HTMLTableElement>("table");
+      if (table && view.dom.contains(table)) {
+        const cell = target?.closest<HTMLTableCellElement>("td,th") || null;
+        window.setTimeout(() => updateTableControl(view, table, cell), 0);
+      }
+
       const heading = target?.closest<HTMLElement>("h1,h2,h3,h4,h5,h6");
       if (heading && view.dom.contains(heading)) {
         event.preventDefault();
@@ -2018,18 +2078,22 @@ const editor = useEditor({
   onUpdate({ editor }) {
     setContent(editorHtmlToMarkdown(editor.getHTML()), true);
     updateCodeLanguageControl(editor.view);
+    updateTableControl(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
   },
   onSelectionUpdate({ editor }) {
     updateCodeLanguageControl(editor.view);
+    updateTableControl(editor.view);
   },
   onFocus({ editor }) {
     updateCodeLanguageControl(editor.view);
+    updateTableControl(editor.view);
   },
   onBlur() {
     window.setTimeout(() => {
       if (codeLanguageControl.value.open) return;
       codeLanguageControl.value.visible = false;
+      if (!tableControl.value.resizeOpen && !tableControl.value.moreOpen) tableControl.value.visible = false;
     }, 120);
   },
 });
@@ -2175,8 +2239,250 @@ function handleFloatingCodeLanguageKeydown(event: KeyboardEvent) {
 }
 
 function handleEditorShellScroll() {
-  if (!codeLanguageControl.value.visible) return;
-  updateCodeLanguageControl();
+  if (codeLanguageControl.value.visible) updateCodeLanguageControl();
+  if (tableControl.value.visible) updateTableControl();
+}
+
+function getSelectedTableInfo(view = editor.value?.view, explicitTable?: HTMLTableElement | null, explicitCell?: HTMLTableCellElement | null) {
+  if (!view || appStore.editorMode !== "wysiwyg") return null;
+  const table = explicitTable || getCurrentTableElement();
+  if (!table) return null;
+  const resolved = resolveTableNodeFromDom(view, table, explicitCell);
+  if (!resolved) return null;
+  const { pos, node } = resolved;
+  const rows = table.rows.length;
+  const columns = rows ? Math.max(...Array.from(table.rows).map((row) => row.cells.length)) : 0;
+  return { table, pos, node, rows, columns };
+}
+
+function updateTableControl(view = editor.value?.view, explicitTable?: HTMLTableElement | null, explicitCell?: HTMLTableCellElement | null) {
+  const active = getSelectedTableInfo(view, explicitTable, explicitCell);
+  if (!active) {
+    if (!tableControl.value.resizeOpen && !tableControl.value.moreOpen) tableControl.value.visible = false;
+    return;
+  }
+  const rect = active.table.getBoundingClientRect();
+  const shellTop = editorShell.value?.getBoundingClientRect().top ?? 0;
+  const width = 288;
+  const nextRows = active.rows;
+  const nextColumns = active.columns;
+  const activeColumn = explicitCell?.cellIndex ?? getCurrentTableCell()?.cellIndex ?? tableControl.value.activeColumn;
+  tableControl.value = {
+    ...tableControl.value,
+    visible: true,
+    x: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+    y: Math.max(shellTop + 8, rect.top - 36),
+    tablePos: active.pos,
+    activeColumn,
+    rows: nextRows,
+    columns: nextColumns,
+    resizeText: tableControl.value.resizeOpen ? tableControl.value.resizeText : `${nextRows} x ${nextColumns}`,
+  };
+}
+
+function resolveTableNodeFromDom(view: any, table: HTMLTableElement, cell?: HTMLTableCellElement | null) {
+  const candidates: number[] = [];
+  const pushDomPos = (element: HTMLElement | null) => {
+    if (!element) return;
+    try {
+      candidates.push(view.posAtDOM(element, 0));
+    } catch {
+      // Ignore DOM positions ProseMirror cannot map directly.
+    }
+  };
+
+  pushDomPos(cell || null);
+  pushDomPos(table);
+  pushDomPos(table.parentElement);
+  if (tableControl.value.tablePos >= 0) candidates.push(tableControl.value.tablePos);
+
+  for (const pos of candidates) {
+    const resolved = resolveTableNodeAtDocPos(view.state.doc, pos);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
+function resolveTableNodeAtDocPos(doc: any, pos: number) {
+  const max = doc.content.size;
+  const candidates = Array.from(new Set([pos, pos - 1, pos + 1]))
+    .filter((candidate) => Number.isInteger(candidate) && candidate >= 0 && candidate <= max);
+
+  for (const candidate of candidates) {
+    const direct = doc.nodeAt(candidate);
+    if (direct?.type?.name === "table") return { pos: candidate, node: direct };
+
+    try {
+      const $pos = doc.resolve(candidate);
+      for (let depth = $pos.depth; depth > 0; depth -= 1) {
+        const node = $pos.node(depth);
+        if (node?.type?.name === "table") {
+          return { pos: $pos.before(depth), node };
+        }
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function openTableResizePanel() {
+  updateTableControl();
+  tableControl.value.resizeOpen = !tableControl.value.resizeOpen;
+  tableControl.value.moreOpen = false;
+  tableControl.value.resizeText = `${tableControl.value.rows} x ${tableControl.value.columns}`;
+  tableControl.value.resizeError = "";
+}
+
+function toggleTableMoreMenu() {
+  updateTableControl();
+  tableControl.value.moreOpen = !tableControl.value.moreOpen;
+  tableControl.value.resizeOpen = false;
+}
+
+function closeTablePopovers() {
+  tableControl.value.resizeOpen = false;
+  tableControl.value.moreOpen = false;
+  tableControl.value.resizeError = "";
+}
+
+function parseTableSizeInput(value: string) {
+  const match = value.trim().match(/^(\d{1,2})\s*(?:x|\*|×)\s*(\d{1,2})$/i);
+  if (!match) return null;
+  const rows = Number(match[1]);
+  const columns = Number(match[2]);
+  if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1) return null;
+  return { rows, columns };
+}
+
+function setTableResizeDelta(kind: "rows" | "columns", delta: 1 | -1) {
+  const size = parseTableSizeInput(tableControl.value.resizeText) || {
+    rows: tableControl.value.rows || 1,
+    columns: tableControl.value.columns || 1,
+  };
+  const next = {
+    rows: kind === "rows" ? Math.max(1, size.rows + delta) : size.rows,
+    columns: kind === "columns" ? Math.max(1, size.columns + delta) : size.columns,
+  };
+  tableControl.value.resizeText = `${next.rows} x ${next.columns}`;
+  tableControl.value.rows = next.rows;
+  tableControl.value.columns = next.columns;
+  tableControl.value.resizeError = "";
+}
+
+function handleTableResizeTextInput(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  tableControl.value.resizeText = target.value;
+  const size = parseTableSizeInput(target.value);
+  if (size) {
+    tableControl.value.rows = size.rows;
+    tableControl.value.columns = size.columns;
+  }
+  tableControl.value.resizeError = "";
+}
+
+function applyTableResizeFromInput() {
+  const size = parseTableSizeInput(tableControl.value.resizeText);
+  if (!size) {
+    tableControl.value.resizeError = "请输入类似 4 x 6 的行列数。";
+    return;
+  }
+  applyTableSize(size.rows, size.columns);
+}
+
+function applyTableSize(targetRows: number, targetColumns: number) {
+  const info = getSelectedTableInfo();
+  if (!info) return;
+  if (tableResizeWouldDropContent(info.table, targetRows, targetColumns)) {
+    tableControl.value.resizeError = "缩小会删除非空单元格，已阻止。";
+    return;
+  }
+  const nextTable = resizedTableElement(info.table, targetRows, targetColumns);
+  replaceCurrentTableFromDom(nextTable);
+  tableControl.value.resizeOpen = false;
+  tableControl.value.resizeError = "";
+  window.setTimeout(() => updateTableControl(), 0);
+}
+
+function resizedTableElement(source: HTMLTableElement, targetRows: number, targetColumns: number) {
+  const table = source.cloneNode(true) as HTMLTableElement;
+  while (table.rows.length > targetRows) table.deleteRow(table.rows.length - 1);
+  while (table.rows.length < targetRows) {
+    const row = table.insertRow();
+    const useHeader = table.rows.length === 1 && source.rows[0]?.cells[0]?.tagName.toLowerCase() === "th";
+    for (let column = 0; column < targetColumns; column += 1) {
+      const cell = document.createElement(useHeader ? "th" : "td");
+      cell.innerHTML = "";
+      row.appendChild(cell);
+    }
+  }
+  Array.from(table.rows).forEach((row) => {
+    while (row.cells.length > targetColumns) row.deleteCell(row.cells.length - 1);
+    while (row.cells.length < targetColumns) {
+      const template = row.cells[row.cells.length - 1] || source.rows[0]?.cells[row.cells.length] || source.rows[0]?.cells[0];
+      const cell = document.createElement(row.rowIndex === 0 && template?.tagName.toLowerCase() === "th" ? "th" : "td");
+      const align = template ? parseTableCellAlign(template as HTMLElement) : null;
+      if (align) {
+        cell.style.textAlign = align;
+        cell.setAttribute("align", align);
+      }
+      cell.innerHTML = "";
+      row.appendChild(cell);
+    }
+  });
+  return table;
+}
+
+function tableResizeWouldDropContent(table: HTMLTableElement, targetRows: number, targetColumns: number) {
+  const rows = Array.from(table.rows);
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    if (rowIndex >= targetRows && rowHasContent(row)) return true;
+    for (let columnIndex = targetColumns; columnIndex < row.cells.length; columnIndex += 1) {
+      if (cellHasContent(row.cells[columnIndex])) return true;
+    }
+  }
+  return false;
+}
+
+function rowHasContent(row: HTMLTableRowElement) {
+  return Array.from(row.cells).some(cellHasContent);
+}
+
+function cellHasContent(cell: HTMLTableCellElement) {
+  return Boolean(cell.textContent?.trim() || cell.querySelector("img,video,iframe,math,.math-node,.typora-image-node"));
+}
+
+function applyTableAlignment(align: "left" | "center" | "right") {
+  const info = getSelectedTableInfo();
+  if (!info) return;
+  const allColumns = isWholeTableSelected(info);
+  const activeCell = getCurrentTableCell();
+  const targetColumn = activeCell?.cellIndex ?? tableControl.value.activeColumn;
+  if (!allColumns && targetColumn < 0) return;
+  Array.from(info.table.rows).forEach((row) => {
+    Array.from(row.cells).forEach((cell, index) => {
+      if (allColumns || index === targetColumn) {
+        cell.style.textAlign = align;
+        cell.setAttribute("align", align);
+      }
+    });
+  });
+  replaceCurrentTableFromDom(info.table);
+  window.setTimeout(() => updateTableControl(), 0);
+}
+
+function isWholeTableSelected(info: { pos: number; node: any }) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return false;
+  const selection = activeEditor.state.selection;
+  if (selection instanceof AllSelection) return true;
+  if (selection instanceof NodeSelection && selection.from === info.pos && selection.node.type.name === "table") return true;
+  return !selection.empty && selection.from <= info.pos && selection.to >= info.pos + info.node.nodeSize;
 }
 
 async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number) {
@@ -2250,6 +2556,7 @@ watch(
 
 onMounted(() => {
   schedulePendingWysiwygCursorRestore();
+  document.addEventListener("pointerdown", handleDocumentTablePointerDown, true);
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
@@ -2258,6 +2565,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", handleDocumentTablePointerDown, true);
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
@@ -2610,9 +2918,31 @@ function hideContextMenu() {
   contextMenu.value.visible = false;
 }
 
-function handleEditorShellClick() {
+function handleEditorShellClick(event?: MouseEvent) {
   hideContextMenu();
   if (codeLanguageControl.value.open) closeFloatingCodeLanguageMenu({ focusEditor: false });
+  const target = event?.target instanceof HTMLElement ? event.target : null;
+  const table = target?.closest("table") as HTMLTableElement | null;
+  if (table) {
+    const cell = target?.closest("td,th") as HTMLTableCellElement | null;
+    updateTableControl(editor.value?.view, table, cell);
+    return;
+  }
+  if (target && !target.closest("table,.table-floating-toolbar")) {
+    tableControl.value.visible = false;
+    closeTablePopovers();
+  }
+}
+
+function handleDocumentTablePointerDown(event: PointerEvent) {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target || target.closest(".table-floating-toolbar")) return;
+  const view = editor.value?.view;
+  const table = target.closest("table") as HTMLTableElement | null;
+  if (!view || !table || !view.dom.contains(table)) return;
+  const cell = target.closest("td,th") as HTMLTableCellElement | null;
+  updateTableControl(view, table, cell);
+  window.requestAnimationFrame(() => updateTableControl(view, table, cell));
 }
 
 function isPositionInsideSelection(selection: any, pos: number) {
@@ -2649,6 +2979,13 @@ function runMenuCommand(command: () => void | Promise<void>, keepOpen = false) {
   restoreEditorSelection();
   void Promise.resolve(command()).finally(() => {
     if (!keepOpen) hideContextMenu();
+  });
+}
+
+function runTableFloatingCommand(command: () => void | Promise<void>, closePopovers = true) {
+  editor.value?.commands.focus();
+  void Promise.resolve(command()).finally(() => {
+    if (closePopovers) closeTablePopovers();
   });
 }
 
@@ -2898,9 +3235,24 @@ function copyFormattedTableSource() {
 function getCurrentTableElement() {
   const activeEditor = editor.value;
   if (!activeEditor) return null;
-  const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
-  const element = dom instanceof HTMLElement ? dom : dom.parentElement;
-  return element?.closest("table");
+  try {
+    const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
+    const element = dom instanceof HTMLElement ? dom : dom.parentElement;
+    const selectedTable = element?.closest("table");
+    if (selectedTable) return selectedTable;
+  } catch {
+    // Fall through to the floating-toolbar target.
+  }
+  if (tableControl.value.visible && tableControl.value.tablePos >= 0) {
+    const dom = activeEditor.view.nodeDOM(tableControl.value.tablePos);
+    if (dom instanceof HTMLTableElement) return dom;
+    if (dom instanceof HTMLElement) {
+      if (dom.matches("table")) return dom as HTMLTableElement;
+      const table = dom.querySelector("table");
+      if (table instanceof HTMLTableElement) return table;
+    }
+  }
+  return null;
 }
 
 function formatMarkdownTable(table: HTMLTableElement) {
@@ -2914,7 +3266,28 @@ function formatMarkdownTable(table: HTMLTableElement) {
     Math.max(3, ...normalized.map((row) => row[index].length)),
   );
   const renderRow = (row: string[]) => `| ${row.map((cell, index) => cell.padEnd(widths[index], " ")).join(" | ")} |`;
-  return [renderRow(normalized[0]), renderRow(widths.map((width) => "-".repeat(width))), ...normalized.slice(1).map(renderRow)].join("\n");
+  const alignments = tableColumnAlignments(table, columnCount);
+  const divider = widths.map((width, index) => markdownTableDividerForAlign(alignments[index], width));
+  return [renderRow(normalized[0]), renderRow(divider), ...normalized.slice(1).map(renderRow)].join("\n");
+}
+
+function tableColumnAlignments(table: HTMLTableElement, columnCount: number) {
+  return Array.from({ length: columnCount }, (_item, columnIndex) => {
+    for (const row of Array.from(table.rows)) {
+      const cell = row.cells[columnIndex];
+      const align = cell ? parseTableCellAlign(cell) : null;
+      if (align) return align;
+    }
+    return null;
+  });
+}
+
+function markdownTableDividerForAlign(align: "left" | "center" | "right" | null, width = 3) {
+  const dashes = "-".repeat(Math.max(3, width));
+  if (align === "left") return `:${dashes}`;
+  if (align === "center") return `:${dashes}:`;
+  if (align === "right") return `${dashes}:`;
+  return dashes;
 }
 
 function moveCurrentTableRow(direction: -1 | 1) {
@@ -2961,15 +3334,31 @@ function swapTableRowContent(a: HTMLTableRowElement, b: HTMLTableRowElement) {
 function getCurrentTableCell() {
   const activeEditor = editor.value;
   if (!activeEditor) return null;
-  const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
-  const element = dom instanceof HTMLElement ? dom : dom.parentElement;
-  return element?.closest("td,th") as HTMLTableCellElement | null;
+  try {
+    const dom = activeEditor.view.domAtPos(activeEditor.state.selection.from).node;
+    const element = dom instanceof HTMLElement ? dom : dom.parentElement;
+    const cell = element?.closest("td,th") as HTMLTableCellElement | null;
+    if (cell) return cell;
+  } catch {
+    // Fall through to no current cell.
+  }
+  return null;
 }
 
 function replaceCurrentTableFromDom(table: HTMLTableElement) {
   const activeEditor = editor.value;
   if (!activeEditor) return;
-  const pos = activeEditor.view.posAtDOM(table, 0);
+  let pos = -1;
+  try {
+    if (table.isConnected) pos = activeEditor.view.posAtDOM(table, 0);
+  } catch {
+    pos = -1;
+  }
+  if (pos < 0) {
+    const info = getSelectedTableInfo(activeEditor.view);
+    if (!info) return;
+    pos = info.pos;
+  }
   const node = activeEditor.state.doc.nodeAt(pos);
   if (!node) return;
   (activeEditor as any).commands.insertContentAt({ from: pos, to: pos + node.nodeSize }, table.outerHTML);
@@ -4028,6 +4417,79 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
             {{ codeLanguageControl.query.trim() ? `使用 "${codeLanguageControl.query.trim().toLowerCase()}"` : "输入语言" }}
           </div>
         </div>
+      </div>
+    </div>
+    <div
+      v-if="tableControl.visible"
+      class="table-floating-toolbar"
+      :style="{ left: `${tableControl.x}px`, top: `${tableControl.y}px` }"
+      @pointerdown.stop
+      @mousedown.stop
+      @click.stop
+      @keydown.stop
+      @contextmenu.prevent
+    >
+      <div class="table-floating-group">
+        <button type="button" class="table-floating-button" title="调整表格" aria-label="调整表格" @click="openTableResizePanel">
+          <span class="table-ico table-ico-grid" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="table-floating-button" title="左对齐" aria-label="左对齐" @click="runTableFloatingCommand(() => applyTableAlignment('left'))">
+          <span class="table-ico table-ico-align-left" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="table-floating-button" title="居中" aria-label="居中" @click="runTableFloatingCommand(() => applyTableAlignment('center'))">
+          <span class="table-ico table-ico-align-center" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="table-floating-button" title="右对齐" aria-label="右对齐" @click="runTableFloatingCommand(() => applyTableAlignment('right'))">
+          <span class="table-ico table-ico-align-right" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div class="table-floating-group">
+        <button type="button" class="table-floating-button" title="更多表格选项" aria-label="更多表格选项" @click="toggleTableMoreMenu">
+          <span class="table-ico table-ico-more" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="table-floating-button table-floating-danger" title="删除表格" aria-label="删除表格" @click="runTableFloatingCommand(() => runTableCommand('deleteTable'))">
+          <span class="table-ico table-ico-trash" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div v-if="tableControl.resizeOpen" class="table-resize-popover">
+        <div class="table-resize-title">表格尺寸</div>
+        <div class="table-resize-controls">
+          <button type="button" aria-label="减少行" @click="setTableResizeDelta('rows', -1)">−</button>
+          <span>{{ tableControl.rows }} 行</span>
+          <button type="button" aria-label="增加行" @click="setTableResizeDelta('rows', 1)">+</button>
+          <button type="button" aria-label="减少列" @click="setTableResizeDelta('columns', -1)">−</button>
+          <span>{{ tableControl.columns }} 列</span>
+          <button type="button" aria-label="增加列" @click="setTableResizeDelta('columns', 1)">+</button>
+        </div>
+        <form class="table-resize-form" @submit.prevent="applyTableResizeFromInput">
+          <input
+            :value="tableControl.resizeText"
+            spellcheck="false"
+            placeholder="4 x 6"
+            @input="handleTableResizeTextInput"
+          />
+          <button type="submit">应用</button>
+        </form>
+        <div v-if="tableControl.resizeError" class="table-resize-error">{{ tableControl.resizeError }}</div>
+      </div>
+
+      <div v-if="tableControl.moreOpen" class="table-more-popover">
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('addRowBefore'), false)">上方插入行</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('addRowAfter'), false)">下方插入行</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('addColumnBefore'), false)">左侧插入列</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('addColumnAfter'), false)">右侧插入列</button>
+        <div class="lm-menu-separator"></div>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => moveCurrentTableRow(-1), false)">上移该行</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => moveCurrentTableRow(1), false)">下移该行</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => moveCurrentTableColumn(-1), false)">左移该列</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => moveCurrentTableColumn(1), false)">右移该列</button>
+        <div class="lm-menu-separator"></div>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('deleteRow'), false)">删除行</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(() => runTableCommand('deleteColumn'), false)">删除列</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(copyCurrentTable, false)">复制表格</button>
+        <button class="lm-menu-item" @click="runTableFloatingCommand(copyFormattedTableSource, false)">格式化表格源码</button>
+        <button class="lm-menu-item lm-menu-danger" @click="runTableFloatingCommand(() => runTableCommand('deleteTable'))">删除表格</button>
       </div>
     </div>
     <div

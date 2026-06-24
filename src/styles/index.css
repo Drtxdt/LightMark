@@ -1912,6 +1912,282 @@ sub {
   color: #8a9097;
 }
 
+.table-floating-toolbar {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 288px;
+  border: 1px solid rgba(205, 198, 188, 0.88);
+  border-radius: 8px;
+  background: rgba(255, 254, 251, 0.96);
+  box-shadow: 0 12px 30px rgba(31, 30, 27, 0.14);
+  padding: 4px;
+  backdrop-filter: blur(12px);
+}
+
+.table-floating-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.table-floating-button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6f675d;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.table-floating-button:hover,
+.table-floating-button:focus-visible {
+  background: rgba(120, 113, 108, 0.12);
+  color: #2f2b26;
+  outline: none;
+}
+
+.table-floating-danger:hover,
+.table-floating-danger:focus-visible {
+  background: rgba(180, 35, 24, 0.12);
+  color: #b42318;
+}
+
+.table-ico {
+  position: relative;
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.table-ico-grid {
+  border: 1.7px solid currentColor;
+  border-radius: 2px;
+}
+
+.table-ico-grid::before,
+.table-ico-grid::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+  opacity: 0.8;
+}
+
+.table-ico-grid::before {
+  left: 4px;
+  top: 0;
+  width: 1.4px;
+  height: 100%;
+  box-shadow: 4px 0 0 currentColor;
+}
+
+.table-ico-grid::after {
+  left: 0;
+  top: 4px;
+  width: 100%;
+  height: 1.4px;
+  box-shadow: 0 4px 0 currentColor;
+}
+
+.table-ico-align-left::before,
+.table-ico-align-center::before,
+.table-ico-align-right::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  box-shadow:
+    0 5px 0 currentColor,
+    0 10px 0 currentColor;
+}
+
+.table-ico-align-left::before {
+  left: 1px;
+  width: 13px;
+}
+
+.table-ico-align-center::before {
+  left: 3px;
+  width: 9px;
+}
+
+.table-ico-align-right::before {
+  right: 1px;
+  width: 13px;
+}
+
+.table-ico-more::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow:
+    5px 0 0 currentColor,
+    10px 0 0 currentColor;
+}
+
+.table-ico-trash::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 5px;
+  width: 8px;
+  height: 9px;
+  border: 1.7px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 2px 2px;
+}
+
+.table-ico-trash::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 2px;
+  width: 10px;
+  height: 1.7px;
+  border-radius: 2px;
+  background: currentColor;
+  box-shadow: 3px -2px 0 -0.4px currentColor;
+}
+
+.table-resize-popover,
+.table-more-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 2;
+  border: 1px solid rgba(205, 198, 188, 0.9);
+  border-radius: 8px;
+  background: rgba(255, 254, 251, 0.98);
+  box-shadow: 0 14px 34px rgba(31, 30, 27, 0.16);
+  padding: 8px;
+}
+
+.table-resize-popover {
+  left: 0;
+  width: 218px;
+}
+
+.table-more-popover {
+  right: 0;
+  min-width: 172px;
+  padding: 6px;
+}
+
+.table-resize-title {
+  margin-bottom: 7px;
+  color: #6f675d;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.table-resize-controls {
+  display: grid;
+  grid-template-columns: 26px 1fr 26px;
+  gap: 5px;
+  align-items: center;
+  margin-bottom: 7px;
+  color: #6f675d;
+  font-size: 12px;
+  text-align: center;
+}
+
+.table-resize-controls button,
+.table-resize-form button {
+  border: 1px solid #d8d2c8;
+  border-radius: 6px;
+  background: #fbfaf7;
+  color: #5e574e;
+  font-size: 12px;
+}
+
+.table-resize-controls button {
+  height: 24px;
+}
+
+.table-resize-form {
+  display: flex;
+  gap: 6px;
+}
+
+.table-resize-form input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #d8d2c8;
+  border-radius: 6px;
+  background: #fffefb;
+  padding: 4px 7px;
+  color: #2f2b26;
+  font-family: var(--lm-editor-code-font-family);
+  font-size: 12px;
+  outline: none;
+}
+
+.table-resize-form button {
+  padding: 0 8px;
+}
+
+.table-resize-error {
+  margin-top: 6px;
+  color: #b42318;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.dark .table-floating-toolbar,
+.dark .table-resize-popover,
+.dark .table-more-popover {
+  border-color: rgba(70, 65, 58, 0.95);
+  background: rgba(31, 29, 26, 0.96);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.dark .table-floating-button {
+  color: #b9b3a8;
+}
+
+.dark .table-floating-button:hover,
+.dark .table-floating-button:focus-visible {
+  background: rgba(214, 211, 207, 0.1);
+  color: #f4efe7;
+}
+
+.dark .table-floating-danger:hover,
+.dark .table-floating-danger:focus-visible {
+  background: rgba(240, 166, 160, 0.12);
+  color: #f0a6a0;
+}
+
+.dark .table-resize-title,
+.dark .table-resize-controls {
+  color: #c8c0b6;
+}
+
+.dark .table-resize-controls button,
+.dark .table-resize-form button,
+.dark .table-resize-form input {
+  border-color: #4b453e;
+  background: #24211e;
+  color: #e7e0d6;
+}
+
+.dark .table-resize-error {
+  color: #f0a6a0;
+}
+
 .ProseMirror table,
 .markdown-preview table {
   border-collapse: collapse;
