@@ -505,12 +505,38 @@ function handleJumpLine(event: CustomEvent<number>) {
 
 .large-doc-render {
   min-height: 24px;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .large-doc-render :deep(pre) {
-  overflow: auto;
+  overflow-x: hidden;
   border-radius: 6px;
   padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.large-doc-render :deep(pre code) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.large-doc-render :deep(table) {
+  display: table;
+  width: max-content;
+  max-width: 100%;
+  table-layout: auto;
+  overflow-x: hidden;
+}
+
+.large-doc-render :deep(th),
+.large-doc-render :deep(td) {
+  max-width: min(36rem, 72vw);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .large-doc-render :deep(input[type="checkbox"]) {

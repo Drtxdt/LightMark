@@ -3257,6 +3257,8 @@ function insertTableRowAfterAndFocusFirstCell(view: any) {
   const table = getCurrentTableElement();
   const activeCell = getCurrentTableCell();
   if (!activeEditor || !table || !activeCell || !view.dom.contains(table)) return false;
+  const tableInfo = getSelectedTableInfo(view, table, activeCell);
+  if (!tableInfo) return false;
 
   const row = activeCell.parentElement as HTMLTableRowElement | null;
   const rowIndex = row ? Array.from(table.rows).indexOf(row) : -1;
@@ -3266,27 +3268,66 @@ function insertTableRowAfterAndFocusFirstCell(view: any) {
   if (!inserted) return false;
 
   window.setTimeout(() => {
-    const nextTable = getCurrentTableElement() || table;
-    const nextRow = nextTable.rows[rowIndex + 1];
-    const firstCell = nextRow?.cells[0] as HTMLTableCellElement | undefined;
-    if (!firstCell) return;
-
-    try {
-      const pos = activeEditor.view.posAtDOM(firstCell, 0);
-      const selectionPos = Math.min(pos + 2, activeEditor.state.doc.content.size);
-      activeEditor.view.dispatch(
-        activeEditor.state.tr
-          .setSelection(TextSelection.near(activeEditor.state.doc.resolve(selectionPos), 1))
-          .scrollIntoView(),
-      );
-      activeEditor.view.focus();
-      updateTableControl(activeEditor.view, nextTable, firstCell);
-    } catch {
-      updateTableControl(activeEditor.view);
-    }
+    focusTableCellAt(tableInfo.pos, rowIndex + 1, 0);
   }, 0);
 
   return true;
+}
+
+function focusTableCellAt(tablePos: number, rowIndex: number, columnIndex: number) {
+  const activeEditor = editor.value as any;
+  if (!activeEditor) return false;
+  const { doc } = activeEditor.state;
+  const cellStart = tableCellTextStart(doc, tablePos, rowIndex, columnIndex);
+  if (typeof cellStart !== "number") return false;
+
+  try {
+    activeEditor.view.dispatch(
+      activeEditor.state.tr
+        .setSelection(TextSelection.near(activeEditor.state.doc.resolve(cellStart), 1))
+        .scrollIntoView(),
+    );
+    activeEditor.view.focus();
+    const tableDom = activeEditor.view.nodeDOM(tablePos);
+    const table = tableDom instanceof HTMLTableElement
+      ? tableDom
+      : tableDom instanceof HTMLElement
+        ? tableDom.querySelector("table")
+        : null;
+    const cell = table?.rows[rowIndex]?.cells[columnIndex] as HTMLTableCellElement | undefined;
+    if (table instanceof HTMLTableElement && cell) updateTableControl(activeEditor.view, table, cell);
+    return true;
+  } catch {
+    updateTableControl(activeEditor.view);
+    return false;
+  }
+}
+
+function tableCellTextStart(doc: any, tablePos: number, rowIndex: number, columnIndex: number) {
+  const table = doc.nodeAt(tablePos);
+  if (!table || table.type?.name !== "table") return null;
+
+  let rowPos = tablePos + 1;
+  for (let rowOffset = 0; rowOffset < table.childCount; rowOffset += 1) {
+    const row = table.child(rowOffset);
+    if (rowOffset !== rowIndex) {
+      rowPos += row.nodeSize;
+      continue;
+    }
+
+    let cellPos = rowPos + 1;
+    for (let cellOffset = 0; cellOffset < row.childCount; cellOffset += 1) {
+      const cell = row.child(cellOffset);
+      if (cellOffset === columnIndex) {
+        const firstChild = cell.firstChild;
+        if (firstChild?.isTextblock) return cellPos + 2;
+        return cellPos + 1;
+      }
+      cellPos += cell.nodeSize;
+    }
+  }
+
+  return null;
 }
 
 function copyCurrentTable() {
@@ -4131,7 +4172,9 @@ function convertMarkdownPipeTable(view: any) {
   const from = $from.before();
   const to = $from.after();
   (activeEditor as any).commands.insertContentAt({ from, to }, html);
-  window.setTimeout(() => updateTableControl(view), 0);
+  window.setTimeout(() => {
+    if (!focusTableCellAt(from, 1, 0)) updateTableControl(view);
+  }, 0);
   return true;
 }
 
