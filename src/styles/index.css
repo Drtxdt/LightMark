@@ -1917,30 +1917,30 @@ sub {
   z-index: 1200;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 288px;
+  justify-content: center;
+  gap: 0;
+  width: max-content;
   border: 1px solid rgba(205, 198, 188, 0.88);
-  border-radius: 8px;
+  border-radius: 7px;
   background: rgba(255, 254, 251, 0.96);
   box-shadow: 0 12px 30px rgba(31, 30, 27, 0.14);
-  padding: 4px;
+  padding: 2px;
   backdrop-filter: blur(12px);
 }
 
 .table-floating-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
 }
 
 .table-floating-button {
   display: grid;
-  width: 27px;
-  height: 27px;
+  width: 24px;
+  height: 24px;
   place-items: center;
   border: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: #6f675d;
   transition:
@@ -2085,6 +2085,15 @@ sub {
   right: 0;
   min-width: 172px;
   padding: 6px;
+  color: #2b2925;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.table-more-popover .lm-menu-item {
+  padding: 6px 9px;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .table-resize-title {
@@ -2680,6 +2689,16 @@ sub {
   border-radius: 7px;
   background: rgba(255, 253, 248, 0.98);
   box-shadow: 0 18px 45px rgba(41, 37, 36, 0.18);
+}
+
+.lm-context-menu-left .lm-menu-pop {
+  right: calc(100% - 1px);
+  left: auto;
+}
+
+.lm-context-menu-up .lm-menu-pop {
+  top: auto;
+  bottom: -6px;
 }
 
 .lm-menu-pop-wide {

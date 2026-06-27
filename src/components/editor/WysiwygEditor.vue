@@ -22,6 +22,7 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
+import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
 import {
   getImageFilesFromClipboard,
   getImageFilesFromDrop,
@@ -61,6 +62,8 @@ const contextMenu = ref({
   y: 0,
   mode: "default" as ContextMenuMode,
   inTable: false,
+  flipX: false,
+  flipY: false,
 });
 const editorShell = ref<HTMLElement | null>(null);
 const codeLanguageInput = ref<HTMLInputElement | null>(null);
@@ -1912,7 +1915,17 @@ const editor = useEditor({
         return true;
       }
       if (event.key === "Enter") {
+        if ((event.ctrlKey || event.metaKey) && insertTableRowAfterAndFocusFirstCell(view)) {
+          event.preventDefault();
+          return true;
+        }
+
         if (continueTaskItem(view)) {
+          event.preventDefault();
+          return true;
+        }
+
+        if (convertMarkdownPipeTable(view)) {
           event.preventDefault();
           return true;
         }
@@ -1973,13 +1986,16 @@ const editor = useEditor({
           };
         const mode: ContextMenuMode =
           target.closest("pre, code") || view.state.selection.$from.parent.type.name === "codeBlock" ? "code" : "default";
+        const menuPosition = getContextMenuPosition(mouseEvent.clientX, mouseEvent.clientY);
 
         contextMenu.value = {
           visible: true,
-          x: Math.min(mouseEvent.clientX, window.innerWidth - 260),
-          y: Math.min(mouseEvent.clientY, window.innerHeight - 360),
+          x: menuPosition.x,
+          y: menuPosition.y,
           mode,
           inTable: Boolean(target.closest("table")),
+          flipX: menuPosition.flipX,
+          flipY: menuPosition.flipY,
         };
         return true;
       },
@@ -2263,7 +2279,7 @@ function updateTableControl(view = editor.value?.view, explicitTable?: HTMLTable
   }
   const rect = active.table.getBoundingClientRect();
   const shellTop = editorShell.value?.getBoundingClientRect().top ?? 0;
-  const width = 288;
+  const width = 160;
   const nextRows = active.rows;
   const nextColumns = active.columns;
   const activeColumn = explicitCell?.cellIndex ?? getCurrentTableCell()?.cellIndex ?? tableControl.value.activeColumn;
@@ -2914,6 +2930,20 @@ function imageInsertPositionFromEventDetail(detail: ImageInsertDetail | undefine
   return view.posAtCoords({ left: detail.position.x, top: detail.position.y })?.pos ?? fallback;
 }
 
+function getContextMenuPosition(clientX: number, clientY: number) {
+  const margin = 8;
+  const menuWidth = 280;
+  const menuHeight = 390;
+  const maxX = Math.max(margin, window.innerWidth - menuWidth - margin);
+  const maxY = Math.max(margin, window.innerHeight - menuHeight - margin);
+  return {
+    x: Math.min(Math.max(clientX, margin), maxX),
+    y: Math.min(Math.max(clientY, margin), maxY),
+    flipX: clientX > window.innerWidth - 320,
+    flipY: clientY > window.innerHeight - 300,
+  };
+}
+
 function hideContextMenu() {
   contextMenu.value.visible = false;
 }
@@ -2924,6 +2954,7 @@ function handleEditorShellClick(event?: MouseEvent) {
   const target = event?.target instanceof HTMLElement ? event.target : null;
   const table = target?.closest("table") as HTMLTableElement | null;
   if (table) {
+    closeTablePopovers();
     const cell = target?.closest("td,th") as HTMLTableCellElement | null;
     updateTableControl(editor.value?.view, table, cell);
     return;
@@ -2940,6 +2971,7 @@ function handleDocumentTablePointerDown(event: PointerEvent) {
   const view = editor.value?.view;
   const table = target.closest("table") as HTMLTableElement | null;
   if (!view || !table || !view.dom.contains(table)) return;
+  closeTablePopovers();
   const cell = target.closest("td,th") as HTMLTableCellElement | null;
   updateTableControl(view, table, cell);
   window.requestAnimationFrame(() => updateTableControl(view, table, cell));
@@ -3220,6 +3252,43 @@ function runTableCommand(commandName: string) {
   }
 }
 
+function insertTableRowAfterAndFocusFirstCell(view: any) {
+  const activeEditor = editor.value as any;
+  const table = getCurrentTableElement();
+  const activeCell = getCurrentTableCell();
+  if (!activeEditor || !table || !activeCell || !view.dom.contains(table)) return false;
+
+  const row = activeCell.parentElement as HTMLTableRowElement | null;
+  const rowIndex = row ? Array.from(table.rows).indexOf(row) : -1;
+  if (rowIndex < 0) return false;
+
+  const inserted = activeEditor.chain().focus().addRowAfter().run();
+  if (!inserted) return false;
+
+  window.setTimeout(() => {
+    const nextTable = getCurrentTableElement() || table;
+    const nextRow = nextTable.rows[rowIndex + 1];
+    const firstCell = nextRow?.cells[0] as HTMLTableCellElement | undefined;
+    if (!firstCell) return;
+
+    try {
+      const pos = activeEditor.view.posAtDOM(firstCell, 0);
+      const selectionPos = Math.min(pos + 2, activeEditor.state.doc.content.size);
+      activeEditor.view.dispatch(
+        activeEditor.state.tr
+          .setSelection(TextSelection.near(activeEditor.state.doc.resolve(selectionPos), 1))
+          .scrollIntoView(),
+      );
+      activeEditor.view.focus();
+      updateTableControl(activeEditor.view, nextTable, firstCell);
+    } catch {
+      updateTableControl(activeEditor.view);
+    }
+  }, 0);
+
+  return true;
+}
+
 function copyCurrentTable() {
   const table = getCurrentTableElement();
   if (!table) return;
@@ -3348,19 +3417,13 @@ function getCurrentTableCell() {
 function replaceCurrentTableFromDom(table: HTMLTableElement) {
   const activeEditor = editor.value;
   if (!activeEditor) return;
-  let pos = -1;
-  try {
-    if (table.isConnected) pos = activeEditor.view.posAtDOM(table, 0);
-  } catch {
-    pos = -1;
-  }
-  if (pos < 0) {
-    const info = getSelectedTableInfo(activeEditor.view);
-    if (!info) return;
-    pos = info.pos;
-  }
-  const node = activeEditor.state.doc.nodeAt(pos);
-  if (!node) return;
+  const resolved = table.isConnected
+    ? resolveTableNodeFromDom(activeEditor.view, table, getCurrentTableCell())
+    : null;
+  const fallback = resolved ? null : getSelectedTableInfo(activeEditor.view);
+  const pos = resolved?.pos ?? fallback?.pos;
+  const node = resolved?.node ?? fallback?.node;
+  if (typeof pos !== "number" || !node) return;
   (activeEditor as any).commands.insertContentAt({ from: pos, to: pos + node.nodeSize }, table.outerHTML);
 }
 
@@ -4053,6 +4116,25 @@ function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: n
   return tr.setStoredMarks([]);
 }
 
+function convertMarkdownPipeTable(view: any) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return false;
+  const { state } = view;
+  if (!state.selection.empty) return false;
+  const { $from } = state.selection;
+  const node = $from.parent;
+  if (!node?.isTextblock || node.type.name === "codeBlock") return false;
+
+  const html = markdownPipeRowToTableHtml(node.textContent);
+  if (!html) return false;
+
+  const from = $from.before();
+  const to = $from.after();
+  (activeEditor as any).commands.insertContentAt({ from, to }, html);
+  window.setTimeout(() => updateTableControl(view), 0);
+  return true;
+}
+
 function convertBlockquoteMarkdown(
   state: any,
   options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean } = {},
@@ -4495,6 +4577,7 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
     <div
       v-if="contextMenu.visible"
       class="lm-context-menu"
+      :class="{ 'lm-context-menu-left': contextMenu.flipX, 'lm-context-menu-up': contextMenu.flipY }"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       @click.stop
       @mousedown.prevent
