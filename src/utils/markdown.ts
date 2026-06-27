@@ -94,7 +94,7 @@ export function buildExportHtml(
     blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid var(--lm-border); color: var(--lm-muted); }
     code { font-family: var(--lm-editor-code-font-family); }
     code:not(pre code) { border-radius: 5px; background: var(--lm-code-bg); color: var(--lm-code-text); padding: 0.12em 0.34em; font-size: 0.92em; }
-    pre { overflow-x: hidden; margin: 1em 0; padding: 16px; border: 1px solid var(--lm-code-border); border-radius: 8px; background: var(--lm-surface-muted); color: var(--lm-code-text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; page-break-inside: avoid; }
+    pre { overflow-x: hidden; margin: 1em 0; padding: 16px; border: 1px solid var(--lm-code-border); border-radius: 8px; background: var(--lm-surface-muted); color: var(--lm-code-text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; break-inside: auto; page-break-inside: auto; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     pre code { display: block; padding: 0; background: transparent; color: inherit; font-size: 0.9em; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
     .hljs { background: transparent; color: var(--lm-code-text); }
     .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-tag, .hljs-doctag { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
@@ -106,8 +106,9 @@ export function buildExportHtml(
     .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
     .hljs-type, .hljs-class .hljs-title { color: ${isDark ? "#85e89d" : "#22863a"}; }
     img { max-width: 100%; height: auto; vertical-align: middle; }
-    table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto; overflow-wrap: anywhere; font-size: 0.95em; }
+    table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto; overflow-wrap: anywhere; font-size: 0.95em; break-inside: auto; page-break-inside: auto; }
     th, td { max-width: min(52rem, 100%); border: 1px solid var(--lm-border); padding: 8px 10px; overflow-wrap: anywhere; word-break: break-word; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
     th { background: var(--lm-table-header-bg); font-weight: 650; }
     tr:nth-child(2n) { background: var(--lm-table-stripe-bg); }
     mark { border-radius: 3px; background: var(--lm-mark-bg); color: inherit; padding: 0.05em 0.16em; }
@@ -136,7 +137,10 @@ export function buildExportHtml(
       main.markdown-preview { max-width: none; padding: 0; }
       pre { overflow: visible; white-space: pre-wrap; }
       pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
-      h1, h2, h3, h4, h5, h6, pre, blockquote, table, .markdown-alert, .mermaid-export, .katex-display, .katex-display-export { break-inside: avoid; }
+      table, pre { break-inside: auto; page-break-inside: auto; }
+      thead { display: table-header-group; }
+      tr { break-inside: avoid; page-break-inside: avoid; }
+      h1, h2, h3, h4, h5, h6, blockquote, .markdown-alert, .mermaid-export, .katex-display, .katex-display-export { break-inside: avoid; }
       a { color: inherit; }
     }
     ${options.extraStyles ?? ""}
