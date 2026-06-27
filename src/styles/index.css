@@ -1220,6 +1220,7 @@ sub {
 }
 
 .ProseMirror .tableWrapper {
+  width: 100%;
   max-width: 100%;
   overflow-x: hidden;
 }
@@ -2209,7 +2210,7 @@ sub {
 .markdown-preview table {
   border-collapse: collapse;
   display: table;
-  width: max-content;
+  width: 100%;
   max-width: 100%;
   table-layout: auto;
   overflow-x: hidden;
@@ -2236,7 +2237,7 @@ sub {
 .markdown-preview table td {
   border: 1px solid #dfe2e5;
   padding: 6px 13px;
-  max-width: min(36rem, 72vw);
+  max-width: min(52rem, 100%);
   overflow-wrap: anywhere;
   word-break: break-word;
 }

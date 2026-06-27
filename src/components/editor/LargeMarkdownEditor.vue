@@ -526,7 +526,7 @@ function handleJumpLine(event: CustomEvent<number>) {
 
 .large-doc-render :deep(table) {
   display: table;
-  width: max-content;
+  width: 100%;
   max-width: 100%;
   table-layout: auto;
   overflow-x: hidden;
@@ -534,7 +534,7 @@ function handleJumpLine(event: CustomEvent<number>) {
 
 .large-doc-render :deep(th),
 .large-doc-render :deep(td) {
-  max-width: min(36rem, 72vw);
+  max-width: min(52rem, 100%);
   overflow-wrap: anywhere;
   word-break: break-word;
 }

@@ -106,8 +106,8 @@ export function buildExportHtml(
     .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
     .hljs-type, .hljs-class .hljs-title { color: ${isDark ? "#85e89d" : "#22863a"}; }
     img { max-width: 100%; height: auto; vertical-align: middle; }
-    table { width: max-content; max-width: 100%; border-collapse: collapse; table-layout: auto; overflow-wrap: anywhere; font-size: 0.95em; }
-    th, td { max-width: min(36rem, 72vw); border: 1px solid var(--lm-border); padding: 8px 10px; overflow-wrap: anywhere; word-break: break-word; }
+    table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto; overflow-wrap: anywhere; font-size: 0.95em; }
+    th, td { max-width: min(52rem, 100%); border: 1px solid var(--lm-border); padding: 8px 10px; overflow-wrap: anywhere; word-break: break-word; }
     th { background: var(--lm-table-header-bg); font-weight: 650; }
     tr:nth-child(2n) { background: var(--lm-table-stripe-bg); }
     mark { border-radius: 3px; background: var(--lm-mark-bg); color: inherit; padding: 0.05em 0.16em; }

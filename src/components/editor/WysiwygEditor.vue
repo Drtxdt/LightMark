@@ -2480,16 +2480,34 @@ function applyTableAlignment(align: "left" | "center" | "right") {
   const activeCell = getCurrentTableCell();
   const targetColumn = activeCell?.cellIndex ?? tableControl.value.activeColumn;
   if (!allColumns && targetColumn < 0) return;
-  Array.from(info.table.rows).forEach((row) => {
-    Array.from(row.cells).forEach((cell, index) => {
-      if (allColumns || index === targetColumn) {
-        cell.style.textAlign = align;
-        cell.setAttribute("align", align);
-      }
-    });
+
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  let tr = activeEditor.state.tr;
+  tableCellPositions(info.pos, info.node).forEach(({ pos, columnIndex, node }) => {
+    if (!allColumns && columnIndex !== targetColumn) return;
+    tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, textAlign: align }, node.marks);
   });
-  replaceCurrentTableFromDom(info.table);
+  if (tr.docChanged) activeEditor.view.dispatch(tr.scrollIntoView());
   window.setTimeout(() => updateTableControl(), 0);
+}
+
+function tableCellPositions(tablePos: number, tableNode: any) {
+  const cells: Array<{ pos: number; rowIndex: number; columnIndex: number; node: any }> = [];
+  let rowPos = tablePos + 1;
+  for (let rowIndex = 0; rowIndex < tableNode.childCount; rowIndex += 1) {
+    const row = tableNode.child(rowIndex);
+    let cellPos = rowPos + 1;
+    for (let columnIndex = 0; columnIndex < row.childCount; columnIndex += 1) {
+      const cell = row.child(columnIndex);
+      if (cell?.type?.name === "tableCell" || cell?.type?.name === "tableHeader") {
+        cells.push({ pos: cellPos, rowIndex, columnIndex, node: cell });
+      }
+      cellPos += cell.nodeSize;
+    }
+    rowPos += row.nodeSize;
+  }
+  return cells;
 }
 
 function isWholeTableSelected(info: { pos: number; node: any }) {
