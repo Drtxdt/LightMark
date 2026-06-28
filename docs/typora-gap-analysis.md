@@ -18,6 +18,7 @@ LightMark 当前已经支持或基本支持以下能力，因此本文不再重�
 - 普通文件保存前冲突检测、保存时删除路径保护、临时文件安全写入。
 - 外部文件变更非阻塞提示、删除提示、标签状态标记。
 - 标签拖拽排序、关闭其他/关闭全部、最近关闭标签恢复。
+- 快速打开文件 `Ctrl+P`、最近文件回退、前往指定行 MVP、文件级前进/后退导航栈。
 
 ## 调研来源
 
@@ -114,10 +115,10 @@ LightMark 已经具备基础数学公式能力：行内/块级公式、KaTeX 渲
 
 | ✓ | 任务 | 说明 |
 |---|------|------|
-| | 快速打开文件 | `Ctrl+P` 模糊搜索工作区文件并切换 |
-| | 前往指定行 | `Ctrl+G` 输入行号跳转 |
+| ✓ | 快速打开文件 | `Ctrl+P` 模糊搜索工作区文件并切换；拼音/索引增强后续再做 |
+| ✓ | 前往指定行 | `Ctrl+G` 输入行号跳转，源码模式和大文件模式优先可用 |
 | | 前往指定标题 | 标题列表弹窗，支持搜索与键盘选择 |
-| | 前进/后退导航 | Bear 有笔记历史导航；LightMark 应支持跳转栈 |
+| ✓ | 前进/后退导航 | 已支持文件级跳转栈；标题/搜索/Wiki Links 的精确位置后续接入 |
 | | 面包屑导航 | 状态栏显示当前光标所在章节路径 |
 | | 保存的搜索 | 搜索条件保存为智能文件夹，接近 Obsidian/Bear 的知识库检索体验 |
 
@@ -305,9 +306,9 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 
 ### P0
 
-1. 快速打开文件 `Ctrl+P` + 前进/后退导航。
-2. 多标签页增强：光标与滚动位置恢复、多窗口/分屏。
-3. 文件可靠性后续：冲突副本、重命名重新定位、原生 watcher/diff。
+1. 多标签页增强：光标与滚动位置恢复、多窗口/分屏。
+2. 文件可靠性后续：冲突副本、重命名重新定位、原生 watcher/diff。
+3. 导航增强：标题弹窗、搜索结果跳转入栈、Wiki Links 跳转入栈。
 
 ### P1
 
@@ -340,23 +341,99 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 
 ## 下一步建议
 
-下一步优先级最高是 **快速打开文件 `Ctrl+P` 与前进/后退导航**。
+快速打开文件 `Ctrl+P` 与前进/后退导航第一阶段已经完成。下一步优先级最高是 **光标与滚动位置恢复**。
 
 原因：
 
-1. 文件可靠性和多标签基础已经补齐，下一瓶颈是工作区内快速定位和跨文档跳转效率。
-2. `Ctrl+P` 是 VS Code、Obsidian、Typora 用户都熟悉的高频入口，比继续堆复杂功能更直接提升日常写作速度。
-3. 前进/后退导航会成为 Wiki Links、反链、标题跳转、搜索结果跳转的基础设施，越早建立越能减少后续返工。
+1. 快速打开和文件级导航已经跑通，继续补光标/滚动恢复能让后退、前进、会话恢复真正回到用户离开的位置。
+2. 该能力会直接改善多标签、快速打开、行跳转和后续标题跳转的连续体验。
+3. 光标/滚动位置也是分屏、多窗口和搜索结果跳转复用的基础设施，适合在继续扩展导航入口前先补齐。
 
-建议第一阶段只做：
+建议第一阶段只做 **快速打开与导航基础设施 MVP**，不要一开始做全文索引、拼音分词或跨仓库搜索。当前代码已经有 `list_markdown_files`、`recentFiles`、`CommandPalette.vue`、`lightmark:jump-line` 事件和全局快捷键绑定，下一步应优先复用这些能力，把高频路径跑通。
 
 | ✓ | 任务 | 说明 |
 |---|------|------|
-| | 快速打开文件 | `Ctrl+P` 打开工作区文件搜索弹窗，支持拼音/模糊匹配可后续增强 |
-| | 最近文件入口 | 无工作区或搜索为空时显示最近文件，复用现有 recentFiles |
-| | 前进/后退导航栈 | 文件打开、标题跳转、搜索跳转时记录位置，支持 `Alt+←` / `Alt+→` |
-| | 前往指定行 MVP | `Ctrl+G` 输入行号，在源码模式和大文件模式优先可用 |
-| | 文档同步更新 | 将已完成的外部变更提示、多标签页增强从 gap 中移出 |
+| ✓ | 快速打开文件 | `Ctrl+P` 打开工作区文件搜索弹窗；第一阶段使用大小写不敏感子序列匹配，拼音增强后续再做 |
+| ✓ | 最近文件入口 | 无工作区或工作区搜索为空时显示最近文件，复用现有 recentFiles |
+| ✓ | 前进/后退导航栈 | 文件打开和行跳转前记录文件级位置，支持 `Alt+←` / `Alt+→`；精确光标恢复后续增强 |
+| ✓ | 前往指定行 MVP | `Ctrl+G` 输入行号，在源码模式和大文件模式可用；所见即所得模式提示切换源码 |
+| ✓ | 文档同步更新 | 将快速打开与导航基础设施第一阶段完成状态写回本文 |
+
+### 下一阶段实施计划：快速打开与导航基础设施
+
+目标：让用户可以用键盘在工作区、最近文件和当前文档位置之间快速移动，先覆盖日常写作最常用的 `Ctrl+P`、`Ctrl+G`、`Alt+←`、`Alt+→`。
+
+#### 文件边界
+
+| 文件 | 计划职责 |
+|------|----------|
+| `src/types.ts` | 增加快速打开候选、导航位置、导航栈状态类型 |
+| `src/stores/appStore.ts` | 维护快速打开候选数据、导航历史、跳转前后记录；复用 `openFile`、`recentFiles`、`fileTree` |
+| `src/components/command/QuickOpenPalette.vue` | 新增 `Ctrl+P` 文件快速打开弹窗，支持输入过滤、上下选择、回车打开、Esc 关闭 |
+| `src/components/command/GoToLinePalette.vue` | 新增 `Ctrl+G` 行号输入弹窗，提交后派发跳行事件 |
+| `src/App.vue` | 绑定 `Ctrl+P`、`Ctrl+G`、`Alt+ArrowLeft`、`Alt+ArrowRight`，并挂载两个弹窗 |
+| `src/components/editor/SourceEditor.vue` | 监听 `lightmark:jump-line`，源码模式按行号定位并聚焦 |
+| `src/components/editor/LargeMarkdownEditor.vue` | 复用现有 `lightmark:jump-line`，确认大文件模式行号跳转行为稳定 |
+| `src/components/layout/Outline.vue` 与搜索跳转入口 | 后续把标题跳转、搜索结果跳转接入导航栈；第一阶段只预留 API |
+| `docs/typora-gap-analysis.md` | 阶段完成后同步勾选任务、调整下一优先级 |
+
+#### 任务 1：快速打开文件 `Ctrl+P`
+
+1. 在 `appStore` 增加 `quickOpenOpen`、`quickOpenQuery`、`quickOpenActiveIndex` 状态，以及 `openQuickOpen()`、`closeQuickOpen()`、`quickOpenCandidates`。
+2. 候选来源优先使用 `fileTree` 扁平化结果；没有工作区或结果为空时回退到 `recentFiles`。
+3. MVP 匹配规则采用大小写不敏感的子序列匹配：`abc` 可匹配 `a/b/c.md`，同时文件名命中优先于完整路径命中。
+4. 新建 `QuickOpenPalette.vue`，交互保持接近现有 `CommandPalette.vue`：输入自动聚焦，`ArrowUp/Down` 切换，`Enter` 打开，`Esc` 关闭。
+5. 打开文件时调用现有 `openFile(path)`，避免重复实现大文件识别、草稿检查、最近文件更新和会话保存。
+
+验收：
+
+- 有工作区时 `Ctrl+P` 能搜索并打开 `.md` / `.markdown` 文件。
+- 无工作区时 `Ctrl+P` 显示最近文件。
+- 当前已打开文件再次选择时切换到既有标签，而不是重复打开。
+- `pnpm build` 通过。
+
+#### 任务 2：前往指定行 `Ctrl+G`
+
+1. 在 `appStore` 增加 `goToLineOpen` 和 `openGoToLine()` / `closeGoToLine()`。
+2. 新建 `GoToLinePalette.vue`，只接受正整数；非法输入不跳转并保留弹窗。
+3. 提交时派发 `lightmark:jump-line`，统一使用 1-based UI 输入、0-based 内部事件值。
+4. `SourceEditor.vue` 增加行号跳转监听：用 CodeMirror `doc.line(n)` 定位，滚动到中间并聚焦。
+5. `LargeMarkdownEditor.vue` 已有 `lightmark:jump-line` 监听，补一轮手动验证；如发现 0/1-based 偏差，只在事件入口做统一转换。
+
+验收：
+
+- 源码模式输入 `1` 跳到第一行。
+- 大文件模式输入有效行号时滚动到附近区块。
+- 所见即所得模式第一阶段可提示“请切换源码模式或大文件模式使用行跳转”，不强行做复杂映射。
+- `pnpm build` 通过。
+
+#### 任务 3：前进/后退导航栈
+
+1. 在 `types.ts` 增加 `NavigationLocation`，字段为 `path`、`documentMode`、`editorMode`、`line?`、`anchor?`、`recordedAt`。
+2. 在 `appStore` 增加 `navigationBackStack`、`navigationForwardStack`、`recordNavigationLocation()`、`goBackNavigation()`、`goForwardNavigation()`。
+3. 第一阶段记录文件级位置：`openFile(path)` 切换到不同文件前记录当前文件；从栈恢复时调用 `openFile(path)` 并避免再次压栈。
+4. `Ctrl+G` 跳转前记录当前位置，后退时回到跳转前文件；行内精确光标恢复留到“光标与滚动位置恢复”任务统一处理。
+5. 绑定 `Alt+ArrowLeft` / `Alt+ArrowRight`，栈为空时不报错，只更新状态栏提示。
+
+验收：
+
+- A 文件打开 B 文件后，`Alt+←` 回到 A，`Alt+→` 回到 B。
+- 后退后打开 C 文件会清空 forward 栈。
+- 栈恢复不会制造重复标签。
+- `pnpm build` 通过。
+
+#### 任务 4：导航入口统一与文档同步
+
+1. 在 `CommandPalette.vue` 增加“快速打开文件”和“前往指定行”命令，方便用户从 `Ctrl+Shift+P` 发现功能。
+2. 快捷键绑定集中在 `App.vue`，避免各弹窗组件重复监听全局快捷键。
+3. 第一阶段不接入标题跳转、搜索结果跳转、Wiki Links；只在 `appStore` 暴露记录导航的函数，为后续入口复用。
+4. 实现后更新本节任务表：勾选快速打开、最近文件入口、前往指定行 MVP、前进/后退导航栈；下一步转向“光标与滚动位置恢复”。（已完成）
+
+验收：
+
+- `pnpm build` 通过。
+- 手动验证快捷键互不冲突：`Ctrl+P` 不打开命令面板，`Ctrl+Shift+P` 仍打开命令面板，`Ctrl+F` 仍打开查找。
+- 文档已记录完成项和剩余风险。
 
 如果当前阶段决定优先打磨数学公式，建议先做 **数学公式专项第一阶段**：
 

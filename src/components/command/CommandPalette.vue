@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { appStore, openFile, openWorkspace, saveCurrentFile, switchMode } from "../../stores/appStore";
+import { appStore, openFile, openGoToLine, openQuickOpen, openWorkspace, saveCurrentFile, switchMode } from "../../stores/appStore";
 import { pluginCommands } from "../../plugins/registry";
 import { exportTargets, runDocumentExport } from "../../utils/export";
 
 const query = ref("");
 
 const coreCommands = [
+  { name: "快速打开文件", handler: () => openQuickOpen() },
+  { name: "前往指定行", handler: () => openGoToLine() },
   { name: "打开文件", handler: () => openFile() },
   { name: "打开文件夹", handler: () => openWorkspace() },
   { name: "保存", handler: () => saveCurrentFile() },

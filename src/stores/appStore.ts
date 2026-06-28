@@ -20,7 +20,9 @@ import type {
   FileSnapshot,
   LargeFileSession,
   LargeFileState,
+  NavigationLocation,
   PendingModeCursor,
+  QuickOpenCandidate,
   SessionRestoreState,
   SessionTabState,
   TextEdit,
@@ -39,6 +41,12 @@ export const appStore = reactive({
   tabs: [] as DocumentTab[],
   activeTabId: "",
   closedTabs: [] as ClosedTabRecord[],
+  quickOpenOpen: false,
+  quickOpenQuery: "",
+  quickOpenActiveIndex: 0,
+  goToLineOpen: false,
+  navigationBackStack: [] as NavigationLocation[],
+  navigationForwardStack: [] as NavigationLocation[],
   recentFiles: [] as string[],
   theme: "light" as ThemeMode,
   activeTheme: "light" as Exclude<ThemeMode, "system">,
@@ -63,6 +71,18 @@ export const currentFileName = computed(() => {
   if (tab) return tab.name;
   if (!appStore.currentFilePath) return "未命名";
   return appStore.currentFilePath.split(/[\\/]/).pop() || appStore.currentFilePath;
+});
+
+export const quickOpenCandidates = computed(() => {
+  const query = appStore.quickOpenQuery.trim();
+  const workspaceFiles = flattenFileNodes(appStore.fileTree).map((node) => candidateFromPath(node.path, "workspace"));
+  const recentFiles = appStore.recentFiles.map((path) => candidateFromPath(path, "recent"));
+  const workspaceMatches = filterQuickOpenCandidates(workspaceFiles, query);
+  if (appStore.currentWorkspace && workspaceFiles.length > 0 && workspaceMatches.length > 0) {
+    return workspaceMatches;
+  }
+  const recentMatches = filterQuickOpenCandidates(recentFiles, query);
+  return recentMatches.length > 0 || query ? recentMatches : recentFiles;
 });
 
 export function setContent(content: string, dirty = true) {
@@ -116,9 +136,13 @@ export async function openWorkspace(folder?: string) {
   await persistConfig();
 }
 
-export async function openFile(path?: string) {
+export async function openFile(path?: string, options: { recordNavigation?: boolean } = {}) {
   const selected = path ?? (await invoke<string | null>("open_file_dialog"));
   if (!selected) return;
+  const shouldRecordNavigation = options.recordNavigation !== false;
+  if (shouldRecordNavigation) {
+    recordCurrentNavigationBeforeOpening(selected);
+  }
   await flushCurrentDraft();
   syncActiveTabFromProjection();
   const existing = findFileTab(selected);
@@ -169,6 +193,69 @@ export async function openFile(path?: string) {
   rememberRecentFile(selected);
   await checkDraftForOpenedFile(selected);
   await persistConfig();
+}
+
+export function openQuickOpen() {
+  appStore.quickOpenQuery = "";
+  appStore.quickOpenActiveIndex = 0;
+  appStore.quickOpenOpen = true;
+}
+
+export function closeQuickOpen() {
+  appStore.quickOpenOpen = false;
+}
+
+export function openGoToLine() {
+  appStore.goToLineOpen = true;
+}
+
+export function closeGoToLine() {
+  appStore.goToLineOpen = false;
+}
+
+export function recordNavigationLocation(location?: Partial<NavigationLocation>) {
+  const current = currentNavigationLocation(location);
+  if (!current) return;
+  pushNavigationLocation(appStore.navigationBackStack, current);
+  appStore.navigationForwardStack = [];
+}
+
+export async function goBackNavigation() {
+  const target = appStore.navigationBackStack.pop();
+  if (!target) {
+    appStore.statusMessage = "没有可后退的位置";
+    return false;
+  }
+  const current = currentNavigationLocation();
+  try {
+    await openFile(target.path, { recordNavigation: false });
+    if (current) pushNavigationLocation(appStore.navigationForwardStack, current);
+    appStore.statusMessage = "";
+    return true;
+  } catch (error) {
+    appStore.navigationBackStack.push(target);
+    appStore.statusMessage = `无法后退到上一个位置：${error}`;
+    return false;
+  }
+}
+
+export async function goForwardNavigation() {
+  const target = appStore.navigationForwardStack.pop();
+  if (!target) {
+    appStore.statusMessage = "没有可前进的位置";
+    return false;
+  }
+  const current = currentNavigationLocation();
+  try {
+    await openFile(target.path, { recordNavigation: false });
+    if (current) pushNavigationLocation(appStore.navigationBackStack, current);
+    appStore.statusMessage = "";
+    return true;
+  } catch (error) {
+    appStore.navigationForwardStack.push(target);
+    appStore.statusMessage = `无法前进到下一个位置：${error}`;
+    return false;
+  }
 }
 
 export async function saveCurrentFile() {
@@ -1062,6 +1149,110 @@ function findFileTab(path: string) {
 
 function tabIdForPath(path: string) {
   return `file:${hashString(normalizePathKey(path))}`;
+}
+
+function flattenFileNodes(nodes: FileNode[]) {
+  const files: FileNode[] = [];
+  const walk = (items: FileNode[]) => {
+    for (const item of items) {
+      if (item.isDir) {
+        walk(item.children);
+      } else {
+        files.push(item);
+      }
+    }
+  };
+  walk(nodes);
+  return files;
+}
+
+function candidateFromPath(path: string, source: QuickOpenCandidate["source"]): QuickOpenCandidate {
+  return {
+    name: fileNameFromPath(path),
+    path,
+    source,
+    score: 0,
+  };
+}
+
+function filterQuickOpenCandidates(candidates: QuickOpenCandidate[], query: string) {
+  const normalizedQuery = normalizeQuickOpenText(query);
+  const unique = uniqueCandidates(candidates);
+  if (!normalizedQuery) return unique;
+  return unique
+    .map((candidate) => ({ ...candidate, score: scoreQuickOpenCandidate(candidate, normalizedQuery) }))
+    .filter((candidate) => Number.isFinite(candidate.score))
+    .sort((left, right) => left.score - right.score || left.name.localeCompare(right.name, "zh-Hans-CN"));
+}
+
+function uniqueCandidates(candidates: QuickOpenCandidate[]) {
+  const seen = new Set<string>();
+  const result: QuickOpenCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = normalizePathKey(candidate.path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function scoreQuickOpenCandidate(candidate: QuickOpenCandidate, query: string) {
+  const name = normalizeQuickOpenText(candidate.name);
+  const path = normalizeQuickOpenText(candidate.path);
+  const nameScore = subsequenceScore(name, query);
+  if (Number.isFinite(nameScore)) return nameScore;
+  const pathScore = subsequenceScore(path, query);
+  return Number.isFinite(pathScore) ? pathScore + 100 : Number.POSITIVE_INFINITY;
+}
+
+function subsequenceScore(value: string, query: string) {
+  let valueIndex = 0;
+  let score = 0;
+  let previousMatch = -1;
+  for (const char of query) {
+    const match = value.indexOf(char, valueIndex);
+    if (match < 0) return Number.POSITIVE_INFINITY;
+    score += match;
+    if (previousMatch >= 0) score += Math.max(0, match - previousMatch - 1);
+    previousMatch = match;
+    valueIndex = match + 1;
+  }
+  return score + value.length / 1000;
+}
+
+function normalizeQuickOpenText(value: string) {
+  return value.replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function recordCurrentNavigationBeforeOpening(nextPath: string) {
+  const current = currentNavigationLocation();
+  if (!current || isSamePath(current.path, nextPath)) return;
+  pushNavigationLocation(appStore.navigationBackStack, current);
+  appStore.navigationForwardStack = [];
+}
+
+function currentNavigationLocation(overrides: Partial<NavigationLocation> = {}): NavigationLocation | null {
+  if (!appStore.currentFilePath) return null;
+  return {
+    path: appStore.currentFilePath,
+    documentMode: appStore.documentMode,
+    editorMode: appStore.editorMode,
+    recordedAt: Date.now(),
+    ...overrides,
+  };
+}
+
+function pushNavigationLocation(stack: NavigationLocation[], location: NavigationLocation) {
+  const previous = stack[stack.length - 1];
+  if (previous && isSamePath(previous.path, location.path)) {
+    stack[stack.length - 1] = location;
+  } else {
+    stack.push(location);
+  }
+  if (stack.length > 100) {
+    stack.splice(0, stack.length - 100);
+  }
 }
 
 function isSamePath(left: string, right: string) {

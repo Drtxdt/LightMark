@@ -4,6 +4,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
+import GoToLinePalette from "./components/command/GoToLinePalette.vue";
+import QuickOpenPalette from "./components/command/QuickOpenPalette.vue";
 import AppDialog from "./components/dialog/AppDialog.vue";
 import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import WordCountPanel from "./components/plugin/WordCountPanel.vue";
@@ -15,7 +17,11 @@ import {
   currentFileName,
   ensureDefaultTab,
   getDirtyTabs,
+  goBackNavigation,
+  goForwardNavigation,
   loadConfig,
+  openGoToLine,
+  openQuickOpen,
   saveAllDirtyTabs,
   saveCurrentFile,
   showSaveFailure,
@@ -31,6 +37,10 @@ import { showDialog } from "./stores/dialogStore";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
+let unbindQuickOpen = () => {};
+let unbindGoToLine = () => {};
+let unbindNavigationBack = () => {};
+let unbindNavigationForward = () => {};
 let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
@@ -68,6 +78,18 @@ onMounted(async () => {
   unbindPalette = bindShortcut("ctrl+shift+p", () => {
     appStore.commandPaletteOpen = true;
   });
+  unbindQuickOpen = bindShortcut("ctrl+p", () => {
+    openQuickOpen();
+  });
+  unbindGoToLine = bindShortcut("ctrl+g", () => {
+    openGoToLine();
+  });
+  unbindNavigationBack = bindShortcut("alt+arrowleft", () => {
+    goBackNavigation().catch((error) => (appStore.statusMessage = String(error)));
+  });
+  unbindNavigationForward = bindShortcut("alt+arrowright", () => {
+    goForwardNavigation().catch((error) => (appStore.statusMessage = String(error)));
+  });
   unbindFind = bindShortcut("ctrl+f", () => {
     openFindPanel();
   });
@@ -96,6 +118,10 @@ onMounted(async () => {
 onUnmounted(() => {
   unbindSave();
   unbindPalette();
+  unbindQuickOpen();
+  unbindGoToLine();
+  unbindNavigationBack();
+  unbindNavigationForward();
   unbindFind();
   unbindPreventUiSelectAll();
   unwatchWindowChrome();
@@ -203,6 +229,8 @@ function handleGlobalImageDrop(event: DragEvent) {
 <template>
   <AppLayout />
   <CommandPalette v-if="appStore.commandPaletteOpen" />
+  <QuickOpenPalette v-if="appStore.quickOpenOpen" />
+  <GoToLinePalette v-if="appStore.goToLineOpen" />
   <SettingsDialog v-if="appStore.settingsOpen" />
   <WordCountPanel v-if="appStore.wordCountOpen" />
   <AppDialog />

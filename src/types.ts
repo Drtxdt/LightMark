@@ -43,6 +43,13 @@ export interface FileNode {
   children: FileNode[];
 }
 
+export interface QuickOpenCandidate {
+  name: string;
+  path: string;
+  source: "workspace" | "recent";
+  score: number;
+}
+
 export interface AppConfig {
   recentFiles: string[];
   theme?: ThemeMode;
@@ -67,6 +74,15 @@ export interface ClosedTabRecord {
   kind: Extract<DocumentTabKind, "normal" | "large">;
   editorMode: EditorMode;
   closedAt: number;
+}
+
+export interface NavigationLocation {
+  path: string;
+  documentMode: DocumentMode;
+  editorMode: EditorMode;
+  line?: number;
+  anchor?: number;
+  recordedAt: number;
 }
 
 export interface AppSettings {

@@ -231,6 +231,7 @@ onMounted(() => {
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
+  window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
 });
 
 watch(
@@ -249,6 +250,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
+  window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   view?.destroy();
   view = null;
 });
@@ -306,6 +308,17 @@ function handleFindCommand(event: CustomEvent<string>) {
     return;
   }
   refreshSourceFind();
+}
+
+function handleJumpLine(event: CustomEvent<number>) {
+  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  const targetLine = Math.max(1, Math.min(Math.floor(event.detail) + 1, view.state.doc.lines));
+  const line = view.state.doc.line(targetLine);
+  view.dispatch({
+    selection: { anchor: line.from },
+    effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+  });
+  view.focus();
 }
 
 function refreshSourceFind() {
