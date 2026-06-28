@@ -4,6 +4,7 @@ import { appStore } from "../../stores/appStore";
 import Sidebar from "./Sidebar.vue";
 import Toolbar from "./Toolbar.vue";
 import DocumentTabs from "./DocumentTabs.vue";
+import ExternalFileNotice from "./ExternalFileNotice.vue";
 import StatusBar from "./StatusBar.vue";
 import ExportStatusStrip from "./ExportStatusStrip.vue";
 import EditorShell from "../editor/EditorShell.vue";
@@ -50,6 +51,7 @@ function startResize(event: PointerEvent) {
       <main class="flex min-h-0 min-w-0 flex-col overflow-hidden bg-paper-50 dark:bg-paper-950">
         <DocumentTabs />
         <ExportStatusStrip />
+        <ExternalFileNotice />
         <FindReplacePanel v-if="findReplaceStore.open" />
         <EditorShell class="min-h-0 flex-1" />
       </main>

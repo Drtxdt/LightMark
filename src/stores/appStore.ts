@@ -9,6 +9,7 @@ import type {
   DocumentTab,
   DocumentMode,
   EditorMode,
+  ExternalFileState,
   ExportStatus,
   ExportTargetId,
   ImageInsertBehavior,
@@ -50,6 +51,10 @@ export const appStore = reactive({
   } as ExportStatus,
   statusMessage: "",
 });
+
+const EXTERNAL_FILE_CHECK_INTERVAL_MS = 10_000;
+let externalFileMonitorTimer = 0;
+let externalFileCheckInFlight = false;
 
 export const currentFileName = computed(() => {
   const tab = getActiveTab();
@@ -283,6 +288,7 @@ async function reloadActiveFileFromDisk(path: string) {
     tab.content = content;
     tab.isDirty = false;
     tab.fileSnapshot = snapshot;
+    clearTabExternalState(tab);
   }
   await clearActiveDraft();
   appStore.statusMessage = "已重载磁盘版本";
@@ -292,6 +298,7 @@ async function refreshActiveFileSnapshot() {
   const tab = getActiveTab();
   if (!tab || !appStore.currentFilePath) return;
   tab.fileSnapshot = await getFileSnapshot(appStore.currentFilePath);
+  clearTabExternalState(tab);
 }
 
 function getFileSnapshot(path: string) {
@@ -300,6 +307,107 @@ function getFileSnapshot(path: string) {
 
 function snapshotsMatch(left: FileSnapshot, right: FileSnapshot) {
   return left.exists === right.exists && left.mtime === right.mtime && left.size === right.size;
+}
+
+export function startExternalFileMonitor() {
+  stopExternalFileMonitor();
+  if (typeof window === "undefined") return;
+  externalFileMonitorTimer = window.setInterval(() => {
+    void checkOpenFileSnapshots();
+  }, EXTERNAL_FILE_CHECK_INTERVAL_MS);
+  window.addEventListener("focus", checkOpenFileSnapshotsOnEvent);
+  document.addEventListener("visibilitychange", checkOpenFileSnapshotsWhenVisible);
+  void checkOpenFileSnapshots();
+}
+
+export function stopExternalFileMonitor() {
+  if (externalFileMonitorTimer) {
+    window.clearInterval(externalFileMonitorTimer);
+    externalFileMonitorTimer = 0;
+  }
+  if (typeof window === "undefined") return;
+  window.removeEventListener("focus", checkOpenFileSnapshotsOnEvent);
+  document.removeEventListener("visibilitychange", checkOpenFileSnapshotsWhenVisible);
+}
+
+export async function checkOpenFileSnapshots() {
+  if (externalFileCheckInFlight) return;
+  externalFileCheckInFlight = true;
+  try {
+    for (const tab of appStore.tabs) {
+      if (tab.kind !== "normal" || !tab.path || !tab.fileSnapshot?.exists) continue;
+      const snapshot = await getFileSnapshot(tab.path).catch((): FileSnapshot => ({ exists: false }));
+      updateTabExternalState(tab, snapshot);
+    }
+  } finally {
+    externalFileCheckInFlight = false;
+  }
+}
+
+export async function reloadCurrentFileFromDisk() {
+  const tab = getActiveTab();
+  if (!tab?.path || tab.kind !== "normal") return;
+  await reloadActiveFileFromDisk(tab.path);
+  syncActiveTabFromProjection();
+  await persistConfig();
+}
+
+export async function saveCurrentFileAsExternalCopy() {
+  const tab = getActiveTab();
+  if (!tab?.path) return false;
+  if (!(await chooseSaveAsTarget(tab.path))) return false;
+  return await saveCurrentFile();
+}
+
+export function dismissCurrentExternalFileState() {
+  const tab = getActiveTab();
+  if (!tab) return;
+  dismissTabExternalState(tab);
+}
+
+function checkOpenFileSnapshotsOnEvent() {
+  void checkOpenFileSnapshots();
+}
+
+function checkOpenFileSnapshotsWhenVisible() {
+  if (document.visibilityState === "visible") void checkOpenFileSnapshots();
+}
+
+function updateTabExternalState(tab: DocumentTab, snapshot: FileSnapshot) {
+  const nextState = externalStateForSnapshot(tab.fileSnapshot, snapshot);
+  if (nextState === "clean") {
+    clearTabExternalState(tab);
+    return;
+  }
+  if (tab.externalDismissedKey === snapshotKey(snapshot)) return;
+  tab.externalState = nextState;
+  tab.externalSnapshot = snapshot;
+  tab.externalDetectedAt = Date.now();
+}
+
+function externalStateForSnapshot(baseline: FileSnapshot | undefined, current: FileSnapshot): ExternalFileState {
+  if (!baseline?.exists) return "clean";
+  if (!current.exists) return "deleted";
+  return snapshotsMatch(baseline, current) ? "clean" : "modified";
+}
+
+function clearTabExternalState(tab: DocumentTab) {
+  tab.externalState = "clean";
+  tab.externalSnapshot = undefined;
+  tab.externalDetectedAt = undefined;
+  tab.externalDismissedKey = undefined;
+}
+
+function snapshotKey(snapshot: FileSnapshot | undefined) {
+  if (!snapshot?.exists) return "missing";
+  return `${snapshot.mtime ?? "unknown"}:${snapshot.size ?? "unknown"}`;
+}
+
+function dismissTabExternalState(tab: DocumentTab) {
+  tab.externalDismissedKey = snapshotKey(tab.externalSnapshot);
+  tab.externalState = "clean";
+  tab.externalSnapshot = undefined;
+  tab.externalDetectedAt = undefined;
 }
 
 export function createUntitledTab(content = "", dirty = false) {
@@ -786,6 +894,7 @@ function createTab(input: {
     editorMode: input.editorMode,
     pendingModeCursor: null,
     fileSnapshot: input.fileSnapshot,
+    externalState: "clean",
     openedAt: now,
     lastActiveAt: input.lastActiveAt ?? now,
   } satisfies DocumentTab;
@@ -844,6 +953,7 @@ function retargetActiveTab(path: string) {
   tab.path = path;
   tab.name = fileNameFromPath(path);
   tab.fileSnapshot = undefined;
+  clearTabExternalState(tab);
   appStore.activeTabId = tab.id;
 }
 

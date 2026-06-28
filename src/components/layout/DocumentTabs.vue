@@ -8,6 +8,12 @@ function tabTitle(path: string) {
   return path || "未命名文档";
 }
 
+function externalTitle(state: string) {
+  if (state === "deleted") return "文件已被外部删除";
+  if (state === "modified") return "文件已被外部修改";
+  return "";
+}
+
 async function onClose(event: MouseEvent, tabId: string) {
   event.stopPropagation();
   await closeTab(tabId);
@@ -42,7 +48,14 @@ function createTab() {
       @click="activateTab(tab.id)"
       @auxclick="onAuxClick($event, tab.id)"
     >
-      <span v-if="tab.isDirty" class="h-1.5 w-1.5 flex-none rounded-full bg-amber-500" aria-label="未保存" />
+      <span
+        v-if="tab.externalState !== 'clean'"
+        class="h-1.5 w-1.5 flex-none rounded-full"
+        :class="tab.externalState === 'deleted' ? 'bg-red-500' : 'bg-sky-500'"
+        :aria-label="externalTitle(tab.externalState)"
+        :title="externalTitle(tab.externalState)"
+      />
+      <span v-else-if="tab.isDirty" class="h-1.5 w-1.5 flex-none rounded-full bg-amber-500" aria-label="未保存" />
       <span v-else class="h-1.5 w-1.5 flex-none rounded-full bg-transparent" />
       <span class="min-w-0 flex-1 truncate">{{ tab.name }}</span>
       <span v-if="tab.documentMode === 'large'" class="rounded bg-paper-200 px-1 py-0.5 text-[10px] text-ink-500 dark:bg-paper-800 dark:text-ink-300">

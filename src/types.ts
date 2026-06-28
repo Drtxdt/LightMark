@@ -2,6 +2,7 @@ export type EditorMode = "wysiwyg" | "source";
 export type ThemeMode = "light" | "dark" | "system";
 export type DocumentMode = "normal" | "large";
 export type DocumentTabKind = "normal" | "large" | "untitled";
+export type ExternalFileState = "clean" | "modified" | "deleted";
 export type ImageInsertBehavior = "reference" | "copyToAssets";
 export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
 export type ExportTargetKind = "native-html" | "native-image" | "native-pdf" | "pandoc";
@@ -315,6 +316,10 @@ export interface DocumentTab {
   editorMode: EditorMode;
   pendingModeCursor: PendingModeCursor | null;
   fileSnapshot?: FileSnapshot;
+  externalState: ExternalFileState;
+  externalSnapshot?: FileSnapshot;
+  externalDetectedAt?: number;
+  externalDismissedKey?: string;
   draftId?: string;
   openedAt: number;
   lastActiveAt: number;

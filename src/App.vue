@@ -19,6 +19,8 @@ import {
   saveAllDirtyTabs,
   saveCurrentFile,
   showSaveFailure,
+  startExternalFileMonitor,
+  stopExternalFileMonitor,
 } from "./stores/appStore";
 import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
@@ -44,6 +46,7 @@ onMounted(async () => {
   });
   applyTheme();
   startDraftAutosave();
+  startExternalFileMonitor();
   await recoverStartupDrafts();
   ensureDefaultTab();
   unwatchWindowChrome = watch(
@@ -98,6 +101,7 @@ onUnmounted(() => {
   unwatchWindowChrome();
   unwatchDraftAutosave();
   stopDraftAutosave();
+  stopExternalFileMonitor();
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);
