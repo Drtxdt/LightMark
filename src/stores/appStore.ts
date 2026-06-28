@@ -5,6 +5,7 @@ import { alertDialog, showDialog } from "./dialogStore";
 import type {
   AppConfig,
   AppSettings,
+  ClosedTabRecord,
   DirtyState,
   DocumentTab,
   DocumentMode,
@@ -37,6 +38,7 @@ export const appStore = reactive({
   editorMode: "wysiwyg" as EditorMode,
   tabs: [] as DocumentTab[],
   activeTabId: "",
+  closedTabs: [] as ClosedTabRecord[],
   recentFiles: [] as string[],
   theme: "light" as ThemeMode,
   activeTheme: "light" as Exclude<ThemeMode, "system">,
@@ -442,42 +444,74 @@ export async function activateTab(tabId: string) {
 }
 
 export async function closeTab(tabId: string) {
-  const tab = appStore.tabs.find((item) => item.id === tabId);
-  if (!tab) return;
-  if (tab.id !== appStore.activeTabId) {
-    await activateTab(tab.id);
-  } else {
-    syncActiveTabFromProjection();
-  }
-  if (appStore.isDirty) {
-    const action = await requestSaveDiscardCancel({
-      title: "关闭未保存的标签页？",
-      message: `“${currentFileName.value}”有未保存的修改。`,
-      saveLabel: "保存并关闭",
-      discardLabel: "不保存",
-    });
-    if (action === "cancel") return;
-    if (action === "save") {
-      try {
-        const saved = await saveCurrentFile();
-        if (!saved) return;
-      } catch (error) {
-        appStore.statusMessage = String(error);
-        await showSaveFailure(error);
-        return;
-      }
+  await closeTabInternal(tabId, { ensureDefault: true });
+  await persistConfig();
+}
+
+export async function closeOtherTabs(tabId: string) {
+  const keep = appStore.tabs.find((tab) => tab.id === tabId);
+  if (!keep) return;
+  const targets = appStore.tabs.filter((tab) => tab.id !== tabId).map((tab) => tab.id);
+  let interrupted = false;
+  for (const id of targets) {
+    const closed = await closeTabInternal(id, { ensureDefault: false, nextActiveId: tabId });
+    if (!closed) {
+      interrupted = true;
+      break;
     }
   }
-  const index = appStore.tabs.findIndex((item) => item.id === tab.id);
-  await closeLargeFileSession();
-  appStore.tabs.splice(index, 1);
+  if (!interrupted && appStore.tabs.some((tab) => tab.id === tabId)) {
+    await activateTab(tabId);
+  }
+  await persistConfig();
+}
+
+export async function closeAllTabs() {
+  for (const id of appStore.tabs.map((tab) => tab.id)) {
+    const closed = await closeTabInternal(id, { ensureDefault: false });
+    if (!closed) break;
+  }
   if (appStore.tabs.length === 0) {
     resetOpenDocument();
     ensureDefaultTab();
-  } else {
-    const next = appStore.tabs[Math.max(0, Math.min(index, appStore.tabs.length - 1))];
-    projectTab(next);
   }
+  await persistConfig();
+}
+
+export async function reopenLastClosedTab() {
+  while (appStore.closedTabs.length > 0) {
+    const record = appStore.closedTabs.shift();
+    if (!record?.path) continue;
+    const existing = findFileTab(record.path);
+    if (existing) {
+      await activateTab(existing.id);
+      await persistConfig();
+      return true;
+    }
+    try {
+      await openFile(record.path);
+      const tab = findFileTab(record.path);
+      if (tab) {
+        tab.editorMode = record.editorMode;
+        projectTab(tab);
+      }
+      await persistConfig();
+      return true;
+    } catch (error) {
+      appStore.statusMessage = `无法恢复最近关闭的标签：${error}`;
+    }
+  }
+  appStore.statusMessage = "没有可恢复的最近关闭标签";
+  return false;
+}
+
+export async function moveTab(tabId: string, targetIndex: number) {
+  syncActiveTabFromProjection();
+  const fromIndex = appStore.tabs.findIndex((tab) => tab.id === tabId);
+  if (fromIndex < 0) return;
+  const [tab] = appStore.tabs.splice(fromIndex, 1);
+  const nextIndex = Math.max(0, Math.min(targetIndex, appStore.tabs.length));
+  appStore.tabs.splice(nextIndex, 0, tab);
   await persistConfig();
 }
 
@@ -551,6 +585,67 @@ export async function applyLargeFileEdits(edits: TextEdit[]) {
   appStore.isDirty = state.isDirty;
   appStore.statusMessage = `待保存编辑：${state.pendingEditCount}`;
   syncActiveTabFromProjection();
+}
+
+async function closeTabInternal(
+  tabId: string,
+  options: { ensureDefault: boolean; nextActiveId?: string },
+) {
+  const tab = appStore.tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  if (tab.id !== appStore.activeTabId) {
+    await activateTab(tab.id);
+  } else {
+    syncActiveTabFromProjection();
+  }
+  if (appStore.isDirty) {
+    const action = await requestSaveDiscardCancel({
+      title: "关闭未保存的标签页？",
+      message: `“${currentFileName.value}”有未保存的修改。`,
+      saveLabel: "保存并关闭",
+      discardLabel: "不保存",
+    });
+    if (action === "cancel") return false;
+    if (action === "save") {
+      try {
+        const saved = await saveCurrentFile();
+        if (!saved) return false;
+      } catch (error) {
+        appStore.statusMessage = String(error);
+        await showSaveFailure(error);
+        return false;
+      }
+    }
+  }
+
+  const closingTab = getActiveTab();
+  const index = appStore.tabs.findIndex((item) => item.id === tabId);
+  if (index < 0 || !closingTab) return false;
+  rememberClosedTab(closingTab);
+  await closeLargeFileSession();
+  appStore.tabs.splice(index, 1);
+
+  if (appStore.tabs.length === 0) {
+    resetOpenDocument();
+    if (options.ensureDefault) ensureDefaultTab();
+    return true;
+  }
+
+  const preferred = options.nextActiveId ? appStore.tabs.find((item) => item.id === options.nextActiveId) : null;
+  const next = preferred ?? appStore.tabs[Math.max(0, Math.min(index, appStore.tabs.length - 1))];
+  projectTab(next);
+  return true;
+}
+
+function rememberClosedTab(tab: DocumentTab) {
+  if (!tab.path || (tab.kind !== "normal" && tab.kind !== "large")) return;
+  const record: ClosedTabRecord = {
+    path: tab.path,
+    kind: tab.kind === "large" ? "large" : "normal",
+    editorMode: tab.editorMode,
+    closedAt: Date.now(),
+  };
+  appStore.closedTabs = [record, ...appStore.closedTabs.filter((item) => !isSamePath(item.path, tab.path))].slice(0, 20);
 }
 
 export async function setTheme(theme: ThemeMode) {

@@ -62,6 +62,13 @@ export interface SessionTabState {
   lastActiveAt: number;
 }
 
+export interface ClosedTabRecord {
+  path: string;
+  kind: Extract<DocumentTabKind, "normal" | "large">;
+  editorMode: EditorMode;
+  closedAt: number;
+}
+
 export interface AppSettings {
   general: GeneralSettings;
   editor: EditorSettings;
