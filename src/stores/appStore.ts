@@ -15,6 +15,7 @@ import type {
   FileChunk,
   FileInfo,
   FileNode,
+  FileSnapshot,
   LargeFileSession,
   LargeFileState,
   PendingModeCursor,
@@ -143,6 +144,7 @@ export async function openFile(path?: string) {
     appStore.statusMessage = `大文件模式：${formatBytes(session.sizeBytes)}，${session.totalLines} 行`;
   } else {
     const content = await invoke<string>("read_text_file", { path: selected });
+    const fileSnapshot = await getFileSnapshot(selected);
     tab = createTab({
       path: selected,
       kind: "normal",
@@ -151,6 +153,7 @@ export async function openFile(path?: string) {
       editorMode: appStore.settings.editor.defaultMode,
       largeFile: null,
       isDirty: false,
+      fileSnapshot,
     });
     appStore.statusMessage = "";
   }
@@ -186,17 +189,117 @@ export async function saveCurrentFile() {
     appStore.currentFilePath = selected;
     retargetActiveTab(selected);
   }
+  const tab = getActiveTab();
+  if (!(await prepareNormalFileSave(tab))) return false;
   await invoke("write_text_file", {
     path: appStore.currentFilePath,
     content: appStore.currentContent,
   });
   appStore.isDirty = false;
+  await refreshActiveFileSnapshot();
   await clearActiveDraft();
   rememberRecentFile(appStore.currentFilePath);
   syncActiveTabFromProjection();
   await refreshFileTree();
   await persistConfig();
   return true;
+}
+
+async function prepareNormalFileSave(tab: DocumentTab | null) {
+  if (!tab || !appStore.currentFilePath || !tab.fileSnapshot?.exists) return true;
+  const currentSnapshot = await getFileSnapshot(appStore.currentFilePath);
+  if (snapshotsMatch(tab.fileSnapshot, currentSnapshot)) return true;
+
+  if (!currentSnapshot.exists) {
+    return await resolveDeletedFileBeforeSave();
+  }
+  return await resolveChangedFileBeforeSave(appStore.currentFilePath);
+}
+
+async function resolveDeletedFileBeforeSave() {
+  const result = await showDialog({
+    title: "文件已被外部删除",
+    message: "当前文件路径已经不存在。为避免误写入，请选择另存为，或取消保存。",
+    cancelId: "cancel",
+    defaultId: "saveAs",
+    tone: "danger",
+    buttons: [
+      { id: "cancel", label: "取消", variant: "secondary" },
+      { id: "saveAs", label: "另存为", variant: "primary" },
+    ],
+  });
+  if (result !== "saveAs") return false;
+  return await chooseSaveAsTarget();
+}
+
+async function resolveChangedFileBeforeSave(originalPath: string) {
+  const result = await showDialog({
+    title: "文件已在外部修改",
+    message: "磁盘上的文件已经被其他程序修改。直接保存会覆盖外部修改。",
+    cancelId: "cancel",
+    defaultId: "cancel",
+    tone: "danger",
+    buttons: [
+      { id: "cancel", label: "取消", variant: "secondary" },
+      { id: "reload", label: "重载磁盘版本", variant: "danger" },
+      { id: "saveAs", label: "另存为副本", variant: "primary" },
+    ],
+  });
+  if (result === "reload") {
+    await reloadActiveFileFromDisk(originalPath);
+    return false;
+  }
+  if (result === "saveAs") {
+    return await chooseSaveAsTarget(originalPath);
+  }
+  return false;
+}
+
+async function chooseSaveAsTarget(avoidPath?: string) {
+  const selected = await invoke<string | null>("save_markdown_file_dialog", {
+    defaultFileName: defaultMarkdownFileName(),
+  });
+  if (!selected) return false;
+  if (avoidPath && isSamePath(selected, avoidPath)) {
+    await alertDialog({
+      title: "请选择不同文件名",
+      message: "另存为副本不能使用已经发生外部修改的原文件路径。",
+      tone: "danger",
+    });
+    return false;
+  }
+  appStore.currentFilePath = selected;
+  retargetActiveTab(selected);
+  return true;
+}
+
+async function reloadActiveFileFromDisk(path: string) {
+  const content = await invoke<string>("read_text_file", { path });
+  const snapshot = await getFileSnapshot(path);
+  appStore.currentContent = content;
+  appStore.isDirty = false;
+  const tab = getActiveTab();
+  if (tab) {
+    tab.content = content;
+    tab.isDirty = false;
+    tab.fileSnapshot = snapshot;
+  }
+  await clearActiveDraft();
+  appStore.statusMessage = "已重载磁盘版本";
+}
+
+async function refreshActiveFileSnapshot() {
+  const tab = getActiveTab();
+  if (!tab || !appStore.currentFilePath) return;
+  tab.fileSnapshot = await getFileSnapshot(appStore.currentFilePath);
+}
+
+function getFileSnapshot(path: string) {
+  return invoke<FileSnapshot>("get_file_snapshot", { path });
+}
+
+function snapshotsMatch(left: FileSnapshot, right: FileSnapshot) {
+  return left.exists === right.exists && left.mtime === right.mtime && left.size === right.size;
 }
 
 export function createUntitledTab(content = "", dirty = false) {
@@ -612,6 +715,7 @@ async function restoreSession(session: SessionRestoreState | undefined) {
         );
       } else {
         const content = await invoke<string>("read_text_file", { path: item.path });
+        const fileSnapshot = await getFileSnapshot(item.path);
         restored.push(
           createTab({
             path: item.path,
@@ -622,6 +726,7 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             largeFile: null,
             isDirty: false,
             lastActiveAt: item.lastActiveAt,
+            fileSnapshot,
           }),
         );
       }
@@ -665,6 +770,7 @@ function createTab(input: {
   largeFile: LargeFileState | null;
   isDirty: boolean;
   lastActiveAt?: number;
+  fileSnapshot?: FileSnapshot;
 }) {
   const now = Date.now();
   const id = input.path ? tabIdForPath(input.path) : `untitled:${now}:${Math.random().toString(36).slice(2, 8)}`;
@@ -679,6 +785,7 @@ function createTab(input: {
     isDirty: input.isDirty,
     editorMode: input.editorMode,
     pendingModeCursor: null,
+    fileSnapshot: input.fileSnapshot,
     openedAt: now,
     lastActiveAt: input.lastActiveAt ?? now,
   } satisfies DocumentTab;
@@ -736,6 +843,7 @@ function retargetActiveTab(path: string) {
   tab.kind = "normal";
   tab.path = path;
   tab.name = fileNameFromPath(path);
+  tab.fileSnapshot = undefined;
   appStore.activeTabId = tab.id;
 }
 

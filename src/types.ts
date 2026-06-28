@@ -314,6 +314,7 @@ export interface DocumentTab {
   isDirty: boolean;
   editorMode: EditorMode;
   pendingModeCursor: PendingModeCursor | null;
+  fileSnapshot?: FileSnapshot;
   draftId?: string;
   openedAt: number;
   lastActiveAt: number;

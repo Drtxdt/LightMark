@@ -9,8 +9,8 @@ use regex::RegexBuilder;
 use rfd::FileDialog;
 
 use super::models::{
-    DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeOutlineItem, LargeFindMatch,
-    LargeFindOptions, LargeFindResult, TextEdit,
+    DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeFindMatch, LargeFindOptions,
+    LargeFindResult, LargeOutlineItem, TextEdit,
 };
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -44,7 +44,9 @@ pub fn open_folder_dialog() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn save_markdown_file_dialog(default_file_name: Option<String>) -> Result<Option<String>, String> {
+pub fn save_markdown_file_dialog(
+    default_file_name: Option<String>,
+) -> Result<Option<String>, String> {
     let file_name = default_file_name
         .as_deref()
         .filter(|value| !value.trim().is_empty())
@@ -162,10 +164,14 @@ pub fn apply_file_edits(session_id: String, edits: Vec<TextEdit>) -> Result<Dirt
         .get_mut(&session_id)
         .ok_or_else(|| "Large file session was not found.".to_string())?;
     for edit in edits {
-        session.edits.retain(|existing| !edits_overlap(existing, &edit));
+        session
+            .edits
+            .retain(|existing| !edits_overlap(existing, &edit));
         session.edits.push(edit);
     }
-    session.edits.sort_by_key(|edit| (edit.start_line, edit.start_column));
+    session
+        .edits
+        .sort_by_key(|edit| (edit.start_line, edit.start_column));
     Ok(DirtyState {
         is_dirty: !session.edits.is_empty(),
         pending_edit_count: session.edits.len(),
@@ -215,7 +221,8 @@ pub fn search_large_file(
     let mut total = 0_usize;
 
     for (line_index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|err| format!("Failed to scan {}: {err}", session.path.display()))?;
+        let line =
+            line.map_err(|err| format!("Failed to scan {}: {err}", session.path.display()))?;
         if line_index < start_line {
             continue;
         }
@@ -391,11 +398,37 @@ pub fn close_large_file(session_id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn write_text_file(path: String, content: String) -> Result<(), String> {
     let path = PathBuf::from(path);
+    write_text_file_safely(&path, &content)
+}
+
+fn write_text_file_safely(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create folder {}: {err}", parent.display()))?;
     }
-    fs::write(&path, content).map_err(|err| format!("Failed to write {}: {err}", path.display()))
+    let temp_path = path.with_extension(format!(
+        "{}.lightmark-tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("md")
+    ));
+    fs::write(&temp_path, content).map_err(|err| {
+        format!(
+            "Failed to write temporary file {}: {err}",
+            temp_path.display()
+        )
+    })?;
+    if path.exists() {
+        replace_file(path, &temp_path)
+    } else {
+        fs::rename(&temp_path, path).map_err(|err| {
+            format!(
+                "Failed to move {} to {}: {err}",
+                temp_path.display(),
+                path.display()
+            )
+        })
+    }
 }
 
 #[tauri::command]
@@ -414,11 +447,17 @@ pub fn save_asset_file(
 
     let safe_name = sanitize_asset_file_name(&file_name);
     let target = unique_asset_path(&assets_dir, &safe_name);
-    fs::write(&target, bytes).map_err(|err| format!("Failed to write {}: {err}", target.display()))?;
+    fs::write(&target, bytes)
+        .map_err(|err| format!("Failed to write {}: {err}", target.display()))?;
     target
         .strip_prefix(document_dir)
         .map(|path| path_to_string(path.to_path_buf()))
-        .map_err(|err| format!("Failed to build relative path for {}: {err}", target.display()))
+        .map_err(|err| {
+            format!(
+                "Failed to build relative path for {}: {err}",
+                target.display()
+            )
+        })
 }
 
 #[tauri::command]
@@ -445,7 +484,10 @@ pub fn image_paths_to_markdown(
                 return None;
             }
             let reference = if use_relative_path {
-                normalize_relative_reference(&relative_path(document_dir, &image_path), ensure_dot_slash)
+                normalize_relative_reference(
+                    &relative_path(document_dir, &image_path),
+                    ensure_dot_slash,
+                )
             } else {
                 path_to_string(image_path.clone())
             };
@@ -621,7 +663,7 @@ fn percent_encode_markdown_segment(segment: &str) -> String {
     let mut encoded = String::new();
     for byte in segment.as_bytes() {
         let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | ':' ) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | ':') {
             encoded.push(ch);
         } else {
             encoded.push_str(&format!("%{byte:02X}"));
@@ -680,7 +722,8 @@ fn path_to_string(path: PathBuf) -> String {
 }
 
 fn scan_line_offsets(path: &Path) -> Result<Vec<u64>, String> {
-    let file = File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let file =
+        File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut offsets = vec![0_u64];
     let mut position = 0_u64;
@@ -750,7 +793,14 @@ impl LargeMatcher {
                 normalized_query,
                 case_sensitive,
                 whole_word,
-            } => find_literal_line(line, line_index, query, normalized_query, *case_sensitive, *whole_word),
+            } => find_literal_line(
+                line,
+                line_index,
+                query,
+                normalized_query,
+                *case_sensitive,
+                *whole_word,
+            ),
             Self::Regex { regex, whole_word } => regex
                 .find_iter(line)
                 .filter(|item| item.start() < item.end())
@@ -802,7 +852,8 @@ fn collect_large_replace_edits(
     matcher: &LargeMatcher,
     replacement: &str,
 ) -> Result<Vec<TextEdit>, String> {
-    let file = File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let file =
+        File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
     let reader = BufReader::new(file);
     let mut edits = Vec::new();
 
@@ -870,7 +921,8 @@ fn is_word_char(value: Option<char>) -> bool {
 }
 
 fn scan_outline(path: &Path) -> Result<Vec<LargeOutlineItem>, String> {
-    let file = File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let file =
+        File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
     let reader = BufReader::new(file);
     let mut outline = Vec::new();
     for (line_index, line) in reader.lines().enumerate() {
@@ -958,4 +1010,36 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
     fs::remove_file(&backup)
         .map_err(|err| format!("Failed to remove backup {}: {err}", backup.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_text_file_safely;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn safe_text_write_replaces_target_and_cleans_temporary_files() {
+        let dir = unique_test_dir("safe-text-write");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+        fs::write(&path, "original").unwrap();
+
+        write_text_file_safely(&path, "updated").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "updated");
+        assert!(!path.with_extension("md.lightmark-tmp").exists());
+        assert!(!path.with_extension("md.lightmark-bak").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!("lightmark-{name}-{millis}"))
+    }
 }
