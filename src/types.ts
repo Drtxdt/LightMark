@@ -297,6 +297,13 @@ export interface FileSnapshot {
   size?: number;
 }
 
+export interface SimilarFileCandidate {
+  path: string;
+  name: string;
+  mtime?: number;
+  size: number;
+}
+
 export interface LargeFindOptions {
   caseSensitive: boolean;
   wholeWord: boolean;
@@ -341,6 +348,7 @@ export interface DocumentTab {
   fileSnapshot?: FileSnapshot;
   externalState: ExternalFileState;
   externalSnapshot?: FileSnapshot;
+  relocationCandidates?: SimilarFileCandidate[];
   externalDetectedAt?: number;
   externalDismissedKey?: string;
   draftId?: string;

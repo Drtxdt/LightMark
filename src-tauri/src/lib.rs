@@ -21,6 +21,7 @@ pub fn run() {
             commands::file::save_asset_file,
             commands::file::image_paths_to_markdown,
             commands::file::list_markdown_files,
+            commands::file::find_similar_markdown_files,
             commands::file::create_markdown_file,
             commands::draft::write_draft,
             commands::draft::read_draft,

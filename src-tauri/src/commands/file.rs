@@ -10,7 +10,7 @@ use rfd::FileDialog;
 
 use super::models::{
     DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeFindMatch, LargeFindOptions,
-    LargeFindResult, LargeOutlineItem, TextEdit,
+    LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
 };
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -522,6 +522,19 @@ pub fn list_markdown_files(folder: String) -> Result<Vec<FileNode>, String> {
 }
 
 #[tauri::command]
+pub fn find_similar_markdown_files(
+    original_path: String,
+    size: Option<u64>,
+    mtime: Option<u64>,
+) -> Result<Vec<SimilarFileCandidate>, String> {
+    let original = PathBuf::from(original_path);
+    let Some(size) = size else {
+        return Ok(Vec::new());
+    };
+    similar_markdown_files(&original, size, mtime)
+}
+
+#[tauri::command]
 pub fn create_markdown_file(folder: String, name: String) -> Result<String, String> {
     let folder = PathBuf::from(folder);
     if !folder.is_dir() {
@@ -710,6 +723,96 @@ fn read_children(folder: &Path) -> Result<Vec<FileNode>, String> {
     Ok(nodes)
 }
 
+fn similar_markdown_files(
+    original_path: &Path,
+    size: u64,
+    mtime: Option<u64>,
+) -> Result<Vec<SimilarFileCandidate>, String> {
+    let Some(parent) = original_path.parent() else {
+        return Ok(Vec::new());
+    };
+    if !parent.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = Vec::new();
+    collect_similar_markdown_files(parent, original_path, size, mtime, &mut candidates)?;
+    for entry in fs::read_dir(parent)
+        .map_err(|err| format!("Failed to read folder {}: {err}", parent.display()))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to inspect folder entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_similar_markdown_files(&path, original_path, size, mtime, &mut candidates)?;
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        candidate_time_distance(left.mtime, mtime)
+            .cmp(&candidate_time_distance(right.mtime, mtime))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    candidates.truncate(8);
+    Ok(candidates)
+}
+
+fn collect_similar_markdown_files(
+    folder: &Path,
+    original_path: &Path,
+    size: u64,
+    mtime: Option<u64>,
+    candidates: &mut Vec<SimilarFileCandidate>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(folder)
+        .map_err(|err| format!("Failed to read folder {}: {err}", folder.display()))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to inspect folder entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() || !is_markdown_file(&path) || same_path(&path, original_path) {
+            continue;
+        }
+        let metadata = fs::metadata(&path)
+            .map_err(|err| format!("Failed to inspect {}: {err}", path.display()))?;
+        if metadata.len() != size {
+            continue;
+        }
+        let candidate_mtime = metadata.modified().ok().map(system_time_millis);
+        if !mtime_is_close(candidate_mtime, mtime) {
+            continue;
+        }
+        candidates.push(SimilarFileCandidate {
+            name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_string(),
+            path: path_to_string(path),
+            mtime: candidate_mtime,
+            size: metadata.len(),
+        });
+    }
+    Ok(())
+}
+
+fn mtime_is_close(candidate: Option<u64>, baseline: Option<u64>) -> bool {
+    match (candidate, baseline) {
+        (Some(left), Some(right)) => left.abs_diff(right) <= 5 * 60 * 1000,
+        _ => true,
+    }
+}
+
+fn candidate_time_distance(candidate: Option<u64>, baseline: Option<u64>) -> u64 {
+    match (candidate, baseline) {
+        (Some(left), Some(right)) => left.abs_diff(right),
+        _ => u64::MAX,
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy().replace('\\', "/").to_lowercase()
+        == right.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
 fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -719,6 +822,13 @@ fn is_markdown_file(path: &Path) -> bool {
 
 fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn system_time_millis(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn scan_line_offsets(path: &Path) -> Result<Vec<u64>, String> {
@@ -1014,7 +1124,7 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_text_file_safely;
+    use super::{similar_markdown_files, write_text_file_safely};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1031,6 +1141,26 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "updated");
         assert!(!path.with_extension("md.lightmark-tmp").exists());
         assert!(!path.with_extension("md.lightmark-bak").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn similar_markdown_files_finds_same_size_rename_and_ignores_other_files() {
+        let dir = unique_test_dir("similar-markdown");
+        fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("old.md");
+        let renamed = dir.join("renamed.md");
+        let other_size = dir.join("other.md");
+        let non_markdown = dir.join("same.txt");
+        fs::write(&renamed, "same content").unwrap();
+        fs::write(&other_size, "different").unwrap();
+        fs::write(&non_markdown, "same content").unwrap();
+
+        let matches = similar_markdown_files(&original, 12, None).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, renamed.to_string_lossy());
 
         fs::remove_dir_all(dir).unwrap();
     }

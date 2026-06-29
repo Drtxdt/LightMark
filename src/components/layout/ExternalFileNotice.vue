@@ -4,13 +4,17 @@ import {
   appStore,
   closeTab,
   dismissCurrentExternalFileState,
+  rebindCurrentFileToCandidate,
   reloadCurrentFileFromDisk,
+  saveConflictCopyForCurrentFile,
   saveCurrentFileAsExternalCopy,
+  showCurrentFileDiffSummary,
 } from "../../stores/appStore";
 
 const activeTab = computed(() => appStore.tabs.find((tab) => tab.id === appStore.activeTabId) ?? null);
 const visible = computed(() => Boolean(activeTab.value && activeTab.value.externalState !== "clean"));
 const isDeleted = computed(() => activeTab.value?.externalState === "deleted");
+const relocationCandidate = computed(() => activeTab.value?.relocationCandidates?.[0] ?? null);
 const message = computed(() => {
   if (!activeTab.value) return "";
   if (activeTab.value.externalState === "deleted") {
@@ -24,11 +28,15 @@ async function reloadFromDisk() {
 }
 
 async function saveAsCopy() {
-  const saved = await saveCurrentFileAsExternalCopy().catch((error) => {
+  const saved = await saveConflictCopyForCurrentFile().catch((error) => {
     appStore.statusMessage = String(error);
     return false;
   });
-  if (saved) appStore.statusMessage = "已另存为副本";
+  if (saved) appStore.statusMessage = "已保存冲突副本";
+}
+
+async function showDiff() {
+  await showCurrentFileDiffSummary().catch((error) => (appStore.statusMessage = String(error)));
 }
 
 async function saveDeletedAs() {
@@ -44,6 +52,12 @@ async function closeDeletedTab() {
   if (!tab) return;
   await closeTab(tab.id);
 }
+
+async function rebindDeletedTab() {
+  const candidate = relocationCandidate.value;
+  if (!candidate) return;
+  await rebindCurrentFileToCandidate(candidate.path).catch((error) => (appStore.statusMessage = String(error)));
+}
 </script>
 
 <template>
@@ -51,15 +65,20 @@ async function closeDeletedTab() {
     <div class="min-w-0 flex-1">
       <div class="truncate font-medium">{{ message }}</div>
       <div class="truncate text-[11px] opacity-80">{{ activeTab?.path }}</div>
+      <div v-if="isDeleted && relocationCandidate" class="truncate text-[11px] opacity-80">
+        可能已移动到：{{ relocationCandidate.path }}
+      </div>
     </div>
     <div class="flex flex-none items-center gap-2">
       <template v-if="isDeleted">
+        <button v-if="relocationCandidate" type="button" class="notice-button primary" @click="rebindDeletedTab">重新绑定</button>
         <button type="button" class="notice-button primary" @click="saveDeletedAs">另存为</button>
         <button type="button" class="notice-button" @click="closeDeletedTab">关闭标签</button>
       </template>
       <template v-else>
         <button type="button" class="notice-button primary" @click="reloadFromDisk">重载磁盘版本</button>
-        <button type="button" class="notice-button" @click="saveAsCopy">另存为副本</button>
+        <button type="button" class="notice-button" @click="showDiff">查看差异</button>
+        <button type="button" class="notice-button" @click="saveAsCopy">保存冲突副本</button>
       </template>
       <button type="button" class="notice-button subtle" @click="dismissCurrentExternalFileState">稍后处理</button>
     </div>

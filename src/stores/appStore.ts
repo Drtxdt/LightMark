@@ -25,9 +25,11 @@ import type {
   QuickOpenCandidate,
   SessionRestoreState,
   SessionTabState,
+  SimilarFileCandidate,
   TextEdit,
   ThemeMode,
 } from "../types";
+import { buildTextDiffSummary } from "../utils/textDiff";
 
 export const appStore = reactive({
   currentWorkspace: "",
@@ -327,15 +329,18 @@ async function resolveDeletedFileBeforeSave() {
 }
 
 async function resolveChangedFileBeforeSave(originalPath: string) {
+  const diff = await conflictDiffDetails(originalPath);
   const result = await showDialog({
     title: "文件已在外部修改",
     message: "磁盘上的文件已经被其他程序修改。直接保存会覆盖外部修改。",
+    details: diff,
     cancelId: "cancel",
     defaultId: "cancel",
     tone: "danger",
     buttons: [
       { id: "cancel", label: "取消", variant: "secondary" },
       { id: "reload", label: "重载磁盘版本", variant: "danger" },
+      { id: "conflictCopy", label: "保存冲突副本", variant: "primary" },
       { id: "saveAs", label: "另存为副本", variant: "primary" },
     ],
   });
@@ -346,7 +351,15 @@ async function resolveChangedFileBeforeSave(originalPath: string) {
   if (result === "saveAs") {
     return await chooseSaveAsTarget(originalPath);
   }
+  if (result === "conflictCopy") {
+    await saveConflictCopyForCurrentFile();
+  }
   return false;
+}
+
+async function conflictDiffDetails(path: string) {
+  const disk = await invoke<string>("read_text_file", { path }).catch(() => "");
+  return buildTextDiffSummary(appStore.currentContent, disk);
 }
 
 async function chooseSaveAsTarget(avoidPath?: string) {
@@ -427,6 +440,9 @@ export async function checkOpenFileSnapshots() {
       if (tab.kind !== "normal" || !tab.path || !tab.fileSnapshot?.exists) continue;
       const snapshot = await getFileSnapshot(tab.path).catch((): FileSnapshot => ({ exists: false }));
       updateTabExternalState(tab, snapshot);
+      if (tab.externalState === "deleted") {
+        tab.relocationCandidates = await findSimilarFileCandidates(tab);
+      }
     }
   } finally {
     externalFileCheckInFlight = false;
@@ -446,6 +462,55 @@ export async function saveCurrentFileAsExternalCopy() {
   if (!tab?.path) return false;
   if (!(await chooseSaveAsTarget(tab.path))) return false;
   return await saveCurrentFile();
+}
+
+export async function saveConflictCopyForCurrentFile() {
+  if (!appStore.currentFilePath) return false;
+  const target = conflictCopyPath(appStore.currentFilePath);
+  await invoke("write_text_file", {
+    path: target,
+    content: appStore.currentContent,
+  });
+  rememberRecentFile(target);
+  await refreshFileTree();
+  await persistConfig();
+  appStore.statusMessage = `已保存冲突副本：${fileNameFromPath(target)}`;
+  return true;
+}
+
+export async function showCurrentFileDiffSummary() {
+  const tab = getActiveTab();
+  if (!tab?.path) return;
+  const details = await conflictDiffDetails(tab.path);
+  await alertDialog({
+    title: "外部修改差异摘要",
+    message: "以下是当前内存内容与磁盘内容的简化行级差异。",
+    details,
+  });
+}
+
+export async function rebindCurrentFileToCandidate(path: string) {
+  const tab = getActiveTab();
+  if (!tab || !path) return false;
+  const existing = findFileTab(path);
+  if (existing && existing.id !== tab.id) {
+    appStore.statusMessage = "候选文件已在其他标签页打开";
+    return false;
+  }
+  const snapshot = await getFileSnapshot(path);
+  const previousPath = appStore.currentFilePath;
+  tab.id = tabIdForPath(path);
+  tab.path = path;
+  tab.name = fileNameFromPath(path);
+  tab.fileSnapshot = snapshot;
+  clearTabExternalState(tab);
+  appStore.activeTabId = tab.id;
+  appStore.currentFilePath = path;
+  rememberRecentFile(path);
+  await refreshFileTree();
+  await persistConfig();
+  appStore.statusMessage = `已将标签从 ${fileNameFromPath(previousPath)} 重新绑定到 ${fileNameFromPath(path)}`;
+  return true;
 }
 
 export function dismissCurrentExternalFileState() {
@@ -483,6 +548,7 @@ function externalStateForSnapshot(baseline: FileSnapshot | undefined, current: F
 function clearTabExternalState(tab: DocumentTab) {
   tab.externalState = "clean";
   tab.externalSnapshot = undefined;
+  tab.relocationCandidates = undefined;
   tab.externalDetectedAt = undefined;
   tab.externalDismissedKey = undefined;
 }
@@ -496,6 +562,7 @@ function dismissTabExternalState(tab: DocumentTab) {
   tab.externalDismissedKey = snapshotKey(tab.externalSnapshot);
   tab.externalState = "clean";
   tab.externalSnapshot = undefined;
+  tab.relocationCandidates = undefined;
   tab.externalDetectedAt = undefined;
 }
 
@@ -1223,6 +1290,32 @@ function subsequenceScore(value: string, query: string) {
 
 function normalizeQuickOpenText(value: string) {
   return value.replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function conflictCopyPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  const folder = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? path.slice(slash + 1) : path;
+  const match = name.match(/^(.*?)(\.[^.]+)?$/);
+  const stem = match?.[1] || "untitled";
+  const extension = match?.[2] || ".md";
+  return `${folder}${stem}.conflict-${timestampForFileName()}${extension}`;
+}
+
+function timestampForFileName() {
+  const date = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+async function findSimilarFileCandidates(tab: DocumentTab) {
+  if (!tab.path || !tab.fileSnapshot?.size) return [];
+  return await invoke<SimilarFileCandidate[]>("find_similar_markdown_files", {
+    originalPath: tab.path,
+    size: tab.fileSnapshot.size,
+    mtime: tab.fileSnapshot.mtime,
+  }).catch(() => []);
 }
 
 function recordCurrentNavigationBeforeOpening(nextPath: string) {

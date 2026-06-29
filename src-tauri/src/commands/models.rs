@@ -319,6 +319,15 @@ pub struct FileSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SimilarFileCandidate {
+    pub path: String,
+    pub name: String,
+    pub mtime: Option<u64>,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LargeFindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
