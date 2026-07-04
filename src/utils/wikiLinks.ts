@@ -82,6 +82,10 @@ export function wikiLinkHref(target: WikiLinkTarget) {
   return `lightmark://wiki?${params.join("&")}`;
 }
 
+export function wikiLinkMarkdown(target: WikiLinkTarget) {
+  return `[[${target.heading ? `${target.page}#${target.heading}` : target.page}]]`;
+}
+
 export function parseWikiLinkHref(href: string): WikiLinkTarget | null {
   if (!href.startsWith("lightmark://wiki")) return null;
   try {

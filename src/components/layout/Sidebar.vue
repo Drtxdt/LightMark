@@ -21,7 +21,8 @@ watch(
 watch(
   () => [appStore.currentFilePath, appStore.fileTree.length, activePane.value] as const,
   () => {
-    if (activePane.value === "backlinks") void refreshBacklinks();
+    appStore.wikiBacklinksOpen = activePane.value === "backlinks";
+    if (appStore.wikiBacklinksOpen) void refreshBacklinks();
   },
   { immediate: true },
 );

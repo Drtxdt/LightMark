@@ -85,6 +85,7 @@ let externalFileFallbackTimer = 0;
 let externalFileCheckInFlight = false;
 let externalFileWatcherRunning = false;
 let externalFileWatcherAvailable = true;
+let backlinkRefreshTimer = 0;
 const watchedFilePaths = new Map<string, string>();
 
 export const currentFileName = computed(() => {
@@ -112,6 +113,7 @@ export function setContent(content: string, dirty = true) {
   appStore.currentContent = content;
   appStore.isDirty = dirty;
   syncActiveTabFromProjection();
+  scheduleBacklinksRefresh();
 }
 
 export async function loadConfig() {
@@ -273,13 +275,14 @@ export async function refreshBacklinks() {
     appStore.wikiBacklinksError = "";
     return;
   }
+  syncActiveTabFromProjection();
   appStore.wikiBacklinksBusy = true;
   appStore.wikiBacklinksError = "";
   try {
     const files = flattenMarkdownFiles(appStore.fileTree).filter((path) => !isSamePath(path, appStore.currentFilePath));
     const backlinks: BacklinkItem[] = [];
     for (const path of files) {
-      const content = await invoke<string>("read_text_file", { path }).catch(() => "");
+      const content = await contentForBacklinkScan(path);
       if (!content) continue;
       backlinks.push(...backlinksForPath(appStore.currentFilePath, content, path));
     }
@@ -292,6 +295,21 @@ export async function refreshBacklinks() {
   } finally {
     appStore.wikiBacklinksBusy = false;
   }
+}
+
+function scheduleBacklinksRefresh() {
+  if (!appStore.wikiBacklinksOpen || !appStore.currentWorkspace || typeof window === "undefined") return;
+  if (backlinkRefreshTimer) window.clearTimeout(backlinkRefreshTimer);
+  backlinkRefreshTimer = window.setTimeout(() => {
+    backlinkRefreshTimer = 0;
+    void refreshBacklinks();
+  }, 250);
+}
+
+async function contentForBacklinkScan(path: string) {
+  const tab = appStore.tabs.find((item) => item.path && isSamePath(item.path, path));
+  if (tab?.kind === "normal") return tab.content;
+  return await invoke<string>("read_text_file", { path }).catch(() => "");
 }
 
 export function openQuickOpen() {

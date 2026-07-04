@@ -23,8 +23,10 @@ try {
   const {
     parseWikiLinks,
     resolveWikiLink,
+    wikiLinkMarkdown,
     renderWikiLinksInEscapedText,
     wikiLinkHref,
+    backlinksForPath,
   } = await import(pathToFileURL(tempPath).href);
 
   const sample = [
@@ -70,6 +72,13 @@ try {
   assert.match(rendered, /data-wiki-link="true"/);
   assert.match(rendered, /href="lightmark:\/\/wiki\?page=Project%20Alpha&amp;heading=Design%20Notes"/);
   assert.match(rendered, />Project Alpha#Design Notes<\/a>/);
+
+  assert.equal(wikiLinkMarkdown({ page: "Project Alpha", heading: "Design Notes" }), "[[Project Alpha#Design Notes]]");
+
+  const backlinks = backlinksForPath("C:/vault/Project Alpha.md", "Links to [[Project Alpha]].", "C:/vault/Source.md");
+  assert.deepEqual(backlinks.map((item) => ({ sourceName: item.sourceName, line: item.line, preview: item.preview })), [
+    { sourceName: "Source.md", line: 0, preview: "Links to [[Project Alpha]]." },
+  ]);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

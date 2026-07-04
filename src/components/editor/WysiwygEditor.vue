@@ -21,7 +21,7 @@ import { appStore, openWikiLink, setContent } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
-import { parseWikiLinkHref } from "../../utils/wikiLinks";
+import { parseWikiLinkHref, wikiLinkMarkdown } from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
 import {
@@ -1254,6 +1254,18 @@ turndown.addRule("subscript", {
   replacement: (content) => `~${content}~`,
 });
 
+turndown.addRule("wikiLink", {
+  filter: (node) => {
+    if (!(node instanceof HTMLElement) || node.nodeName !== "A") return false;
+    return Boolean(parseWikiLinkHref(node.getAttribute("href") || ""));
+  },
+  replacement: (_content, node) => {
+    if (!(node instanceof HTMLElement)) return "";
+    const target = parseWikiLinkHref(node.getAttribute("href") || "");
+    return target ? wikiLinkMarkdown(target) : "";
+  },
+});
+
 turndown.addRule("taskState", {
   filter: (node) => node instanceof HTMLElement && node.hasAttribute("data-task-item"),
   replacement: (content, node) => {
@@ -1865,7 +1877,7 @@ const editor = useEditor({
     }),
     TyporaBlockquote,
     GithubAlertInput,
-    Link.configure({ openOnClick: false }),
+    Link.configure({ openOnClick: false, protocols: ["lightmark"] }),
     MarkdownImage,
     Table.configure({ resizable: true }),
     TableRow,
