@@ -17,6 +17,7 @@ import {
   sanitizeInlineHtmlSource,
 } from "./html";
 import { exportThemeCssVariables, getExportThemePalette } from "./exportTheme";
+import { renderWikiLinksInEscapedText } from "./wikiLinks";
 
 const md = new MarkdownIt({
   html: true,
@@ -297,7 +298,7 @@ function trimFenceStructuralTrailingNewline(content: string) {
 }
 
 function renderInlineEnhancements(html: string) {
-  return html
+  return renderWikiLinksInEscapedText(html)
     .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
     .replace(/(^|[^^\s])\^([^^\n]+)\^/g, "$1<sup>$2</sup>")
     .replace(/(^|[^~\s])~([^~\n]+)~/g, "$1<sub>$2</sub>")

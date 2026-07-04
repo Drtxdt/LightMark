@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { appStore, openFile, openWorkspace, recordNavigationLocation, switchMode } from "../../stores/appStore";
+import { appStore, navigateToFilePath, openFile, openWorkspace, recordNavigationLocation, refreshBacklinks, switchMode } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
 import type { LargeOutlineItem, OutlineItem } from "../../types";
 
-const activePane = ref<"files" | "outline">("files");
+const activePane = ref<"files" | "outline" | "backlinks">("files");
 const outline = computed(() => {
   if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
   return extractOutline(appStore.currentContent);
@@ -18,8 +18,20 @@ watch(
   },
 );
 
+watch(
+  () => [appStore.currentFilePath, appStore.fileTree.length, activePane.value] as const,
+  () => {
+    if (activePane.value === "backlinks") void refreshBacklinks();
+  },
+  { immediate: true },
+);
+
 async function selectFile(path: string) {
   await openFile(path);
+}
+
+async function openBacklink(path: string) {
+  await navigateToFilePath(path);
 }
 
 async function jumpToHeading(item: OutlineItem | LargeOutlineItem) {
@@ -102,6 +114,13 @@ function outlineIndent(level: number) {
         >
           大纲
         </button>
+        <button
+          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
+          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'backlinks' }"
+          @click="activePane = 'backlinks'"
+        >
+          反链
+        </button>
       </div>
     </div>
 
@@ -115,7 +134,7 @@ function outlineIndent(level: number) {
       <FileTreeNode v-for="node in appStore.fileTree" :key="node.path" :node="node" @select="selectFile" />
     </section>
 
-    <section v-else class="min-h-0 flex-1 overflow-auto px-3 pb-3">
+    <section v-else-if="activePane === 'outline'" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
       <h2 class="mb-3 text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">当前文档</h2>
       <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">暂无标题。</p>
       <button
@@ -126,6 +145,27 @@ function outlineIndent(level: number) {
         @click="jumpToHeading(item)"
       >
         {{ item.text }}
+      </button>
+    </section>
+
+    <section v-else class="min-h-0 flex-1 overflow-auto px-3 pb-3">
+      <div class="mb-3 flex items-center justify-between gap-2">
+        <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">反链</h2>
+        <button class="btn-small" @click="refreshBacklinks()">刷新</button>
+      </div>
+      <p v-if="!appStore.currentWorkspace" class="text-sm text-ink-500 dark:text-ink-300">尚未打开文件夹。</p>
+      <p v-else-if="appStore.wikiBacklinksBusy" class="text-sm text-ink-500 dark:text-ink-300">正在扫描反链...</p>
+      <p v-else-if="appStore.wikiBacklinksError" class="text-sm text-red-600 dark:text-red-300">{{ appStore.wikiBacklinksError }}</p>
+      <p v-else-if="appStore.wikiBacklinks.length === 0" class="text-sm text-ink-500 dark:text-ink-300">暂无反链。</p>
+      <button
+        v-for="item in appStore.wikiBacklinks"
+        :key="`${item.sourcePath}:${item.line}:${item.preview}`"
+        class="mb-2 block w-full rounded border border-paper-200 bg-paper-50 px-2.5 py-2 text-left transition-colors hover:bg-paper-100 dark:border-paper-800 dark:bg-paper-950 dark:hover:bg-paper-800"
+        @click="openBacklink(item.sourcePath)"
+      >
+        <span class="block truncate text-sm font-medium text-ink-800 dark:text-ink-100">{{ item.sourceName }}</span>
+        <span class="mt-1 block text-xs text-ink-500 dark:text-ink-400">L{{ item.line + 1 }}</span>
+        <span class="mt-1 line-clamp-2 block text-xs text-ink-600 dark:text-ink-300">{{ item.preview }}</span>
       </button>
     </section>
   </aside>

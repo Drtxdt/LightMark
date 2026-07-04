@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, watch } from "vue";
 import mermaid from "mermaid";
-import { appStore } from "../../stores/appStore";
+import { appStore, openWikiLink } from "../../stores/appStore";
 import { renderMarkdown } from "../../utils/markdown";
 import { resolveRenderedImageSources } from "../../utils/imageAssets";
 import { extractOutline } from "../../utils/outline";
+import { parseWikiLinkHref } from "../../utils/wikiLinks";
 
 const html = computed(() => {
   const rendered = resolveRenderedImageSources(renderMarkdown(appStore.currentContent));
@@ -29,10 +30,20 @@ async function renderMermaid() {
 }
 
 watch(html, renderMermaid, { immediate: true });
+
+function handlePreviewClick(event: MouseEvent) {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  const link = target?.closest<HTMLAnchorElement>("a[href]");
+  if (!link) return;
+  const wikiTarget = parseWikiLinkHref(link.getAttribute("href") || "");
+  if (!wikiTarget) return;
+  event.preventDefault();
+  void openWikiLink(wikiTarget);
+}
 </script>
 
 <template>
   <div class="h-full overflow-auto bg-paper-50 dark:bg-paper-950">
-    <article class="markdown-preview prose prose-stone dark:prose-invert mx-auto max-w-[var(--lm-editor-width)] px-8 py-12" v-html="html" />
+    <article class="markdown-preview prose prose-stone dark:prose-invert mx-auto max-w-[var(--lm-editor-width)] px-8 py-12" @click="handlePreviewClick" v-html="html" />
   </div>
 </template>

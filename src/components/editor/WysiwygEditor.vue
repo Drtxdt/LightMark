@@ -17,10 +17,11 @@ import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { appStore, setContent } from "../../stores/appStore";
+import { appStore, openWikiLink, setContent } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import { parseWikiLinkHref } from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
 import {
@@ -2007,6 +2008,11 @@ const editor = useEditor({
         if (link) {
           mouseEvent.preventDefault();
           const href = link.getAttribute("href") || "";
+          const wikiTarget = parseWikiLinkHref(href);
+          if (wikiTarget) {
+            void openWikiLink(wikiTarget);
+            return true;
+          }
           if (href.startsWith("#")) {
             scrollInternalLink(href);
             return true;
@@ -2595,6 +2601,7 @@ onMounted(() => {
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
+  window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
 });
 
@@ -2604,6 +2611,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
+  window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
@@ -3916,6 +3924,27 @@ function scrollInternalLink(href: string) {
   const id = decodeURIComponent(href.slice(1));
   const target = document.getElementById(id);
   target?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string }>) {
+  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  const id = event.detail?.id;
+  const target = id ? document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${cssEscape(id)}"]`) : null;
+  const fallback = event.detail?.text ? findHeadingByText(event.detail.text) : null;
+  (target || fallback)?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function findHeadingByText(text: string) {
+  const expected = normalizeHeadingText(text);
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>(".ProseMirror h1,.ProseMirror h2,.ProseMirror h3,.ProseMirror h4,.ProseMirror h5,.ProseMirror h6")).find((heading) => {
+      return normalizeHeadingText(heading.textContent || "") === expected;
+    }) || null
+  );
+}
+
+function normalizeHeadingText(value: string) {
+  return value.replace(/[#*_`[\]()]/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
 async function openExternalLink(href: string) {

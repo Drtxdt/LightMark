@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
@@ -9,11 +9,31 @@ import { appStore, setContent } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
+import { flattenMarkdownFiles } from "../../utils/wikiLinks";
 
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 let applyingExternalChange = false;
 let sourceFindMatches: TextMatch[] = [];
+const wikiCompletion = ref({
+  visible: false,
+  query: "",
+  from: 0,
+  to: 0,
+  x: 0,
+  y: 0,
+  highlightedIndex: 0,
+});
+
+const wikiCompletionCandidates = computed(() => {
+  const query = wikiCompletion.value.query.trim().toLocaleLowerCase();
+  return flattenMarkdownFiles(appStore.fileTree)
+    .map((path) => fileStem(path))
+    .filter((name, index, names) => names.findIndex((item) => item.toLocaleLowerCase() === name.toLocaleLowerCase()) === index)
+    .filter((name) => !query || name.toLocaleLowerCase().includes(query))
+    .sort((left, right) => left.localeCompare(right, "zh-Hans-CN"))
+    .slice(0, 8);
+});
 
 const setSourceFindDecorations = StateEffect.define<DecorationSet>();
 const sourceFindField = StateField.define<DecorationSet>({
@@ -161,6 +181,30 @@ function extensions() {
         void insertImageFilesIntoSource(files, currentView);
         return true;
       },
+      keydown(event, currentView) {
+        if (!wikiCompletion.value.visible) return false;
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          moveWikiCompletion(1);
+          return true;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          moveWikiCompletion(-1);
+          return true;
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          chooseWikiCompletion(currentView);
+          return true;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeWikiCompletion();
+          return true;
+        }
+        return false;
+      },
       dragover(event) {
         if (getImageFilesFromDrop(event.dataTransfer).length === 0) return false;
         event.preventDefault();
@@ -181,6 +225,7 @@ function extensions() {
         setContent(update.state.doc.toString(), true);
         if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
       }
+      if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
     }),
   ];
 }
@@ -232,6 +277,7 @@ onMounted(() => {
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
+  window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
 });
 
 watch(
@@ -251,6 +297,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
+  window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   view?.destroy();
   view = null;
 });
@@ -319,6 +366,72 @@ function handleJumpLine(event: CustomEvent<number>) {
     effects: EditorView.scrollIntoView(line.from, { y: "center" }),
   });
   view.focus();
+}
+
+function handleJumpHeading(event: CustomEvent<{ line?: number }>) {
+  if (typeof event.detail?.line !== "number") return;
+  handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail.line }));
+}
+
+function updateWikiCompletion(currentView: EditorView) {
+  if (!appStore.currentWorkspace) {
+    closeWikiCompletion();
+    return;
+  }
+  const selection = currentView.state.selection.main;
+  if (!selection.empty) {
+    closeWikiCompletion();
+    return;
+  }
+  const line = currentView.state.doc.lineAt(selection.from);
+  const before = line.text.slice(0, selection.from - line.from);
+  const open = before.lastIndexOf("[[");
+  if (open < 0 || before.slice(open + 2).includes("]]")) {
+    closeWikiCompletion();
+    return;
+  }
+  const query = before.slice(open + 2);
+  if (/[\[\]\n]/.test(query)) {
+    closeWikiCompletion();
+    return;
+  }
+  const coords = currentView.coordsAtPos(selection.from);
+  wikiCompletion.value = {
+    visible: true,
+    query,
+    from: line.from + open + 2,
+    to: selection.from,
+    x: coords?.left ?? 24,
+    y: (coords?.bottom ?? 24) + 6,
+    highlightedIndex: Math.min(wikiCompletion.value.highlightedIndex, Math.max(wikiCompletionCandidates.value.length - 1, 0)),
+  };
+}
+
+function moveWikiCompletion(delta: 1 | -1) {
+  const count = wikiCompletionCandidates.value.length;
+  if (count === 0) return;
+  const next = wikiCompletion.value.highlightedIndex + delta;
+  wikiCompletion.value.highlightedIndex = (next + count) % count;
+}
+
+function chooseWikiCompletion(currentView: EditorView, candidate = wikiCompletionCandidates.value[wikiCompletion.value.highlightedIndex]) {
+  if (!candidate) return;
+  const insert = `${candidate}]]`;
+  currentView.dispatch({
+    changes: { from: wikiCompletion.value.from, to: wikiCompletion.value.to, insert },
+    selection: { anchor: wikiCompletion.value.from + insert.length },
+  });
+  closeWikiCompletion();
+  currentView.focus();
+}
+
+function closeWikiCompletion() {
+  if (!wikiCompletion.value.visible) return;
+  wikiCompletion.value.visible = false;
+}
+
+function fileStem(path: string) {
+  return (path.split(/[\\/]/).pop() || path).replace(/\.(md|markdown)$/i, "");
 }
 
 function refreshSourceFind() {
@@ -409,4 +522,21 @@ function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: st
 
 <template>
   <div ref="host" class="h-full bg-paper-50 text-base dark:bg-paper-950" />
+  <div
+    v-if="wikiCompletion.visible && wikiCompletionCandidates.length > 0"
+    class="fixed z-50 max-h-64 w-64 overflow-auto rounded-md border border-paper-200 bg-paper-50 p-1 shadow-[0_14px_36px_rgba(31,30,27,0.16)] dark:border-paper-800 dark:bg-paper-900"
+    :style="{ left: `${wikiCompletion.x}px`, top: `${wikiCompletion.y}px` }"
+  >
+    <button
+      v-for="(candidate, index) in wikiCompletionCandidates"
+      :key="candidate"
+      class="block w-full truncate rounded px-2 py-1.5 text-left text-sm"
+      :class="index === wikiCompletion.highlightedIndex
+        ? 'bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100'
+        : 'text-ink-700 hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'"
+      @mousedown.prevent="view && chooseWikiCompletion(view, candidate)"
+    >
+      {{ candidate }}
+    </button>
+  </div>
 </template>

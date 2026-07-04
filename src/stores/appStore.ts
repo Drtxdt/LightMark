@@ -30,6 +30,15 @@ import type {
   ThemeMode,
 } from "../types";
 import { buildTextDiffSummary } from "../utils/textDiff";
+import { extractOutlineWithLines } from "../utils/outline";
+import {
+  backlinksForPath,
+  flattenMarkdownFiles,
+  resolveWikiLink,
+  wikiPageFileName,
+  type BacklinkItem,
+  type WikiLinkTarget,
+} from "../utils/wikiLinks";
 
 export const appStore = reactive({
   currentWorkspace: "",
@@ -59,6 +68,10 @@ export const appStore = reactive({
   settingsOpen: false,
   commandPaletteOpen: false,
   wordCountOpen: false,
+  wikiBacklinksOpen: false,
+  wikiBacklinks: [] as BacklinkItem[],
+  wikiBacklinksBusy: false,
+  wikiBacklinksError: "",
   pendingModeCursor: null as PendingModeCursor | null,
   exportStatus: {
     status: "idle",
@@ -141,6 +154,7 @@ export async function openWorkspace(folder?: string) {
   if (!selected) return;
   appStore.currentWorkspace = selected;
   await refreshFileTree();
+  void refreshBacklinks();
   await persistConfig();
 }
 
@@ -202,12 +216,82 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
   rememberRecentFile(selected);
   await checkDraftForOpenedFile(selected);
   void syncExternalFileWatches();
+  void refreshBacklinks();
   await persistConfig();
 }
 
 export async function navigateToFilePath(path: string) {
   recordNavigationLocation();
   await openFile(path, { recordNavigation: false });
+}
+
+export async function openWikiLink(target: WikiLinkTarget) {
+  if (!appStore.currentWorkspace) {
+    appStore.statusMessage = "请先打开工作区再使用 Wiki Links";
+    return false;
+  }
+  const resolution = resolveWikiLink(target, appStore.fileTree);
+  if (resolution.path) {
+    recordNavigationLocation();
+    await openFile(resolution.path, { recordNavigation: false });
+    if (resolution.status === "ambiguous") {
+      appStore.statusMessage = `找到多个 “${target.page}”，已打开最接近的候选`;
+    }
+    scheduleWikiHeadingJump(target);
+    return true;
+  }
+
+  const createdPath = await createWikiLinkTarget(target);
+  if (!createdPath) return false;
+  recordNavigationLocation();
+  await openFile(createdPath, { recordNavigation: false });
+  appStore.statusMessage = `已创建 Wiki 页面：${fileNameFromPath(createdPath)}`;
+  return true;
+}
+
+export async function createWikiLinkTarget(target: WikiLinkTarget) {
+  if (!appStore.currentWorkspace) {
+    appStore.statusMessage = "请先打开工作区再创建 Wiki 页面";
+    return null;
+  }
+  const name = wikiPageFileName(target);
+  if (!name) {
+    appStore.statusMessage = "当前 Wiki Link 名称不能自动创建文件";
+    return null;
+  }
+  const path = await invoke<string>("create_markdown_file", {
+    folder: appStore.currentWorkspace,
+    name,
+  });
+  await refreshFileTree();
+  return path;
+}
+
+export async function refreshBacklinks() {
+  if (!appStore.currentWorkspace || !appStore.currentFilePath) {
+    appStore.wikiBacklinks = [];
+    appStore.wikiBacklinksError = "";
+    return;
+  }
+  appStore.wikiBacklinksBusy = true;
+  appStore.wikiBacklinksError = "";
+  try {
+    const files = flattenMarkdownFiles(appStore.fileTree).filter((path) => !isSamePath(path, appStore.currentFilePath));
+    const backlinks: BacklinkItem[] = [];
+    for (const path of files) {
+      const content = await invoke<string>("read_text_file", { path }).catch(() => "");
+      if (!content) continue;
+      backlinks.push(...backlinksForPath(appStore.currentFilePath, content, path));
+    }
+    appStore.wikiBacklinks = backlinks.sort((left, right) => {
+      return left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN") || left.line - right.line;
+    });
+  } catch (error) {
+    appStore.wikiBacklinks = [];
+    appStore.wikiBacklinksError = String(error);
+  } finally {
+    appStore.wikiBacklinksBusy = false;
+  }
 }
 
 export function openQuickOpen() {
@@ -662,6 +746,7 @@ export async function activateTab(tabId: string) {
   const tab = appStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
   projectTab(tab);
+  void refreshBacklinks();
   await persistConfig();
 }
 
@@ -1389,6 +1474,29 @@ async function findSimilarFileCandidates(tab: DocumentTab) {
   }).catch(() => []);
 }
 
+function scheduleWikiHeadingJump(target: WikiLinkTarget) {
+  if (!target.heading) return;
+  const expected = normalizeHeadingText(target.heading);
+  const item = extractOutlineWithLines(appStore.currentContent).find((candidate) => {
+    return normalizeHeadingText(candidate.text) === expected;
+  });
+  if (!item) {
+    appStore.statusMessage = `未找到标题：${target.heading}`;
+    return;
+  }
+  window.setTimeout(() => {
+    window.dispatchEvent(
+      new CustomEvent("lightmark:jump-heading", {
+        detail: {
+          id: item.id,
+          line: item.line,
+          text: item.text,
+        },
+      }),
+    );
+  }, 0);
+}
+
 function recordCurrentNavigationBeforeOpening(nextPath: string) {
   const current = currentNavigationLocation();
   if (!current || isSamePath(current.path, nextPath)) return;
@@ -1425,6 +1533,10 @@ function isSamePath(left: string, right: string) {
 
 function normalizePathKey(path: string) {
   return path.replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function normalizeHeadingText(value: string) {
+  return value.replace(/[#*_`[\]()]/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
 function fileNameFromPath(path: string) {
