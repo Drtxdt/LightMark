@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import type { FindReplaceOptions } from "../utils/findReplace";
+import { recordNavigationLocation } from "./appStore";
 
 export type FindCommand =
   | "refresh"
@@ -47,6 +48,9 @@ export function closeFindPanel() {
 }
 
 export function runFindCommand(command: FindCommand) {
+  if (command === "next" || command === "previous") {
+    recordNavigationLocation();
+  }
   window.dispatchEvent(new CustomEvent("lightmark:find-command", { detail: command }));
 }
 

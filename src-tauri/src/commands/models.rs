@@ -328,6 +328,12 @@ pub struct SimilarFileCandidate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileWatchEvent {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LargeFindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,

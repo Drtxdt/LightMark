@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { appStore, openFile, openWorkspace, switchMode } from "../../stores/appStore";
+import { appStore, openFile, openWorkspace, recordNavigationLocation, switchMode } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
 import type { LargeOutlineItem, OutlineItem } from "../../types";
@@ -23,6 +23,7 @@ async function selectFile(path: string) {
 }
 
 async function jumpToHeading(item: OutlineItem | LargeOutlineItem) {
+  recordNavigationLocation();
   if (appStore.documentMode === "large" && "line" in item) {
     window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
     return;

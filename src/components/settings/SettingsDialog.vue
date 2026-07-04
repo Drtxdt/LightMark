@@ -34,6 +34,7 @@ const sections: Array<{ id: SettingsSection; label: string; description: string 
 const shortcutRows = [
   { command: "保存", shortcut: "Ctrl+S" },
   { command: "命令面板", shortcut: "Ctrl+Shift+P" },
+  { command: "前往指定标题", shortcut: "Ctrl+Shift+O" },
   { command: "切换编辑/源代码", shortcut: "命令面板" },
   { command: "打开设置", shortcut: "工具栏按钮" },
   { command: "插入 GitHub 风格警示框", shortcut: "右键菜单" },

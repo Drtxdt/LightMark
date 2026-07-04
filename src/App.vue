@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
 import GoToLinePalette from "./components/command/GoToLinePalette.vue";
+import HeadingJumpPalette from "./components/command/HeadingJumpPalette.vue";
 import QuickOpenPalette from "./components/command/QuickOpenPalette.vue";
 import AppDialog from "./components/dialog/AppDialog.vue";
 import SettingsDialog from "./components/settings/SettingsDialog.vue";
@@ -19,7 +21,9 @@ import {
   getDirtyTabs,
   goBackNavigation,
   goForwardNavigation,
+  checkOpenFileSnapshots,
   loadConfig,
+  openHeadingJump,
   openGoToLine,
   openQuickOpen,
   saveAllDirtyTabs,
@@ -38,6 +42,7 @@ import { showDialog } from "./stores/dialogStore";
 let unbindSave = () => {};
 let unbindPalette = () => {};
 let unbindQuickOpen = () => {};
+let unbindHeadingJump = () => {};
 let unbindGoToLine = () => {};
 let unbindNavigationBack = () => {};
 let unbindNavigationForward = () => {};
@@ -45,6 +50,7 @@ let unbindFind = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
 let unlistenCloseRequested: (() => void) | null = null;
+let unlistenExternalFileWatch: (() => void) | null = null;
 let unwatchWindowChrome = () => {};
 let unwatchDraftAutosave = () => {};
 let closingBypass = false;
@@ -81,6 +87,9 @@ onMounted(async () => {
   unbindQuickOpen = bindShortcut("ctrl+p", () => {
     openQuickOpen();
   });
+  unbindHeadingJump = bindShortcut("ctrl+shift+o", () => {
+    openHeadingJump();
+  });
   unbindGoToLine = bindShortcut("ctrl+g", () => {
     openGoToLine();
   });
@@ -100,6 +109,9 @@ onMounted(async () => {
   window.addEventListener("dragover", handleGlobalImageDragOver);
   window.addEventListener("drop", handleGlobalImageDrop);
   unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
+  unlistenExternalFileWatch = await listen("lightmark-file-watch-event", () => {
+    void checkOpenFileSnapshots();
+  });
   unlistenTauriImageDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type !== "drop") return;
     const paths = event.payload.paths || [];
@@ -119,6 +131,7 @@ onUnmounted(() => {
   unbindSave();
   unbindPalette();
   unbindQuickOpen();
+  unbindHeadingJump();
   unbindGoToLine();
   unbindNavigationBack();
   unbindNavigationForward();
@@ -133,6 +146,8 @@ onUnmounted(() => {
   window.removeEventListener("drop", handleGlobalImageDrop);
   unlistenCloseRequested?.();
   unlistenCloseRequested = null;
+  unlistenExternalFileWatch?.();
+  unlistenExternalFileWatch = null;
   unlistenTauriImageDrop?.();
   unlistenTauriImageDrop = null;
 });
@@ -230,6 +245,7 @@ function handleGlobalImageDrop(event: DragEvent) {
   <AppLayout />
   <CommandPalette v-if="appStore.commandPaletteOpen" />
   <QuickOpenPalette v-if="appStore.quickOpenOpen" />
+  <HeadingJumpPalette v-if="appStore.headingJumpOpen" />
   <GoToLinePalette v-if="appStore.goToLineOpen" />
   <SettingsDialog v-if="appStore.settingsOpen" />
   <WordCountPanel v-if="appStore.wordCountOpen" />

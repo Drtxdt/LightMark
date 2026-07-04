@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick } from "vue";
-import { appStore, switchMode } from "../../stores/appStore";
+import { appStore, recordNavigationLocation, switchMode } from "../../stores/appStore";
 import { extractOutline } from "../../utils/outline";
 
 const outline = computed(() => {
@@ -9,6 +9,7 @@ const outline = computed(() => {
 });
 
 async function jump(item: (typeof outline.value)[number]) {
+  recordNavigationLocation();
   if (appStore.documentMode === "large" && "line" in item) {
     window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
     return;

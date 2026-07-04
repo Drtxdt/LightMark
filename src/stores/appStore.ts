@@ -46,6 +46,9 @@ export const appStore = reactive({
   quickOpenOpen: false,
   quickOpenQuery: "",
   quickOpenActiveIndex: 0,
+  headingJumpOpen: false,
+  headingJumpQuery: "",
+  headingJumpActiveIndex: 0,
   goToLineOpen: false,
   navigationBackStack: [] as NavigationLocation[],
   navigationForwardStack: [] as NavigationLocation[],
@@ -65,8 +68,11 @@ export const appStore = reactive({
 });
 
 const EXTERNAL_FILE_CHECK_INTERVAL_MS = 10_000;
-let externalFileMonitorTimer = 0;
+let externalFileFallbackTimer = 0;
 let externalFileCheckInFlight = false;
+let externalFileWatcherRunning = false;
+let externalFileWatcherAvailable = true;
+const watchedFilePaths = new Map<string, string>();
 
 export const currentFileName = computed(() => {
   const tab = getActiveTab();
@@ -151,6 +157,7 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
   if (existing) {
     await activateTab(existing.id);
     await checkDraftForOpenedFile(selected);
+    void syncExternalFileWatches();
     await persistConfig();
     return;
   }
@@ -194,7 +201,13 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
   projectTab(tab);
   rememberRecentFile(selected);
   await checkDraftForOpenedFile(selected);
+  void syncExternalFileWatches();
   await persistConfig();
+}
+
+export async function navigateToFilePath(path: string) {
+  recordNavigationLocation();
+  await openFile(path, { recordNavigation: false });
 }
 
 export function openQuickOpen() {
@@ -205,6 +218,16 @@ export function openQuickOpen() {
 
 export function closeQuickOpen() {
   appStore.quickOpenOpen = false;
+}
+
+export function openHeadingJump() {
+  appStore.headingJumpQuery = "";
+  appStore.headingJumpActiveIndex = 0;
+  appStore.headingJumpOpen = true;
+}
+
+export function closeHeadingJump() {
+  appStore.headingJumpOpen = false;
 }
 
 export function openGoToLine() {
@@ -296,6 +319,7 @@ export async function saveCurrentFile() {
   await clearActiveDraft();
   rememberRecentFile(appStore.currentFilePath);
   syncActiveTabFromProjection();
+  void syncExternalFileWatches();
   await refreshFileTree();
   await persistConfig();
   return true;
@@ -414,22 +438,23 @@ function snapshotsMatch(left: FileSnapshot, right: FileSnapshot) {
 export function startExternalFileMonitor() {
   stopExternalFileMonitor();
   if (typeof window === "undefined") return;
-  externalFileMonitorTimer = window.setInterval(() => {
-    void checkOpenFileSnapshots();
-  }, EXTERNAL_FILE_CHECK_INTERVAL_MS);
+  externalFileWatcherRunning = true;
+  externalFileWatcherAvailable = true;
   window.addEventListener("focus", checkOpenFileSnapshotsOnEvent);
   document.addEventListener("visibilitychange", checkOpenFileSnapshotsWhenVisible);
+  void syncExternalFileWatches();
   void checkOpenFileSnapshots();
 }
 
 export function stopExternalFileMonitor() {
-  if (externalFileMonitorTimer) {
-    window.clearInterval(externalFileMonitorTimer);
-    externalFileMonitorTimer = 0;
-  }
+  disableExternalFileFallbackPolling();
   if (typeof window === "undefined") return;
   window.removeEventListener("focus", checkOpenFileSnapshotsOnEvent);
   document.removeEventListener("visibilitychange", checkOpenFileSnapshotsWhenVisible);
+  externalFileWatcherRunning = false;
+  externalFileWatcherAvailable = true;
+  watchedFilePaths.clear();
+  void invoke("unwatch_all_markdown_files").catch(() => {});
 }
 
 export async function checkOpenFileSnapshots() {
@@ -449,11 +474,40 @@ export async function checkOpenFileSnapshots() {
   }
 }
 
+export async function syncExternalFileWatches() {
+  if (!externalFileWatcherRunning || !externalFileWatcherAvailable) return;
+  const next = new Map<string, string>();
+  for (const tab of appStore.tabs) {
+    if (tab.kind !== "normal" || !tab.path || !tab.fileSnapshot?.exists) continue;
+    next.set(normalizePathKey(tab.path), tab.path);
+  }
+
+  try {
+    for (const [key, path] of watchedFilePaths) {
+      if (next.has(key)) continue;
+      await invoke("unwatch_markdown_file", { path });
+      watchedFilePaths.delete(key);
+    }
+    for (const [key, path] of next) {
+      if (watchedFilePaths.has(key)) continue;
+      await invoke("watch_markdown_file", { path });
+      watchedFilePaths.set(key, path);
+    }
+    if (watchedFilePaths.size > 0) disableExternalFileFallbackPolling();
+  } catch (error) {
+    externalFileWatcherAvailable = false;
+    watchedFilePaths.clear();
+    enableExternalFileFallbackPolling();
+    appStore.statusMessage = `文件监听不可用，已切换为轮询检测：${error}`;
+  }
+}
+
 export async function reloadCurrentFileFromDisk() {
   const tab = getActiveTab();
   if (!tab?.path || tab.kind !== "normal") return;
   await reloadActiveFileFromDisk(tab.path);
   syncActiveTabFromProjection();
+  void syncExternalFileWatches();
   await persistConfig();
 }
 
@@ -508,6 +562,7 @@ export async function rebindCurrentFileToCandidate(path: string) {
   appStore.currentFilePath = path;
   rememberRecentFile(path);
   await refreshFileTree();
+  void syncExternalFileWatches();
   await persistConfig();
   appStore.statusMessage = `已将标签从 ${fileNameFromPath(previousPath)} 重新绑定到 ${fileNameFromPath(path)}`;
   return true;
@@ -525,6 +580,19 @@ function checkOpenFileSnapshotsOnEvent() {
 
 function checkOpenFileSnapshotsWhenVisible() {
   if (document.visibilityState === "visible") void checkOpenFileSnapshots();
+}
+
+function enableExternalFileFallbackPolling() {
+  if (typeof window === "undefined" || externalFileFallbackTimer) return;
+  externalFileFallbackTimer = window.setInterval(() => {
+    void checkOpenFileSnapshots();
+  }, EXTERNAL_FILE_CHECK_INTERVAL_MS);
+}
+
+function disableExternalFileFallbackPolling() {
+  if (!externalFileFallbackTimer || typeof window === "undefined") return;
+  window.clearInterval(externalFileFallbackTimer);
+  externalFileFallbackTimer = 0;
 }
 
 function updateTabExternalState(tab: DocumentTab, snapshot: FileSnapshot) {
@@ -599,6 +667,7 @@ export async function activateTab(tabId: string) {
 
 export async function closeTab(tabId: string) {
   await closeTabInternal(tabId, { ensureDefault: true });
+  void syncExternalFileWatches();
   await persistConfig();
 }
 
@@ -618,6 +687,7 @@ export async function closeOtherTabs(tabId: string) {
     await activateTab(tabId);
   }
   await persistConfig();
+  void syncExternalFileWatches();
 }
 
 export async function closeAllTabs() {
@@ -630,6 +700,7 @@ export async function closeAllTabs() {
     ensureDefaultTab();
   }
   await persistConfig();
+  void syncExternalFileWatches();
 }
 
 export async function reopenLastClosedTab() {

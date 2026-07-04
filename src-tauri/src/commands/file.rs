@@ -5,15 +5,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::RegexBuilder;
 use rfd::FileDialog;
+use tauri::{AppHandle, Emitter};
 
 use super::models::{
-    DirtyState, FileChunk, FileInfo, FileNode, LargeFileSession, LargeFindMatch, LargeFindOptions,
-    LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
+    DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent, LargeFileSession, LargeFindMatch,
+    LargeFindOptions, LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
 };
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
+const FILE_WATCH_EVENT: &str = "lightmark-file-watch-event";
 
 #[derive(Debug, Clone)]
 struct SessionState {
@@ -25,9 +28,18 @@ struct SessionState {
 }
 
 static LARGE_SESSIONS: OnceLock<Mutex<HashMap<String, SessionState>>> = OnceLock::new();
+static FILE_WATCHERS: OnceLock<Mutex<HashMap<String, FileWatcherEntry>>> = OnceLock::new();
+
+struct FileWatcherEntry {
+    _watcher: RecommendedWatcher,
+}
 
 fn sessions() -> &'static Mutex<HashMap<String, SessionState>> {
     LARGE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_watchers() -> &'static Mutex<HashMap<String, FileWatcherEntry>> {
+    FILE_WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[tauri::command]
@@ -522,6 +534,71 @@ pub fn list_markdown_files(folder: String) -> Result<Vec<FileNode>, String> {
 }
 
 #[tauri::command]
+pub fn watch_markdown_file(app: AppHandle, path: String) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_file() {
+        return Err(format!("File does not exist: {}", path_buf.display()));
+    }
+    if !is_markdown_file(&path_buf) {
+        return Err(format!("Not a Markdown file: {}", path_buf.display()));
+    }
+
+    let key = watch_path_key(&path_buf);
+    let mut guard = file_watchers()
+        .lock()
+        .map_err(|_| "File watcher lock was poisoned.".to_string())?;
+    if guard.contains_key(&key) {
+        return Ok(());
+    }
+
+    let event_path = path_to_string(path_buf.clone());
+    let app_handle = app.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            if event.is_ok() {
+                let _ = app_handle.emit(
+                    FILE_WATCH_EVENT,
+                    FileWatchEvent {
+                        path: event_path.clone(),
+                    },
+                );
+            }
+        },
+        Config::default(),
+    )
+    .map_err(|err| {
+        format!(
+            "Failed to create file watcher for {}: {err}",
+            path_buf.display()
+        )
+    })?;
+    watcher
+        .watch(&path_buf, RecursiveMode::NonRecursive)
+        .map_err(|err| format!("Failed to watch {}: {err}", path_buf.display()))?;
+    guard.insert(key, FileWatcherEntry { _watcher: watcher });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unwatch_markdown_file(path: String) -> Result<(), String> {
+    let key = watch_path_key(Path::new(&path));
+    let mut guard = file_watchers()
+        .lock()
+        .map_err(|_| "File watcher lock was poisoned.".to_string())?;
+    guard.remove(&key);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unwatch_all_markdown_files() -> Result<(), String> {
+    file_watchers()
+        .lock()
+        .map_err(|_| "File watcher lock was poisoned.".to_string())?
+        .clear();
+    Ok(())
+}
+
+#[tauri::command]
 pub fn find_similar_markdown_files(
     original_path: String,
     size: Option<u64>,
@@ -754,6 +831,14 @@ fn similar_markdown_files(
     });
     candidates.truncate(8);
     Ok(candidates)
+}
+
+fn watch_path_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase()
 }
 
 fn collect_similar_markdown_files(
@@ -1124,7 +1209,7 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{similar_markdown_files, write_text_file_safely};
+    use super::{similar_markdown_files, watch_path_key, write_text_file_safely};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1163,6 +1248,14 @@ mod tests {
         assert_eq!(matches[0].path, renamed.to_string_lossy());
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn watch_path_key_deduplicates_case_and_separators() {
+        let left = watch_path_key(PathBuf::from(r"C:\Docs\Note.md").as_path());
+        let right = watch_path_key(PathBuf::from(r"c:/docs/note.md").as_path());
+
+        assert_eq!(left, right);
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
