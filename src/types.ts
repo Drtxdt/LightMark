@@ -36,6 +36,18 @@ export interface PendingModeCursor {
   reason: "mode-switch";
 }
 
+export interface EditorPositionSnapshot {
+  editorMode: EditorMode;
+  markdownAnchor: number;
+  markdownHead: number;
+  markdownLine: number;
+  markdownColumn: number;
+  markdownLineText: string;
+  scrollTop: number;
+  scrollRatio: number;
+  updatedAt: number;
+}
+
 export interface FileNode {
   name: string;
   path: string;
@@ -67,6 +79,7 @@ export interface SessionTabState {
   kind: Extract<DocumentTabKind, "normal" | "large">;
   editorMode: EditorMode;
   lastActiveAt: number;
+  position?: EditorPositionSnapshot;
 }
 
 export interface ClosedTabRecord {
@@ -82,6 +95,7 @@ export interface NavigationLocation {
   editorMode: EditorMode;
   line?: number;
   anchor?: number;
+  position?: EditorPositionSnapshot;
   recordedAt: number;
 }
 
@@ -345,6 +359,7 @@ export interface DocumentTab {
   isDirty: boolean;
   editorMode: EditorMode;
   pendingModeCursor: PendingModeCursor | null;
+  position?: EditorPositionSnapshot;
   fileSnapshot?: FileSnapshot;
   externalState: ExternalFileState;
   externalSnapshot?: FileSnapshot;

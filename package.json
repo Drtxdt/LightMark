@@ -12,7 +12,8 @@
     "tauri:build": "tauri build",
     "tauri:build:app": "tauri build --no-bundle",
     "tauri:build:all": "tauri build --bundles msi nsis",
-    "check:wiki-links": "node scripts/check-wiki-links.mjs"
+    "check:wiki-links": "node scripts/check-wiki-links.mjs",
+    "check:editor-position": "node scripts/check-editor-position.mjs"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",

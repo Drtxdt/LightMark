@@ -9,6 +9,7 @@ import type {
   DirtyState,
   DocumentTab,
   DocumentMode,
+  EditorPositionSnapshot,
   EditorMode,
   ExternalFileState,
   ExportStatus,
@@ -30,6 +31,7 @@ import type {
   ThemeMode,
 } from "../types";
 import { buildTextDiffSummary } from "../utils/textDiff";
+import { mergeEditorPosition } from "../utils/editorPosition";
 import { extractOutlineWithLines } from "../utils/outline";
 import {
   backlinksForPath,
@@ -73,6 +75,7 @@ export const appStore = reactive({
   wikiBacklinksBusy: false,
   wikiBacklinksError: "",
   pendingModeCursor: null as PendingModeCursor | null,
+  pendingEditorPosition: null as EditorPositionSnapshot | null,
   exportStatus: {
     status: "idle",
     message: "",
@@ -114,6 +117,22 @@ export function setContent(content: string, dirty = true) {
   appStore.isDirty = dirty;
   syncActiveTabFromProjection();
   scheduleBacklinksRefresh();
+}
+
+export function updateActiveTabPosition(position: EditorPositionSnapshot) {
+  if (appStore.documentMode !== "normal") return;
+  const tab = getActiveTab();
+  if (!tab || tab.kind !== "normal") return;
+  const next = mergeEditorPosition(tab.position, position, appStore.currentContent.length);
+  tab.position = next;
+  appStore.pendingEditorPosition = next;
+}
+
+export function consumePendingEditorPosition(mode: EditorMode) {
+  const position = appStore.pendingEditorPosition;
+  if (!position || position.editorMode !== mode) return null;
+  appStore.pendingEditorPosition = null;
+  return position;
 }
 
 export async function loadConfig() {
@@ -356,6 +375,7 @@ export async function goBackNavigation() {
   const current = currentNavigationLocation();
   try {
     await openFile(target.path, { recordNavigation: false });
+    requestEditorPositionRestore(target.position);
     if (current) pushNavigationLocation(appStore.navigationForwardStack, current);
     appStore.statusMessage = "";
     return true;
@@ -375,6 +395,7 @@ export async function goForwardNavigation() {
   const current = currentNavigationLocation();
   try {
     await openFile(target.path, { recordNavigation: false });
+    requestEditorPositionRestore(target.position);
     if (current) pushNavigationLocation(appStore.navigationBackStack, current);
     appStore.statusMessage = "";
     return true;
@@ -1242,6 +1263,7 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             },
             isDirty: false,
             lastActiveAt: item.lastActiveAt,
+            position: normalizeSessionPosition(item.position, "wysiwyg"),
           }),
         );
       } else {
@@ -1258,6 +1280,7 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             isDirty: false,
             lastActiveAt: item.lastActiveAt,
             fileSnapshot,
+            position: normalizeSessionPosition(item.position, normalizeEditorMode(item.editorMode) ?? appStore.settings.editor.defaultMode),
           }),
         );
       }
@@ -1284,6 +1307,7 @@ function buildSessionRestoreState(): SessionRestoreState | undefined {
       kind: tab.kind === "large" ? "large" : "normal",
       editorMode: tab.editorMode,
       lastActiveAt: tab.lastActiveAt,
+      position: tab.kind === "normal" ? tab.position : undefined,
     }));
   if (openTabs.length === 0) return undefined;
   return {
@@ -1302,6 +1326,7 @@ function createTab(input: {
   isDirty: boolean;
   lastActiveAt?: number;
   fileSnapshot?: FileSnapshot;
+  position?: EditorPositionSnapshot;
 }) {
   const now = Date.now();
   const id = input.path ? tabIdForPath(input.path) : `untitled:${now}:${Math.random().toString(36).slice(2, 8)}`;
@@ -1316,6 +1341,7 @@ function createTab(input: {
     isDirty: input.isDirty,
     editorMode: input.editorMode,
     pendingModeCursor: null,
+    position: input.position,
     fileSnapshot: input.fileSnapshot,
     externalState: "clean",
     openedAt: now,
@@ -1348,6 +1374,7 @@ function projectTab(tab: DocumentTab) {
   appStore.isDirty = tab.isDirty;
   appStore.editorMode = tab.documentMode === "large" ? "wysiwyg" : tab.editorMode;
   appStore.pendingModeCursor = tab.pendingModeCursor;
+  requestEditorPositionRestore(tab.position);
   appStore.statusMessage =
     tab.documentMode === "large" && tab.largeFile
       ? `大文件模式：${formatBytes(tab.largeFile.sizeBytes)}，${tab.largeFile.totalLines} 行`
@@ -1365,6 +1392,9 @@ function syncActiveTabFromProjection() {
   tab.isDirty = appStore.isDirty;
   tab.editorMode = appStore.editorMode;
   tab.pendingModeCursor = appStore.pendingModeCursor;
+  if (appStore.pendingEditorPosition?.editorMode === tab.editorMode) {
+    tab.position = appStore.pendingEditorPosition;
+  }
   tab.lastActiveAt = Date.now();
 }
 
@@ -1524,13 +1554,28 @@ function recordCurrentNavigationBeforeOpening(nextPath: string) {
 
 function currentNavigationLocation(overrides: Partial<NavigationLocation> = {}): NavigationLocation | null {
   if (!appStore.currentFilePath) return null;
+  const tab = getActiveTab();
   return {
     path: appStore.currentFilePath,
     documentMode: appStore.documentMode,
     editorMode: appStore.editorMode,
+    position: tab?.position,
     recordedAt: Date.now(),
     ...overrides,
   };
+}
+
+function requestEditorPositionRestore(position: EditorPositionSnapshot | undefined) {
+  if (!position || typeof window === "undefined") return;
+  appStore.pendingEditorPosition = position;
+  window.setTimeout(() => {
+    window.dispatchEvent(new CustomEvent("lightmark:restore-position", { detail: position }));
+  }, 0);
+}
+
+function normalizeSessionPosition(position: EditorPositionSnapshot | undefined, editorMode: EditorMode) {
+  if (!position || position.editorMode !== editorMode) return undefined;
+  return mergeEditorPosition(position, position, Number.MAX_SAFE_INTEGER);
 }
 
 function pushNavigationLocation(stack: NavigationLocation[], location: NavigationLocation) {

@@ -5,10 +5,11 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
-import { appStore, setContent } from "../../stores/appStore";
+import { appStore, consumePendingEditorPosition, setContent, updateActiveTabPosition } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
+import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { flattenMarkdownFiles } from "../../utils/wikiLinks";
 
 const host = ref<HTMLElement | null>(null);
@@ -218,6 +219,10 @@ function extensions() {
         void insertImageFilesIntoSource(files, currentView, position ?? currentView.state.doc.length);
         return true;
       },
+      scroll(_event, currentView) {
+        captureSourcePosition(currentView);
+        return false;
+      },
     }),
     minimalTheme,
     EditorView.updateListener.of((update) => {
@@ -226,6 +231,7 @@ function extensions() {
         if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
       }
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
+      if (update.docChanged || update.selectionSet) captureSourcePosition(update.view);
     }),
   ];
 }
@@ -273,7 +279,9 @@ onMounted(() => {
     }),
   });
   restorePendingSourceCursor();
+  restorePendingSourcePosition();
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
+  window.addEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
@@ -289,11 +297,13 @@ watch(
       changes: { from: 0, to: view.state.doc.length, insert: appStore.currentContent },
     });
     applyingExternalChange = false;
+    restorePendingSourcePosition();
   },
 );
 
 onBeforeUnmount(() => {
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
+  window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
@@ -337,6 +347,46 @@ function restorePendingSourceCursor() {
 
 function clampOffset(value: number, max: number) {
   return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, max));
+}
+
+function captureSourcePosition(currentView = view) {
+  if (!currentView || appStore.editorMode !== "source" || appStore.documentMode !== "normal") return;
+  const scroller = currentView.scrollDOM;
+  const selection = currentView.state.selection.main;
+  updateActiveTabPosition(
+    buildEditorPositionSnapshot({
+      editorMode: "source",
+      markdown: currentView.state.doc.toString(),
+      markdownAnchor: selection.anchor,
+      markdownHead: selection.head,
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+    }),
+  );
+}
+
+function restorePendingSourcePosition() {
+  const position = consumePendingEditorPosition("source");
+  if (position) restoreSourcePosition(position);
+}
+
+function handleRestorePosition(event: CustomEvent) {
+  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal") return;
+  restoreSourcePosition(event.detail);
+}
+
+function restoreSourcePosition(position: any) {
+  if (!view || !position || position.editorMode !== "source") return;
+  const docLength = view.state.doc.length;
+  const anchor = clampOffset(position.markdownAnchor, docLength);
+  const head = clampOffset(position.markdownHead, docLength);
+  window.requestAnimationFrame(() => {
+    if (!view) return;
+    view.dispatch({ selection: { anchor, head } });
+    view.scrollDOM.scrollTop = scrollTopFromSnapshot(position, view.scrollDOM.scrollHeight, view.scrollDOM.clientHeight);
+    view.focus();
+  });
 }
 
 function handleFindCommand(event: CustomEvent<string>) {

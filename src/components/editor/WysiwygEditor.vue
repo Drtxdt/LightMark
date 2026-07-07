@@ -17,10 +17,11 @@ import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { appStore, openWikiLink, setContent } from "../../stores/appStore";
+import { appStore, consumePendingEditorPosition, openWikiLink, setContent, updateActiveTabPosition } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { parseWikiLinkHref, wikiLinkMarkdown } from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
@@ -2113,11 +2114,13 @@ const editor = useEditor({
     setContent(editorHtmlToMarkdown(editor.getHTML()), true);
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
+    captureWysiwygPosition(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
   },
   onSelectionUpdate({ editor }) {
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
+    captureWysiwygPosition(editor.view);
   },
   onFocus({ editor }) {
     updateCodeLanguageControl(editor.view);
@@ -2275,6 +2278,7 @@ function handleFloatingCodeLanguageKeydown(event: KeyboardEvent) {
 function handleEditorShellScroll() {
   if (codeLanguageControl.value.visible) updateCodeLanguageControl();
   if (tableControl.value.visible) updateTableControl();
+  captureWysiwygPosition();
 }
 
 function getSelectedTableInfo(view = editor.value?.view, explicitTable?: HTMLTableElement | null, explicitCell?: HTMLTableCellElement | null) {
@@ -2586,6 +2590,7 @@ watch(
   () => appStore.currentFilePath,
   () => {
     editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
+    schedulePendingWysiwygPositionRestore();
   },
 );
 
@@ -2595,6 +2600,7 @@ watch(
     if (appStore.editorMode === "wysiwyg") {
       editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
       schedulePendingWysiwygCursorRestore();
+      schedulePendingWysiwygPositionRestore();
     }
   },
 );
@@ -2603,13 +2609,16 @@ watch(
   () => editor.value,
   () => {
     schedulePendingWysiwygCursorRestore();
+    schedulePendingWysiwygPositionRestore();
   },
 );
 
 onMounted(() => {
   schedulePendingWysiwygCursorRestore();
+  schedulePendingWysiwygPositionRestore();
   document.addEventListener("pointerdown", handleDocumentTablePointerDown, true);
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
+  window.addEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
@@ -2620,6 +2629,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentTablePointerDown, true);
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
+  window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
@@ -2641,6 +2651,54 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
     markdownHead: docPosToMarkdownOffset(activeEditor.view.state, head, markdown),
     reason: "mode-switch",
   };
+}
+
+function captureWysiwygPosition(view = editor.value?.view) {
+  if (!view || appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  const shell = editorShell.value;
+  const markdown = appStore.currentContent || editorHtmlToMarkdown(editor.value?.getHTML() || "");
+  const { anchor, head } = view.state.selection;
+  updateActiveTabPosition(
+    buildEditorPositionSnapshot({
+      editorMode: "wysiwyg",
+      markdown,
+      markdownAnchor: docPosToMarkdownOffset(view.state, anchor, markdown),
+      markdownHead: docPosToMarkdownOffset(view.state, head, markdown),
+      scrollTop: shell?.scrollTop ?? 0,
+      scrollHeight: shell?.scrollHeight ?? 0,
+      clientHeight: shell?.clientHeight ?? 0,
+    }),
+  );
+}
+
+function schedulePendingWysiwygPositionRestore() {
+  const position = consumePendingEditorPosition("wysiwyg");
+  if (!position) return;
+  window.setTimeout(() => restoreWysiwygPosition(position), 0);
+}
+
+function handleRestorePosition(event: CustomEvent) {
+  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  restoreWysiwygPosition(event.detail);
+}
+
+function restoreWysiwygPosition(position: any) {
+  const activeEditor = editor.value;
+  const shell = editorShell.value;
+  if (!activeEditor || !position || position.editorMode !== "wysiwyg") return;
+  window.requestAnimationFrame(() => {
+    const view = editor.value?.view;
+    if (!view) return;
+    const docPos = markdownOffsetToDocPos(view.state, position.markdownAnchor, appStore.currentContent);
+    const headPos = markdownOffsetToDocPos(view.state, position.markdownHead, appStore.currentContent);
+    try {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, clampDocPos(docPos, view.state.doc.content.size), clampDocPos(headPos, view.state.doc.content.size))));
+    } catch {
+      scrollWysiwygPositionIntoView(view, docPos);
+    }
+    if (shell) shell.scrollTop = scrollTopFromSnapshot(position, shell.scrollHeight, shell.clientHeight);
+    view.focus();
+  });
 }
 
 function restorePendingWysiwygCursor() {
