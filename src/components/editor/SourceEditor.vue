@@ -5,12 +5,28 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
-import { appStore, consumePendingEditorPosition, setContent, updateActiveTabPosition } from "../../stores/appStore";
+import {
+  appStore,
+  consumePanePendingEditorPosition,
+  getPaneContent,
+  getPaneDocumentMode,
+  getPaneEditorMode,
+  getPanePendingModeCursor,
+  getPaneTab,
+  setPaneContent,
+  setPanePendingModeCursor,
+  updatePanePosition,
+} from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { flattenMarkdownFiles } from "../../utils/wikiLinks";
+import type { EditorPaneId } from "../../types";
+
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
+  paneId: "main",
+});
 
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
@@ -35,6 +51,10 @@ const wikiCompletionCandidates = computed(() => {
     .sort((left, right) => left.localeCompare(right, "zh-Hans-CN"))
     .slice(0, 8);
 });
+const paneTab = computed(() => getPaneTab(props.paneId));
+const paneContent = computed(() => getPaneContent(props.paneId));
+const paneEditorMode = computed(() => getPaneEditorMode(props.paneId));
+const paneDocumentMode = computed(() => getPaneDocumentMode(props.paneId));
 
 const setSourceFindDecorations = StateEffect.define<DecorationSet>();
 const sourceFindField = StateField.define<DecorationSet>({
@@ -227,7 +247,7 @@ function extensions() {
     minimalTheme,
     EditorView.updateListener.of((update) => {
       if (update.docChanged && !applyingExternalChange) {
-        setContent(update.state.doc.toString(), true);
+        setPaneContent(props.paneId, update.state.doc.toString(), true);
         if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
       }
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
@@ -274,7 +294,7 @@ onMounted(() => {
   view = new EditorView({
     parent: host.value,
     state: EditorState.create({
-      doc: appStore.currentContent,
+      doc: paneContent.value,
       extensions: extensions(),
     }),
   });
@@ -289,12 +309,12 @@ onMounted(() => {
 });
 
 watch(
-  () => appStore.currentFilePath,
+  () => paneTab.value?.id || "",
   () => {
     if (!view) return;
     applyingExternalChange = true;
     view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: appStore.currentContent },
+      changes: { from: 0, to: view.state.doc.length, insert: paneContent.value },
     });
     applyingExternalChange = false;
     restorePendingSourcePosition();
@@ -312,12 +332,12 @@ onBeforeUnmount(() => {
   view = null;
 });
 
-function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string }>) {
-  if (appStore.editorMode !== "source" || event.detail?.to !== "wysiwyg" || !view) return;
-  setContent(view.state.doc.toString(), true);
+function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
+  if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || event.detail?.to !== "wysiwyg" || !view) return;
+  setPaneContent(props.paneId, view.state.doc.toString(), true);
   const selection = view.state.selection.main;
   const line = view.state.doc.lineAt(selection.anchor);
-  appStore.pendingModeCursor = {
+  setPanePendingModeCursor(props.paneId, {
     targetMode: "wysiwyg",
     markdownAnchor: selection.anchor,
     markdownHead: selection.head,
@@ -325,13 +345,13 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
     markdownColumn: selection.anchor - line.from,
     markdownLineText: line.text,
     reason: "mode-switch",
-  };
+  });
 }
 
 function restorePendingSourceCursor() {
-  const pending = appStore.pendingModeCursor;
+  const pending = getPanePendingModeCursor(props.paneId);
   if (!view || !pending || pending.targetMode !== "source") return;
-  appStore.pendingModeCursor = null;
+  setPanePendingModeCursor(props.paneId, null);
   const docLength = view.state.doc.length;
   const anchor = clampOffset(pending.markdownAnchor, docLength);
   const head = clampOffset(pending.markdownHead, docLength);
@@ -350,10 +370,11 @@ function clampOffset(value: number, max: number) {
 }
 
 function captureSourcePosition(currentView = view) {
-  if (!currentView || appStore.editorMode !== "source" || appStore.documentMode !== "normal") return;
+  if (!currentView || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal") return;
   const scroller = currentView.scrollDOM;
   const selection = currentView.state.selection.main;
-  updateActiveTabPosition(
+  updatePanePosition(
+    props.paneId,
     buildEditorPositionSnapshot({
       editorMode: "source",
       markdown: currentView.state.doc.toString(),
@@ -367,12 +388,13 @@ function captureSourcePosition(currentView = view) {
 }
 
 function restorePendingSourcePosition() {
-  const position = consumePendingEditorPosition("source");
+  const position = consumePanePendingEditorPosition(props.paneId, "source");
   if (position) restoreSourcePosition(position);
 }
 
 function handleRestorePosition(event: CustomEvent) {
-  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal") return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  if (paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal") return;
   restoreSourcePosition(event.detail);
 }
 
@@ -390,7 +412,7 @@ function restoreSourcePosition(position: any) {
 }
 
 function handleFindCommand(event: CustomEvent<string>) {
-  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
   const command = event.detail || "refresh";
   if (command === "next" || command === "previous") {
     navigateSourceFind(command === "next" ? 1 : -1);
@@ -408,7 +430,7 @@ function handleFindCommand(event: CustomEvent<string>) {
 }
 
 function handleJumpLine(event: CustomEvent<number>) {
-  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
   const targetLine = Math.max(1, Math.min(Math.floor(event.detail) + 1, view.state.doc.lines));
   const line = view.state.doc.line(targetLine);
   view.dispatch({
@@ -554,7 +576,7 @@ function applySourceFindDecorations(currentIndex: number) {
 }
 
 function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: string[]; position?: { x?: number; y?: number } }>) {
-  if (appStore.editorMode !== "source" || appStore.documentMode !== "normal" || !view) return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
   const files = event.detail?.files || [];
   const paths = event.detail?.paths || [];
   if (files.length === 0 && paths.length === 0) return;

@@ -25,6 +25,7 @@ try {
     defaultSplitLayout,
     enableSplitLayout,
     normalizeSplitLayout,
+    paneTabId,
     resolveClosedTabSplitLayout,
     splitLayoutForPaneActivation,
   } = await import(pathToFileURL(tempPath).href);
@@ -36,6 +37,8 @@ try {
     activePaneId: "secondary",
     mainTabId: "tab-a",
     secondaryTabId: "tab-b",
+    mainTabIds: ["tab-a"],
+    secondaryTabIds: ["tab-b"],
     ratio: 0.5,
   });
 
@@ -43,10 +46,14 @@ try {
   assert.equal(activated.activePaneId, "secondary");
   assert.equal(activated.mainTabId, "tab-a");
   assert.equal(activated.secondaryTabId, "tab-c");
+  assert.deepEqual(activated.mainTabIds, ["tab-a"]);
+  assert.deepEqual(activated.secondaryTabIds, ["tab-b", "tab-c"]);
 
   const afterClose = resolveClosedTabSplitLayout(activated, "tab-c", ["tab-a", "tab-b"]);
   assert.equal(afterClose.secondaryTabId, "tab-b");
   assert.equal(afterClose.mainTabId, "tab-a");
+  assert.deepEqual(afterClose.mainTabIds, ["tab-a"]);
+  assert.deepEqual(afterClose.secondaryTabIds, ["tab-b"]);
 
   const normalized = normalizeSplitLayout(
     { enabled: true, activePaneId: "secondary", mainTabId: "missing", secondaryTabId: "tab-c", ratio: 0.95 },
@@ -58,8 +65,32 @@ try {
     activePaneId: "secondary",
     mainTabId: "tab-a",
     secondaryTabId: "tab-c",
+    mainTabIds: ["tab-a"],
+    secondaryTabIds: ["tab-c"],
     ratio: 0.7,
   });
+
+  const withNewSecondary = splitLayoutForPaneActivation(enabled, "secondary", "tab-c", tabs);
+  assert.deepEqual(withNewSecondary.mainTabIds, ["tab-a"]);
+  assert.deepEqual(withNewSecondary.secondaryTabIds, ["tab-b", "tab-c"]);
+
+  const singleEnabled = enableSplitLayout(defaultSplitLayout("tab-a"), ["tab-a"]);
+  assert.notEqual(singleEnabled.mainTabId, singleEnabled.secondaryTabId, "split panes must not point at the same tab");
+
+  const splitTabs = [
+    { id: "tab-a", content: "left" },
+    { id: "tab-b", content: "right" },
+  ];
+  const split = enableSplitLayout(defaultSplitLayout("tab-a"), splitTabs.map((tab) => tab.id));
+  const writePaneContent = (layout, paneId, content) => {
+    const tabId = paneTabId(layout, paneId);
+    const tab = splitTabs.find((item) => item.id === tabId);
+    if (tab) tab.content = content;
+  };
+  writePaneContent(split, "main", "left edited");
+  writePaneContent(split, "secondary", "right edited");
+  assert.equal(splitTabs[0].content, "left edited");
+  assert.equal(splitTabs[1].content, "right edited");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

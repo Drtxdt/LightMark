@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { appStore, setSplitRatio } from "../../stores/appStore";
+import { appStore, setActivePane, setSplitRatio } from "../../stores/appStore";
 import Sidebar from "./Sidebar.vue";
 import Toolbar from "./Toolbar.vue";
 import DocumentTabs from "./DocumentTabs.vue";
@@ -8,11 +8,9 @@ import ExternalFileNotice from "./ExternalFileNotice.vue";
 import StatusBar from "./StatusBar.vue";
 import ExportStatusStrip from "./ExportStatusStrip.vue";
 import EditorShell from "../editor/EditorShell.vue";
-import ReadonlyPane from "../editor/ReadonlyPane.vue";
 import FindReplacePanel from "../find/FindReplacePanel.vue";
 import { findReplaceStore } from "../../stores/findReplaceStore";
 import type { EditorPaneId } from "../../types";
-import { paneTabId } from "../../utils/splitLayout";
 
 const sidebarWidth = ref(280);
 const gridColumns = computed(() => {
@@ -20,13 +18,12 @@ const gridColumns = computed(() => {
 });
 const splitColumns = computed(() => `${appStore.splitLayout.ratio}fr 4px ${1 - appStore.splitLayout.ratio}fr`);
 
-function paneTab(paneId: EditorPaneId) {
-  const id = paneTabId(appStore.splitLayout, paneId);
-  return appStore.tabs.find((tab) => tab.id === id) ?? null;
-}
-
 function isActivePane(paneId: EditorPaneId) {
   return appStore.splitLayout.activePaneId === paneId;
+}
+
+function activatePane(paneId: EditorPaneId) {
+  void setActivePane(paneId);
 }
 
 function startResize(event: PointerEvent) {
@@ -91,26 +88,24 @@ function startSplitResize(event: PointerEvent) {
           <DocumentTabs pane-id="main" />
           <ExternalFileNotice />
           <FindReplacePanel v-if="findReplaceStore.open" />
-          <EditorShell class="min-h-0 flex-1" />
+          <EditorShell class="min-h-0 flex-1" pane-id="main" />
         </template>
         <div v-else class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: splitColumns }">
-          <section class="flex min-h-0 min-w-0 flex-col border-r border-paper-200/70 dark:border-paper-800/70" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('main') }">
+          <section class="flex min-h-0 min-w-0 flex-col border-r border-paper-200/70 dark:border-paper-800/70" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('main') }" @pointerdown.capture="activatePane('main')">
             <DocumentTabs pane-id="main" />
             <ExternalFileNotice v-if="isActivePane('main')" />
             <FindReplacePanel v-if="isActivePane('main') && findReplaceStore.open" />
-            <EditorShell v-if="isActivePane('main')" class="min-h-0 flex-1" />
-            <ReadonlyPane v-else class="min-h-0 flex-1" pane-id="main" :tab="paneTab('main')" />
+            <EditorShell class="min-h-0 flex-1" pane-id="main" />
           </section>
           <div
             class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
             @pointerdown="startSplitResize"
           />
-          <section class="flex min-h-0 min-w-0 flex-col" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('secondary') }">
+          <section class="flex min-h-0 min-w-0 flex-col" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('secondary') }" @pointerdown.capture="activatePane('secondary')">
             <DocumentTabs pane-id="secondary" />
             <ExternalFileNotice v-if="isActivePane('secondary')" />
             <FindReplacePanel v-if="isActivePane('secondary') && findReplaceStore.open" />
-            <EditorShell v-if="isActivePane('secondary')" class="min-h-0 flex-1" />
-            <ReadonlyPane v-else class="min-h-0 flex-1" pane-id="secondary" :tab="paneTab('secondary')" />
+            <EditorShell class="min-h-0 flex-1" pane-id="secondary" />
           </section>
         </div>
       </main>

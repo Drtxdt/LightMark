@@ -17,7 +17,19 @@ import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { appStore, consumePendingEditorPosition, openWikiLink, setContent, updateActiveTabPosition } from "../../stores/appStore";
+import {
+  appStore,
+  consumePanePendingEditorPosition,
+  getPaneContent,
+  getPaneDocumentMode,
+  getPaneEditorMode,
+  getPanePendingModeCursor,
+  getPaneTab,
+  openWikiLink,
+  setPaneContent,
+  setPanePendingModeCursor,
+  updatePanePosition,
+} from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
@@ -38,6 +50,11 @@ import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
+import type { EditorPaneId } from "../../types";
+
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
+  paneId: "main",
+});
 
 const lowlight = createLowlight(all);
 
@@ -95,6 +112,10 @@ const tableControl = ref({
 const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
+const paneTab = computed(() => getPaneTab(props.paneId));
+const paneContent = computed(() => getPaneContent(props.paneId));
+const paneEditorMode = computed(() => getPaneEditorMode(props.paneId));
+const paneDocumentMode = computed(() => getPaneDocumentMode(props.paneId));
 const floatingCodeLanguageCandidates = computed(() => filterCodeLanguages(codeLanguageControl.value.query));
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
 const githubAlertKinds = [
@@ -1907,7 +1928,7 @@ const editor = useEditor({
     FindReplaceDecorations,
     TyporaSourceMarkers,
   ],
-  content: renderMarkdownForEditorWithAssets(appStore.currentContent),
+  content: renderMarkdownForEditorWithAssets(paneContent.value),
   editorProps: {
     attributes: {
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
@@ -2111,7 +2132,7 @@ const editor = useEditor({
     },
   },
   onUpdate({ editor }) {
-    setContent(editorHtmlToMarkdown(editor.getHTML()), true);
+    setPaneContent(props.paneId, editorHtmlToMarkdown(editor.getHTML()), true);
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
@@ -2148,7 +2169,7 @@ function getSelectedCodeBlock(view: any) {
 }
 
 function updateCodeLanguageControl(view = editor.value?.view) {
-  if (!view || appStore.editorMode !== "wysiwyg") {
+  if (!view || paneEditorMode.value !== "wysiwyg") {
     codeLanguageControl.value.visible = false;
     return;
   }
@@ -2282,7 +2303,7 @@ function handleEditorShellScroll() {
 }
 
 function getSelectedTableInfo(view = editor.value?.view, explicitTable?: HTMLTableElement | null, explicitCell?: HTMLTableCellElement | null) {
-  if (!view || appStore.editorMode !== "wysiwyg") return null;
+  if (!view || paneEditorMode.value !== "wysiwyg") return null;
   const table = explicitTable || getCurrentTableElement();
   if (!table) return null;
   const resolved = resolveTableNodeFromDom(view, table, explicitCell);
@@ -2587,18 +2608,18 @@ function parseSingleMarkdownImage(markdown: string) {
 }
 
 watch(
-  () => appStore.currentFilePath,
+  () => paneTab.value?.id || "",
   () => {
-    editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
+    editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
     schedulePendingWysiwygPositionRestore();
   },
 );
 
 watch(
-  () => appStore.editorMode,
+  () => paneEditorMode.value,
   () => {
-    if (appStore.editorMode === "wysiwyg") {
-      editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(appStore.currentContent), { emitUpdate: false });
+    if (paneEditorMode.value === "wysiwyg") {
+      editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
       schedulePendingWysiwygCursorRestore();
       schedulePendingWysiwygPositionRestore();
     }
@@ -2639,26 +2660,27 @@ onBeforeUnmount(() => {
   editor.value?.destroy();
 });
 
-function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string }>) {
+function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
   const activeEditor = editor.value;
-  if (appStore.editorMode !== "wysiwyg" || event.detail?.to !== "source" || !activeEditor) return;
+  if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "wysiwyg" || event.detail?.to !== "source" || !activeEditor) return;
   const markdown = editorHtmlToMarkdown(activeEditor.getHTML());
-  setContent(markdown, true);
+  setPaneContent(props.paneId, markdown, true);
   const { anchor, head } = activeEditor.view.state.selection;
-  appStore.pendingModeCursor = {
+  setPanePendingModeCursor(props.paneId, {
     targetMode: "source",
     markdownAnchor: docPosToMarkdownOffset(activeEditor.view.state, anchor, markdown),
     markdownHead: docPosToMarkdownOffset(activeEditor.view.state, head, markdown),
     reason: "mode-switch",
-  };
+  });
 }
 
 function captureWysiwygPosition(view = editor.value?.view) {
-  if (!view || appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (!view || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const shell = editorShell.value;
-  const markdown = appStore.currentContent || editorHtmlToMarkdown(editor.value?.getHTML() || "");
+  const markdown = paneContent.value || editorHtmlToMarkdown(editor.value?.getHTML() || "");
   const { anchor, head } = view.state.selection;
-  updateActiveTabPosition(
+  updatePanePosition(
+    props.paneId,
     buildEditorPositionSnapshot({
       editorMode: "wysiwyg",
       markdown,
@@ -2672,13 +2694,14 @@ function captureWysiwygPosition(view = editor.value?.view) {
 }
 
 function schedulePendingWysiwygPositionRestore() {
-  const position = consumePendingEditorPosition("wysiwyg");
+  const position = consumePanePendingEditorPosition(props.paneId, "wysiwyg");
   if (!position) return;
   window.setTimeout(() => restoreWysiwygPosition(position), 0);
 }
 
 function handleRestorePosition(event: CustomEvent) {
-  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  if (paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   restoreWysiwygPosition(event.detail);
 }
 
@@ -2689,8 +2712,8 @@ function restoreWysiwygPosition(position: any) {
   window.requestAnimationFrame(() => {
     const view = editor.value?.view;
     if (!view) return;
-    const docPos = markdownOffsetToDocPos(view.state, position.markdownAnchor, appStore.currentContent);
-    const headPos = markdownOffsetToDocPos(view.state, position.markdownHead, appStore.currentContent);
+    const docPos = markdownOffsetToDocPos(view.state, position.markdownAnchor, paneContent.value);
+    const headPos = markdownOffsetToDocPos(view.state, position.markdownHead, paneContent.value);
     try {
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, clampDocPos(docPos, view.state.doc.content.size), clampDocPos(headPos, view.state.doc.content.size))));
     } catch {
@@ -2702,27 +2725,28 @@ function restoreWysiwygPosition(position: any) {
 }
 
 function restorePendingWysiwygCursor() {
-  const pending = appStore.pendingModeCursor;
+  const pending = getPanePendingModeCursor(props.paneId);
   if (!pending || pending.targetMode !== "wysiwyg") return false;
   const view = editor.value?.view;
   if (!view) return false;
   window.requestAnimationFrame(() => {
     const activeView = editor.value?.view;
-    if (!activeView || appStore.pendingModeCursor !== pending) return;
-    const target = findWysiwygScrollTarget(activeView, pending, appStore.currentContent);
+    if (!activeView || getPanePendingModeCursor(props.paneId) !== pending) return;
+    const target = findWysiwygScrollTarget(activeView, pending, paneContent.value);
     if (target) {
       target.scrollIntoView({ block: "center", inline: "nearest" });
     } else {
-      const scrollPos = markdownOffsetToDocPos(activeView.state, pending.markdownAnchor, appStore.currentContent);
+      const scrollPos = markdownOffsetToDocPos(activeView.state, pending.markdownAnchor, paneContent.value);
       scrollWysiwygPositionIntoView(activeView, scrollPos);
     }
-    if (appStore.pendingModeCursor === pending) appStore.pendingModeCursor = null;
+    if (getPanePendingModeCursor(props.paneId) === pending) setPanePendingModeCursor(props.paneId, null);
   });
   return true;
 }
 
 function schedulePendingWysiwygCursorRestore(attempt = 0) {
-  if (!appStore.pendingModeCursor || appStore.pendingModeCursor.targetMode !== "wysiwyg") return;
+  const pending = getPanePendingModeCursor(props.paneId);
+  if (!pending || pending.targetMode !== "wysiwyg") return;
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   pendingWysiwygRestoreTimer = window.setTimeout(() => {
     pendingWysiwygRestoreTimer = null;
@@ -2844,7 +2868,7 @@ function normalizeDomTextForSearch(value: string) {
 }
 
 function handleFindCommand(event: CustomEvent<string>) {
-  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const command = event.detail || "refresh";
   if (command === "next" || command === "previous") {
     navigateWysiwygFind(command === "next" ? 1 : -1);
@@ -2974,7 +2998,7 @@ function textOffsetToDocPos(segments: Array<{ from: number; text: string; start:
 }
 
 function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetail>) {
-  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const command = event.detail?.command;
   switch (command) {
     case "bold":
@@ -3006,7 +3030,7 @@ function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetai
 }
 
 function handleGlobalImageInsert(event: CustomEvent<ImageInsertDetail>) {
-  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const files = event.detail?.files || [];
   const paths = event.detail?.paths || [];
   if (files.length === 0 && paths.length === 0) return;
@@ -3997,7 +4021,7 @@ function scrollInternalLink(href: string) {
 }
 
 function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string }>) {
-  if (appStore.editorMode !== "wysiwyg" || appStore.documentMode !== "normal") return;
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const id = event.detail?.id;
   const target = id ? document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${cssEscape(id)}"]`) : null;
   const fallback = event.detail?.text ? findHeadingByText(event.detail.text) : null;

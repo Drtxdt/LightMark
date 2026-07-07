@@ -1,14 +1,22 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
-import { appStore } from "../../stores/appStore";
+import { computed, ref, watch } from "vue";
+import { getPaneDocumentMode, getPaneEditorMode, getPaneTab } from "../../stores/appStore";
 import LargeMarkdownEditor from "./LargeMarkdownEditor.vue";
 import SourceEditor from "./SourceEditor.vue";
 import WysiwygEditor from "./WysiwygEditor.vue";
+import type { EditorPaneId } from "../../types";
+
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
+  paneId: "main",
+});
 
 const pageTransition = ref("editor-page-flip-to-source");
+const paneTab = computed(() => getPaneTab(props.paneId));
+const paneDocumentMode = computed(() => getPaneDocumentMode(props.paneId));
+const paneEditorMode = computed(() => getPaneEditorMode(props.paneId));
 
 watch(
-  () => appStore.editorMode,
+  () => paneEditorMode.value,
   (mode, previousMode) => {
     if (!previousMode || mode === previousMode) return;
     pageTransition.value = mode === "source" ? "editor-page-flip-to-source" : "editor-page-flip-to-wysiwyg";
@@ -18,11 +26,11 @@ watch(
 
 <template>
   <section class="editor-page-shell h-full min-h-0 overflow-hidden">
-    <LargeMarkdownEditor v-if="appStore.documentMode === 'large'" :key="appStore.activeTabId" />
+    <LargeMarkdownEditor v-if="paneDocumentMode === 'large'" :key="paneTab?.id" />
     <Transition v-else :name="pageTransition">
-      <div :key="`${appStore.activeTabId}:${appStore.editorMode}`" class="editor-page">
-        <WysiwygEditor v-if="appStore.editorMode === 'wysiwyg'" />
-        <SourceEditor v-else />
+      <div :key="`${paneTab?.id || 'empty'}:${paneEditorMode}`" class="editor-page">
+        <WysiwygEditor v-if="paneEditorMode === 'wysiwyg'" :pane-id="paneId" />
+        <SourceEditor v-else :pane-id="paneId" />
       </div>
     </Transition>
   </section>

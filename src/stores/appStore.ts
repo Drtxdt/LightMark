@@ -124,12 +124,76 @@ export const quickOpenCandidates = computed(() => {
 });
 
 export function setContent(content: string, dirty = true) {
-  if (appStore.documentMode === "large") return;
-  ensureEditableTab();
-  appStore.currentContent = content;
-  appStore.isDirty = dirty;
-  syncActiveTabFromProjection();
+  setPaneContent(appStore.splitLayout.activePaneId, content, dirty);
+}
+
+export function setPaneContent(paneId: EditorPaneId, content: string, dirty = true) {
+  const tab = getPaneTab(paneId);
+  if (tab?.documentMode === "large") return;
+  if (!tab && paneId === appStore.splitLayout.activePaneId) ensureEditableTab();
+  const target = getPaneTab(paneId);
+  if (!target || target.documentMode === "large") return;
+  target.content = content;
+  target.isDirty = dirty;
+  target.documentMode = "normal";
+  if (paneId === appStore.splitLayout.activePaneId || target.id === appStore.activeTabId) {
+    appStore.currentContent = content;
+    appStore.isDirty = dirty;
+    appStore.documentMode = target.documentMode;
+  }
   scheduleBacklinksRefresh();
+}
+
+export function getPaneTab(paneId: EditorPaneId) {
+  const id = paneTabId(appStore.splitLayout, paneId);
+  return appStore.tabs.find((tab) => tab.id === id) ?? null;
+}
+
+export function getPaneEditorMode(paneId: EditorPaneId) {
+  const tab = getPaneTab(paneId);
+  return tab?.documentMode === "large" ? "wysiwyg" : tab?.editorMode ?? appStore.editorMode;
+}
+
+export function getPaneDocumentMode(paneId: EditorPaneId) {
+  return getPaneTab(paneId)?.documentMode ?? appStore.documentMode;
+}
+
+export function getPaneContent(paneId: EditorPaneId) {
+  return getPaneTab(paneId)?.content ?? "";
+}
+
+export function updatePanePosition(paneId: EditorPaneId, position: EditorPositionSnapshot) {
+  const tab = getPaneTab(paneId);
+  if (!tab || tab.kind !== "normal") return;
+  const next = mergeEditorPosition(tab.position, position, tab.content.length);
+  tab.position = next;
+  if (paneId === appStore.splitLayout.activePaneId || tab.id === appStore.activeTabId) {
+    appStore.pendingEditorPosition = next;
+  }
+}
+
+export function getPanePendingModeCursor(paneId: EditorPaneId) {
+  return getPaneTab(paneId)?.pendingModeCursor ?? null;
+}
+
+export function setPanePendingModeCursor(paneId: EditorPaneId, cursor: PendingModeCursor | null) {
+  const tab = getPaneTab(paneId);
+  if (tab) tab.pendingModeCursor = cursor;
+  if (paneId === appStore.splitLayout.activePaneId || tab?.id === appStore.activeTabId) {
+    appStore.pendingModeCursor = cursor;
+  }
+}
+
+export function consumePanePendingEditorPosition(paneId: EditorPaneId, mode: EditorMode) {
+  const tab = getPaneTab(paneId);
+  const position = tab?.position;
+  if (!position || position.editorMode !== mode) return null;
+  return position;
+}
+
+export function syncActivePaneProjection() {
+  const tab = getPaneTab(appStore.splitLayout.activePaneId) ?? getActiveTab();
+  if (tab) projectTab(tab);
 }
 
 export function updateActiveTabPosition(position: EditorPositionSnapshot) {
@@ -789,7 +853,7 @@ function dismissTabExternalState(tab: DocumentTab) {
   tab.externalDetectedAt = undefined;
 }
 
-export function createUntitledTab(content = "", dirty = false) {
+export function createUntitledTab(content = "", dirty = false, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
   syncActiveTabFromProjection();
   const tab = createTab({
     path: "",
@@ -801,7 +865,7 @@ export function createUntitledTab(content = "", dirty = false) {
     isDirty: dirty,
   });
   appStore.tabs.push(tab);
-  projectTabInPane(tab, appStore.splitLayout.activePaneId);
+  projectTabInPane(tab, paneId);
   void persistConfig();
   return tab;
 }
@@ -837,9 +901,12 @@ export async function setActivePane(paneId: EditorPaneId) {
 
 export async function toggleSplitLayout() {
   syncActiveTabFromProjection();
-  appStore.splitLayout = appStore.splitLayout.enabled
-    ? disableSplitLayout(appStore.splitLayout)
-    : enableSplitLayout(appStore.splitLayout, tabIds());
+  if (appStore.splitLayout.enabled) {
+    appStore.splitLayout = disableSplitLayout(appStore.splitLayout);
+  } else {
+    appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
+    ensureSecondarySplitTab();
+  }
   const tab = appStore.tabs.find((item) => item.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ?? getActiveTab();
   if (tab) projectTab(tab);
   await persistConfig();
@@ -954,21 +1021,27 @@ export async function createNewFile() {
   await openFile(path);
 }
 
-export function switchMode(mode: EditorMode) {
-  if (appStore.documentMode === "large") {
-    appStore.editorMode = "wysiwyg";
+export function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+  const tab = getPaneTab(paneId);
+  if (!tab) return;
+  if (tab.documentMode === "large") {
+    tab.editorMode = "wysiwyg";
+    if (paneId === appStore.splitLayout.activePaneId) appStore.editorMode = "wysiwyg";
     return;
   }
-  if (mode === appStore.editorMode) return;
+  if (mode === tab.editorMode) return;
   if (typeof window !== "undefined") {
     window.dispatchEvent(
       new CustomEvent("lightmark:capture-mode-cursor", {
-        detail: { from: appStore.editorMode, to: mode },
+        detail: { from: tab.editorMode, to: mode, paneId },
       }),
     );
   }
-  appStore.editorMode = mode;
-  syncActiveTabFromProjection();
+  tab.editorMode = mode;
+  if (paneId === appStore.splitLayout.activePaneId || tab.id === appStore.activeTabId) {
+    appStore.editorMode = mode;
+    syncActiveTabFromProjection();
+  }
 }
 
 export async function readLargeFileChunk(startLine: number, lineCount: number) {
@@ -1428,6 +1501,22 @@ function ensureEditableTab() {
   });
   appStore.tabs.push(tab);
   projectTabInPane(tab, appStore.splitLayout.activePaneId);
+}
+
+function ensureSecondarySplitTab() {
+  if (!appStore.splitLayout.enabled) return;
+  if (appStore.splitLayout.secondaryTabId && appStore.splitLayout.secondaryTabId !== appStore.splitLayout.mainTabId) return;
+  const tab = createTab({
+    path: "",
+    kind: "untitled",
+    content: "",
+    documentMode: "normal",
+    editorMode: appStore.settings.editor.defaultMode,
+    largeFile: null,
+    isDirty: false,
+  });
+  appStore.tabs.push(tab);
+  projectTabInPane(tab, "secondary");
 }
 
 function projectTabInPane(tab: DocumentTab, paneId: EditorPaneId) {

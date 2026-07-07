@@ -12,13 +12,17 @@ import {
   reopenLastClosedTab,
   setActivePane,
 } from "../../stores/appStore";
-import type { EditorPaneId } from "../../types";
-import { paneTabId } from "../../utils/splitLayout";
+import type { DocumentTab, EditorPaneId } from "../../types";
+import { paneTabId, paneTabIds } from "../../utils/splitLayout";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
 });
-const visibleTabs = computed(() => appStore.tabs);
+const visibleTabs = computed(() => {
+  if (!appStore.splitLayout.enabled) return appStore.tabs;
+  const ids = paneTabIds(appStore.splitLayout, props.paneId);
+  return ids.map((id) => appStore.tabs.find((tab) => tab.id === id)).filter((tab): tab is DocumentTab => Boolean(tab));
+});
 const activePaneTabId = computed(() => paneTabId(appStore.splitLayout, props.paneId) || appStore.activeTabId);
 const draggedTabId = ref("");
 const menu = reactive({
@@ -105,7 +109,7 @@ async function runMenuAction(action: () => Promise<unknown> | unknown) {
 
 async function createTab() {
   await setActivePane(props.paneId);
-  createUntitledTab("", false);
+  createUntitledTab("", false, props.paneId);
 }
 </script>
 

@@ -81,6 +81,8 @@ export interface SplitLayoutState {
   activePaneId: EditorPaneId;
   mainTabId: string;
   secondaryTabId: string;
+  mainTabIds: string[];
+  secondaryTabIds: string[];
   ratio: number;
 }
 
