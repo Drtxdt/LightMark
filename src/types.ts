@@ -1,4 +1,5 @@
 export type EditorMode = "wysiwyg" | "source";
+export type EditorPaneId = "main" | "secondary";
 export type ThemeMode = "light" | "dark" | "system";
 export type DocumentMode = "normal" | "large";
 export type DocumentTabKind = "normal" | "large" | "untitled";
@@ -72,6 +73,15 @@ export interface AppConfig {
 export interface SessionRestoreState {
   openTabs: SessionTabState[];
   activeTabKey?: string;
+  splitLayout?: SplitLayoutState;
+}
+
+export interface SplitLayoutState {
+  enabled: boolean;
+  activePaneId: EditorPaneId;
+  mainTabId: string;
+  secondaryTabId: string;
+  ratio: number;
 }
 
 export interface SessionTabState {
@@ -93,6 +103,7 @@ export interface NavigationLocation {
   path: string;
   documentMode: DocumentMode;
   editorMode: EditorMode;
+  paneId?: EditorPaneId;
   line?: number;
   anchor?: number;
   position?: EditorPositionSnapshot;

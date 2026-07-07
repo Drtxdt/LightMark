@@ -2,16 +2,24 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import {
   appStore,
-  activateTab,
+  activateTabInOtherPane,
+  activateTabInPane,
   closeAllTabs,
   closeOtherTabs,
   closeTab,
   createUntitledTab,
   moveTab,
   reopenLastClosedTab,
+  setActivePane,
 } from "../../stores/appStore";
+import type { EditorPaneId } from "../../types";
+import { paneTabId } from "../../utils/splitLayout";
 
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
+  paneId: "main",
+});
 const visibleTabs = computed(() => appStore.tabs);
+const activePaneTabId = computed(() => paneTabId(appStore.splitLayout, props.paneId) || appStore.activeTabId);
 const draggedTabId = ref("");
 const menu = reactive({
   open: false,
@@ -43,6 +51,10 @@ function externalTitle(state: string) {
 async function onClose(event: MouseEvent, tabId: string) {
   event.stopPropagation();
   await closeTab(tabId);
+}
+
+async function activatePaneTab(tabId: string) {
+  await activateTabInPane(props.paneId, tabId);
 }
 
 async function onAuxClick(event: MouseEvent, tabId: string) {
@@ -91,7 +103,8 @@ async function runMenuAction(action: () => Promise<unknown> | unknown) {
   await action();
 }
 
-function createTab() {
+async function createTab() {
+  await setActivePane(props.paneId);
   createUntitledTab("", false);
 }
 </script>
@@ -106,13 +119,13 @@ function createTab() {
       :key="tab.id"
       class="document-tab group flex h-8 max-w-56 min-w-28 items-center gap-2 rounded-t-md border px-3 text-left text-xs transition-colors"
       :class="
-        tab.id === appStore.activeTabId
+        tab.id === activePaneTabId
           ? 'border-paper-200 border-b-paper-50 bg-paper-50 text-ink-900 shadow-sm dark:border-paper-800 dark:border-b-paper-950 dark:bg-paper-950 dark:text-ink-100'
           : 'border-transparent bg-transparent text-ink-500 hover:bg-paper-200/70 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'
       "
       :title="tabTitle(tab.path)"
       draggable="true"
-      @click="activateTab(tab.id)"
+      @click="activatePaneTab(tab.id)"
       @auxclick="onAuxClick($event, tab.id)"
       @contextmenu="openMenu($event, tab.id)"
       @dragstart="onDragStart($event, tab.id)"
@@ -151,6 +164,7 @@ function createTab() {
       @click.stop
     >
       <button type="button" class="tab-menu-item" role="menuitem" @click="runMenuAction(() => closeTab(menu.tabId))">关闭</button>
+      <button type="button" class="tab-menu-item" role="menuitem" @click="runMenuAction(() => activateTabInOtherPane(menu.tabId))">在另一栏打开</button>
       <button type="button" class="tab-menu-item" role="menuitem" @click="runMenuAction(() => closeOtherTabs(menu.tabId))">关闭其他</button>
       <button type="button" class="tab-menu-item" role="menuitem" @click="runMenuAction(() => closeAllTabs())">关闭全部</button>
       <button

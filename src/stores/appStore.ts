@@ -10,6 +10,7 @@ import type {
   DocumentTab,
   DocumentMode,
   EditorPositionSnapshot,
+  EditorPaneId,
   EditorMode,
   ExternalFileState,
   ExportStatus,
@@ -27,12 +28,23 @@ import type {
   SessionRestoreState,
   SessionTabState,
   SimilarFileCandidate,
+  SplitLayoutState,
   TextEdit,
   ThemeMode,
 } from "../types";
 import { buildTextDiffSummary } from "../utils/textDiff";
 import { mergeEditorPosition } from "../utils/editorPosition";
 import { extractOutlineWithLines } from "../utils/outline";
+import {
+  defaultSplitLayout,
+  disableSplitLayout,
+  enableSplitLayout,
+  normalizeSplitLayout,
+  otherPaneId,
+  paneTabId,
+  resolveClosedTabSplitLayout,
+  splitLayoutForPaneActivation,
+} from "../utils/splitLayout";
 import {
   backlinksForPath,
   flattenMarkdownFiles,
@@ -53,6 +65,7 @@ export const appStore = reactive({
   editorMode: "wysiwyg" as EditorMode,
   tabs: [] as DocumentTab[],
   activeTabId: "",
+  splitLayout: defaultSplitLayout() as SplitLayoutState,
   closedTabs: [] as ClosedTabRecord[],
   quickOpenOpen: false,
   quickOpenQuery: "",
@@ -143,6 +156,7 @@ export async function loadConfig() {
   resetOpenDocument();
   appStore.tabs = [];
   appStore.activeTabId = "";
+  appStore.splitLayout = defaultSplitLayout();
   appStore.currentWorkspace = "";
   appStore.fileTree = [];
   if (shouldRestoreSession(config)) {
@@ -179,9 +193,10 @@ export async function openWorkspace(folder?: string) {
   await persistConfig();
 }
 
-export async function openFile(path?: string, options: { recordNavigation?: boolean } = {}) {
+export async function openFile(path?: string, options: { recordNavigation?: boolean; paneId?: EditorPaneId } = {}) {
   const selected = path ?? (await invoke<string | null>("open_file_dialog"));
   if (!selected) return;
+  const paneId = options.paneId ?? appStore.splitLayout.activePaneId;
   const shouldRecordNavigation = options.recordNavigation !== false;
   if (shouldRecordNavigation) {
     recordCurrentNavigationBeforeOpening(selected);
@@ -190,7 +205,7 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
   syncActiveTabFromProjection();
   const existing = findFileTab(selected);
   if (existing) {
-    await activateTab(existing.id);
+    await activateTabInPane(paneId, existing.id);
     await checkDraftForOpenedFile(selected);
     void syncExternalFileWatches();
     await persistConfig();
@@ -233,7 +248,7 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
     appStore.statusMessage = "";
   }
   appStore.tabs.push(tab);
-  projectTab(tab);
+  projectTabInPane(tab, paneId);
   rememberRecentFile(selected);
   await checkDraftForOpenedFile(selected);
   void syncExternalFileWatches();
@@ -244,6 +259,23 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
 export async function navigateToFilePath(path: string) {
   recordNavigationLocation();
   await openFile(path, { recordNavigation: false });
+}
+
+export async function openFileInOtherPane(path?: string) {
+  const sourcePaneId = appStore.splitLayout.activePaneId;
+  if (!appStore.splitLayout.enabled) {
+    appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
+  }
+  const paneId = otherPaneId(sourcePaneId);
+  await openFile(path, { paneId });
+}
+
+export async function activateTabInOtherPane(tabId: string) {
+  const sourcePaneId = appStore.splitLayout.activePaneId;
+  if (!appStore.splitLayout.enabled) {
+    appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
+  }
+  await activateTabInPane(otherPaneId(sourcePaneId), tabId);
 }
 
 export async function openWikiLink(target: WikiLinkTarget) {
@@ -374,7 +406,7 @@ export async function goBackNavigation() {
   }
   const current = currentNavigationLocation();
   try {
-    await openFile(target.path, { recordNavigation: false });
+    await openFile(target.path, { recordNavigation: false, paneId: target.paneId });
     requestEditorPositionRestore(target.position);
     if (current) pushNavigationLocation(appStore.navigationForwardStack, current);
     appStore.statusMessage = "";
@@ -394,7 +426,7 @@ export async function goForwardNavigation() {
   }
   const current = currentNavigationLocation();
   try {
-    await openFile(target.path, { recordNavigation: false });
+    await openFile(target.path, { recordNavigation: false, paneId: target.paneId });
     requestEditorPositionRestore(target.position);
     if (current) pushNavigationLocation(appStore.navigationBackStack, current);
     appStore.statusMessage = "";
@@ -769,7 +801,7 @@ export function createUntitledTab(content = "", dirty = false) {
     isDirty: dirty,
   });
   appStore.tabs.push(tab);
-  projectTab(tab);
+  projectTabInPane(tab, appStore.splitLayout.activePaneId);
   void persistConfig();
   return tab;
 }
@@ -780,13 +812,42 @@ export function ensureDefaultTab() {
 }
 
 export async function activateTab(tabId: string) {
-  if (tabId === appStore.activeTabId) return;
+  await activateTabInPane(appStore.splitLayout.activePaneId, tabId);
+}
+
+export async function activateTabInPane(paneId: EditorPaneId, tabId: string) {
+  if (tabId === appStore.activeTabId && paneId === appStore.splitLayout.activePaneId) return;
   syncActiveTabFromProjection();
   const tab = appStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
-  projectTab(tab);
+  projectTabInPane(tab, paneId);
   void refreshBacklinks();
   await persistConfig();
+}
+
+export async function setActivePane(paneId: EditorPaneId) {
+  if (paneId === appStore.splitLayout.activePaneId) return;
+  syncActiveTabFromProjection();
+  const nextTabId = paneTabId(appStore.splitLayout, paneId) || appStore.activeTabId;
+  const tab = appStore.tabs.find((item) => item.id === nextTabId) ?? getActiveTab();
+  appStore.splitLayout = normalizeSplitLayout({ ...appStore.splitLayout, activePaneId: paneId }, tabIds(), tab?.id ?? "");
+  if (tab) projectTab(tab);
+  await persistConfig();
+}
+
+export async function toggleSplitLayout() {
+  syncActiveTabFromProjection();
+  appStore.splitLayout = appStore.splitLayout.enabled
+    ? disableSplitLayout(appStore.splitLayout)
+    : enableSplitLayout(appStore.splitLayout, tabIds());
+  const tab = appStore.tabs.find((item) => item.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ?? getActiveTab();
+  if (tab) projectTab(tab);
+  await persistConfig();
+}
+
+export function setSplitRatio(ratio: number) {
+  appStore.splitLayout = normalizeSplitLayout({ ...appStore.splitLayout, ratio }, tabIds(), appStore.activeTabId);
+  void persistConfig();
 }
 
 export async function closeTab(tabId: string) {
@@ -973,6 +1034,7 @@ async function closeTabInternal(
   rememberClosedTab(closingTab);
   await closeLargeFileSession();
   appStore.tabs.splice(index, 1);
+  appStore.splitLayout = resolveClosedTabSplitLayout(appStore.splitLayout, tabId, tabIds());
 
   if (appStore.tabs.length === 0) {
     resetOpenDocument();
@@ -981,8 +1043,9 @@ async function closeTabInternal(
   }
 
   const preferred = options.nextActiveId ? appStore.tabs.find((item) => item.id === options.nextActiveId) : null;
-  const next = preferred ?? appStore.tabs[Math.max(0, Math.min(index, appStore.tabs.length - 1))];
-  projectTab(next);
+  const paneNext = appStore.tabs.find((item) => item.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId));
+  const next = preferred ?? paneNext ?? appStore.tabs[Math.max(0, Math.min(index, appStore.tabs.length - 1))];
+  projectTabInPane(next, appStore.splitLayout.activePaneId);
   return true;
 }
 
@@ -1290,7 +1353,9 @@ async function restoreSession(session: SessionRestoreState | undefined) {
   }
   if (restored.length === 0) return;
   appStore.tabs = restored;
+  appStore.splitLayout = normalizeSplitLayout(session.splitLayout, restored.map((tab) => tab.id), restored[0]?.id ?? "");
   const active =
+    restored.find((tab) => appStore.splitLayout.activePaneId && tab.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ??
     restored.find((tab) => session.activeTabKey && isSamePath(tab.path, session.activeTabKey)) ??
     restored.slice().sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   projectTab(active);
@@ -1313,6 +1378,7 @@ function buildSessionRestoreState(): SessionRestoreState | undefined {
   return {
     openTabs,
     activeTabKey: getActiveTab()?.path || undefined,
+    splitLayout: normalizeSplitLayout(appStore.splitLayout, appStore.tabs.map((tab) => tab.id), appStore.activeTabId),
   };
 }
 
@@ -1361,6 +1427,11 @@ function ensureEditableTab() {
     isDirty: appStore.isDirty,
   });
   appStore.tabs.push(tab);
+  projectTabInPane(tab, appStore.splitLayout.activePaneId);
+}
+
+function projectTabInPane(tab: DocumentTab, paneId: EditorPaneId) {
+  appStore.splitLayout = splitLayoutForPaneActivation(appStore.splitLayout, paneId, tab.id, tabIds());
   projectTab(tab);
 }
 
@@ -1408,6 +1479,7 @@ function retargetActiveTab(path: string) {
   tab.fileSnapshot = undefined;
   clearTabExternalState(tab);
   appStore.activeTabId = tab.id;
+  appStore.splitLayout = splitLayoutForPaneActivation(appStore.splitLayout, appStore.splitLayout.activePaneId, tab.id, tabIds());
 }
 
 function getActiveTab() {
@@ -1416,6 +1488,10 @@ function getActiveTab() {
 
 function findFileTab(path: string) {
   return appStore.tabs.find((tab) => tab.path && isSamePath(tab.path, path)) ?? null;
+}
+
+function tabIds() {
+  return appStore.tabs.map((tab) => tab.id);
 }
 
 function tabIdForPath(path: string) {
@@ -1559,6 +1635,7 @@ function currentNavigationLocation(overrides: Partial<NavigationLocation> = {}):
     path: appStore.currentFilePath,
     documentMode: appStore.documentMode,
     editorMode: appStore.editorMode,
+    paneId: appStore.splitLayout.activePaneId,
     position: tab?.position,
     recordedAt: Date.now(),
     ...overrides,
@@ -1692,6 +1769,7 @@ function resetOpenDocument() {
   appStore.isDirty = false;
   appStore.editorMode = "wysiwyg";
   appStore.activeTabId = "";
+  appStore.splitLayout = defaultSplitLayout();
   appStore.pendingModeCursor = null;
   appStore.statusMessage = "";
 }

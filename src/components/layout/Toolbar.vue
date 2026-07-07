@@ -9,6 +9,7 @@ import {
   saveCurrentFile,
   setTheme,
   switchMode,
+  toggleSplitLayout,
 } from "../../stores/appStore";
 import EditorModeToggle from "./EditorModeToggle.vue";
 import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
@@ -84,6 +85,9 @@ function openCommandPalette() {
       </button>
       <button class="lm-toolbar-button primary" title="保存" aria-label="保存" @click="run(saveCurrentFile)">
         <span class="tb-ico tb-ico-save" aria-hidden="true"></span>
+      </button>
+      <button class="lm-toolbar-button" :title="appStore.splitLayout.enabled ? '关闭分屏' : '左右分屏'" :aria-label="appStore.splitLayout.enabled ? '关闭分屏' : '左右分屏'" @click="run(toggleSplitLayout)">
+        <span class="tb-ico" aria-hidden="true">||</span>
       </button>
     </div>
 

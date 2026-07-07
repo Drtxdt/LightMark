@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { appStore, openFile, openGoToLine, openHeadingJump, openQuickOpen, openWorkspace, saveCurrentFile, switchMode } from "../../stores/appStore";
+import {
+  appStore,
+  openFile,
+  openFileInOtherPane,
+  openGoToLine,
+  openHeadingJump,
+  openQuickOpen,
+  openWorkspace,
+  saveCurrentFile,
+  switchMode,
+  toggleSplitLayout,
+} from "../../stores/appStore";
 import { pluginCommands } from "../../plugins/registry";
 import { exportTargets, runDocumentExport } from "../../utils/export";
 
@@ -13,6 +24,8 @@ const coreCommands = [
   { name: "打开文件", handler: () => openFile() },
   { name: "打开文件夹", handler: () => openWorkspace() },
   { name: "保存", handler: () => saveCurrentFile() },
+  { name: "切换左右分屏", handler: () => toggleSplitLayout() },
+  { name: "在另一栏打开当前文件", handler: () => openFileInOtherPane(appStore.currentFilePath) },
   { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
   ...exportTargets.map((target) => ({
     name: `导出：${target.label}`,

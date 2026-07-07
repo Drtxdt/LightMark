@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, watch } from "vue";
-import { appStore, closeQuickOpen, openFile, quickOpenCandidates } from "../../stores/appStore";
+import { appStore, closeQuickOpen, openFile, openFileInOtherPane, quickOpenCandidates } from "../../stores/appStore";
 import type { QuickOpenCandidate } from "../../types";
 
 const candidates = computed(() => quickOpenCandidates.value);
@@ -25,9 +25,27 @@ async function openSelected() {
   await selectCandidate(candidate);
 }
 
-async function selectCandidate(candidate: QuickOpenCandidate) {
+async function openSelectedInOtherPane() {
+  const candidate = candidates.value[appStore.quickOpenActiveIndex];
+  if (!candidate) return;
+  await selectCandidate(candidate, true);
+}
+
+async function handleEnter(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey) {
+    await openSelectedInOtherPane();
+    return;
+  }
+  await openSelected();
+}
+
+async function selectCandidate(candidate: QuickOpenCandidate, otherPane = false) {
   try {
-    await openFile(candidate.path);
+    if (otherPane) {
+      await openFileInOtherPane(candidate.path);
+    } else {
+      await openFile(candidate.path);
+    }
     closeQuickOpen();
     await nextTick();
   } catch (error) {
@@ -51,7 +69,7 @@ function sourceLabel(candidate: QuickOpenCandidate) {
         @keydown.esc="closeQuickOpen"
         @keydown.down.prevent="moveSelection(1)"
         @keydown.up.prevent="moveSelection(-1)"
-        @keydown.enter.prevent="openSelected"
+        @keydown.enter.prevent="handleEnter"
       />
       <div class="max-h-96 overflow-auto p-2">
         <button
