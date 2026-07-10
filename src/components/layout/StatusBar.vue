@@ -15,8 +15,8 @@ const stats = computed(() => (appStore.documentMode === "large" ? null : getWord
     <span v-if="appStore.statusMessage" class="status-message min-w-0 flex-1 truncate text-center">{{ appStore.statusMessage }}</span>
     <div class="status-meta ml-auto flex items-center gap-3">
       <span v-if="draftStore.message" class="status-draft">{{ draftStore.message }}</span>
-      <span class="status-count" v-if="stats">{{ stats.words }} 词</span>
-      <span class="status-count" v-else>{{ appStore.largeFile?.totalLines ?? 0 }} 行</span>
+      <span v-if="appStore.settings.editor.showWordCount && stats" class="status-count">{{ stats.words }} 词</span>
+      <span v-else-if="appStore.settings.editor.showWordCount" class="status-count">{{ appStore.largeFile?.totalLines ?? 0 }} 行</span>
       <span class="status-mode">{{ appStore.documentMode === "large" ? "大文件" : appStore.editorMode === "wysiwyg" ? "编辑" : "源代码" }}</span>
       <span class="status-save" :class="{ dirty: appStore.isDirty }"><i></i>{{ appStore.isDirty ? "未保存" : "已保存" }}</span>
     </div>

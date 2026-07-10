@@ -4,16 +4,18 @@ import { appStore, defaultSettings, resetSettings, updateSettings } from "../../
 import { confirmDialog } from "../../stores/dialogStore";
 import { detectPandoc } from "../../utils/export";
 import type { AppSettings, PandocStatus } from "../../types";
+import UiIcon from "../ui/UiIcon.vue";
 
 type SettingsSection =
   | "general"
   | "editor"
-  | "markdown"
   | "image"
   | "appearance"
   | "export"
   | "shortcuts"
-  | "advanced";
+  | "experimental";
+
+type AfterExportAction = "none" | "openFile" | "revealFolder";
 
 const activeSection = ref<SettingsSection>("general");
 const localSettings = ref<AppSettings>(cloneSettings(appStore.settings));
@@ -21,26 +23,58 @@ const saveState = ref("");
 const pandocStatus = ref<PandocStatus | null>(null);
 
 const sections: Array<{ id: SettingsSection; label: string; description: string }> = [
-  { id: "general", label: "基础", description: "启动、自动保存、语言和拼写" },
-  { id: "editor", label: "编辑体验", description: "输入、粘贴、编辑模式" },
-  { id: "markdown", label: "Markdown", description: "语法能力与兼容模式" },
-  { id: "image", label: "图片与资源", description: "拖拽、粘贴和路径格式" },
+  { id: "general", label: "基础", description: "会话、最近文件和草稿保存" },
+  { id: "editor", label: "编辑体验", description: "默认模式与状态栏信息" },
+  { id: "image", label: "图片与资源", description: "图片引用与路径格式" },
   { id: "appearance", label: "外观", description: "主题、字体和编辑区" },
-  { id: "export", label: "导出", description: "HTML 和未来 Pandoc 导出" },
-  { id: "shortcuts", label: "快捷键", description: "命令列表和快捷键预留" },
-  { id: "advanced", label: "高级", description: "配置、调试和实验功能" },
+  { id: "export", label: "导出", description: "HTML、Pandoc 与导出行为" },
+  { id: "shortcuts", label: "快捷键", description: "当前可用的键盘操作" },
+  { id: "experimental", label: "实验功能", description: "规划中能力与当前限制" },
 ];
 
 const shortcutRows = [
   { command: "保存", shortcut: "Ctrl+S" },
+  { command: "查找与替换", shortcut: "Ctrl+F" },
+  { command: "快速打开文件", shortcut: "Ctrl+P" },
   { command: "命令面板", shortcut: "Ctrl+Shift+P" },
   { command: "前往指定标题", shortcut: "Ctrl+Shift+O" },
-  { command: "切换编辑/源代码", shortcut: "命令面板" },
-  { command: "打开设置", shortcut: "工具栏按钮" },
-  { command: "插入 GitHub 风格警示框", shortcut: "右键菜单" },
+  { command: "前往指定行", shortcut: "Ctrl+G" },
+  { command: "后退 / 前进", shortcut: "Alt+← / Alt+→" },
+  { command: "关闭偏好设置", shortcut: "Esc" },
+];
+
+const experimentalGroups: Array<{ title: string; items: string[]; note?: string }> = [
+  {
+    title: "写作辅助",
+    items: ["括号与 Markdown 符号自动配对", "纯文本粘贴策略", "拼写检查", "专注模式与打字机模式"],
+  },
+  {
+    title: "Markdown 精细控制",
+    items: ["语法严格模式", "按语法单独启用或关闭", "YAML 覆盖导出设置"],
+    note: "HTML、公式、Mermaid、脚注、TOC、任务列表和警示框等能力当前默认启用。",
+  },
+  {
+    title: "资源与界面",
+    items: ["拖拽图片自动复制", "自定义资源目录与图片根路径", "界面语言切换"],
+  },
+  {
+    title: "自定义与诊断",
+    items: ["自定义快捷键", "调试日志面板", "统一实验功能开关"],
+  },
 ];
 
 const activeSectionTitle = computed(() => sections.find((section) => section.id === activeSection.value)?.label ?? "");
+const afterExportAction = computed<AfterExportAction>({
+  get() {
+    if (localSettings.value.export.openFileAfterExport) return "openFile";
+    if (localSettings.value.export.openFolderAfterExport) return "revealFolder";
+    return "none";
+  },
+  set(value) {
+    localSettings.value.export.openFileAfterExport = value === "openFile";
+    localSettings.value.export.openFolderAfterExport = value === "revealFolder";
+  },
+});
 
 watch(
   () => appStore.settings,
@@ -109,7 +143,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
       <aside class="w-56 flex-none border-r border-paper-200 bg-paper-100/70 p-3 dark:border-paper-800 dark:bg-paper-900">
         <div class="mb-3 px-2">
           <h2 class="text-base font-semibold text-ink-900 dark:text-ink-100">偏好设置</h2>
-          <p class="mt-1 text-xs text-ink-500 dark:text-ink-300">覆盖 Typora 设置体系，灰置项暂未支持。</p>
+          <p class="mt-1 text-xs text-ink-500 dark:text-ink-300">这里的每一项都会真实影响 LightMark。</p>
         </div>
         <button
           v-for="section in sections"
@@ -134,9 +168,11 @@ function cloneSettings(settings: AppSettings): AppSettings {
             <p class="text-xs text-ink-500 dark:text-ink-300">修改会即时写入 config.json。</p>
           </div>
           <div class="flex items-center gap-2">
-            <span class="text-xs text-ink-500 dark:text-ink-300">{{ saveState }}</span>
+            <span class="text-xs text-ink-500 dark:text-ink-300" aria-live="polite">{{ saveState }}</span>
             <button class="btn-small" @click="resetAll">重置设置</button>
-            <button class="btn" @click="close">关闭</button>
+            <button class="settings-close" type="button" title="关闭" aria-label="关闭偏好设置" @click="close">
+              <UiIcon name="x" :size="18" />
+            </button>
           </div>
         </header>
 
@@ -144,14 +180,6 @@ function cloneSettings(settings: AppSettings): AppSettings {
           <div v-if="activeSection === 'general'" class="settings-stack">
             <div class="settings-group">
               <h4>启动</h4>
-              <label class="settings-row disabled-row">
-                <span><b>启动时</b><small>Typora 支持恢复窗口或打开指定文件夹；LightMark 暂未接入启动恢复。</small></span>
-                <select v-model="localSettings.general.launchBehavior" class="select" disabled>
-                  <option value="blank">打开空白编辑器</option>
-                  <option value="restoreLastSession">恢复上次会话</option>
-                  <option value="openWorkspace">打开默认工作区</option>
-                </select>
-              </label>
               <label class="settings-row">
                 <span><b>恢复上次会话</b><small>启动时重新打开上次的文档标签页；未保存内容仍由草稿恢复处理。</small></span>
                 <input v-model="localSettings.general.restoreLastFile" type="checkbox" @change="persist" />
@@ -162,7 +190,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
               </label>
             </div>
             <div class="settings-group">
-              <h4>保存与语言</h4>
+              <h4>草稿保存</h4>
               <label class="settings-row">
                 <span><b>自动保存草稿</b><small>定时写入 LightMark 私有草稿目录，不直接覆盖原文件。</small></span>
                 <input v-model="localSettings.general.autoSave" type="checkbox" @change="persist" />
@@ -178,18 +206,6 @@ function cloneSettings(settings: AppSettings): AppSettings {
                   @change="persist"
                 />
               </label>
-              <label class="settings-row disabled-row">
-                <span><b>拼写检查</b><small>保留 Typora 的拼写检查入口，后续接系统拼写或 Hunspell。</small></span>
-                <input v-model="localSettings.general.spellcheck" type="checkbox" disabled />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>界面语言</b><small>当前界面固定为中文。</small></span>
-                <select v-model="localSettings.general.language" class="select" disabled>
-                  <option value="system">跟随系统</option>
-                  <option value="zh-CN">简体中文</option>
-                  <option value="en-US">English</option>
-                </select>
-              </label>
             </div>
           </div>
 
@@ -203,49 +219,9 @@ function cloneSettings(settings: AppSettings): AppSettings {
                   <option value="source">源代码</option>
                 </select>
               </label>
-              <label class="settings-row disabled-row">
-                <span><b>自动配对括号和引号</b><small>Typora 式普通自动配对，后续接入输入规则。</small></span>
-                <input v-model="localSettings.editor.autoPairBrackets" type="checkbox" disabled />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>自动配对 Markdown 符号</b><small>包括 *、_、`、~、$、=、^ 等扩展符号。</small></span>
-                <input v-model="localSettings.editor.autoPairMarkdownSyntax" type="checkbox" disabled />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>焦点模式</b><small>Typora 视图能力预留。</small></span>
-                <input v-model="localSettings.editor.focusMode" type="checkbox" disabled />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>打字机模式</b><small>Typora 视图能力预留。</small></span>
-                <input v-model="localSettings.editor.typewriterMode" type="checkbox" disabled />
-              </label>
-            </div>
-          </div>
-
-          <div v-else-if="activeSection === 'markdown'" class="settings-stack">
-            <div class="settings-group">
-              <h4>语法支持</h4>
-              <label class="settings-row disabled-row">
-                <span><b>严格模式</b><small>Typora 可更严格贴近 GFM；LightMark 当前保持兼容解析。</small></span>
-                <input v-model="localSettings.markdown.strictMode" type="checkbox" disabled />
-              </label>
-              <label class="settings-row" v-for="item in [
-                ['inlineHtml', '内联 HTML', '渲染并安全过滤常见内联 HTML。'],
-                ['blockHtml', '块级 HTML', '渲染并安全过滤块级 HTML。'],
-                ['math', '数学公式', '支持行内和块级 LaTeX。'],
-                ['mermaid', 'Mermaid 图表', '支持 mermaid 代码块渲染。'],
-                ['footnotes', '脚注', '支持脚注定义与引用。'],
-                ['toc', 'TOC', '支持 [TOC] 目录节点。'],
-                ['taskList', '任务列表', '支持 GitHub 风格任务列表。'],
-                ['githubAlerts', 'GitHub 警示框', '支持 [!NOTE]、[!TIP] 等警示框。'],
-                ['yamlFrontMatter', 'YAML Front Matter', '识别文档元数据块。'],
-                ['smartPunctuation', '智能标点', 'markdown-it typographer。'],
-                ['subscript', '下标', '支持 ~sub~。'],
-                ['superscript', '上标', '支持 ^sup^。'],
-                ['highlight', '高亮', '支持 ==mark==。'],
-              ]" :key="item[0]">
-                <span><b>{{ item[1] }}</b><small>{{ item[2] }}</small></span>
-                <input v-model="(localSettings.markdown as any)[item[0]]" type="checkbox" @change="persist" />
+              <label class="settings-row">
+                <span><b>显示字数与行数</b><small>在底部状态栏显示普通文档字数或大文件行数。</small></span>
+                <input v-model="localSettings.editor.showWordCount" type="checkbox" @change="persist" />
               </label>
             </div>
           </div>
@@ -253,13 +229,6 @@ function cloneSettings(settings: AppSettings): AppSettings {
           <div v-else-if="activeSection === 'image'" class="settings-stack">
             <div class="settings-group">
               <h4>插入图片</h4>
-              <label class="settings-row">
-                <span><b>拖拽本地图片时</b><small>默认只写入引用，符合当前 LightMark 行为。</small></span>
-                <select v-model="localSettings.image.insertBehavior" class="select" @change="persist">
-                  <option value="reference">写入原文件引用</option>
-                  <option value="copyToAssets" disabled>复制到资源目录（暂未支持）</option>
-                </select>
-              </label>
               <label class="settings-row">
                 <span><b>优先使用相对路径</b><small>文件和 Markdown 在同一磁盘/路径体系内时生成相对引用。</small></span>
                 <input v-model="localSettings.image.useRelativePath" type="checkbox" @change="persist" />
@@ -271,14 +240,6 @@ function cloneSettings(settings: AppSettings): AppSettings {
               <label class="settings-row">
                 <span><b>自动转义图片路径</b><small>将空格和中文等字符编码为 URL 形式。</small></span>
                 <input v-model="localSettings.image.escapePath" type="checkbox" @change="persist" />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>资源目录</b><small>剪贴板图片当前保存到 Markdown 同级 assets。</small></span>
-                <input v-model="localSettings.image.assetFolder" class="settings-input" disabled />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>图片根路径</b><small>Typora 的 typora-root-url 兼容项预留。</small></span>
-                <input v-model="localSettings.image.rootUrl" class="settings-input" disabled placeholder="例如 /blog/" />
               </label>
             </div>
           </div>
@@ -303,7 +264,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 <input v-model="localSettings.appearance.showSidebar" type="checkbox" @change="persist" />
               </label>
               <label class="settings-row">
-                <span><b>显示大纲</b><small>关闭后侧栏只显示文件页。</small></span>
+                <span><b>显示大纲入口</b><small>控制侧栏中的大纲页入口；文件与反链页不受影响。</small></span>
                 <input v-model="localSettings.appearance.showOutline" type="checkbox" @change="persist" />
               </label>
             </div>
@@ -345,21 +306,26 @@ function cloneSettings(settings: AppSettings): AppSettings {
               </label>
               <label class="settings-row">
                 <span><b>自定义目录</b><small>默认导出位置选择“自定义目录”时使用。</small></span>
-                <input v-model="localSettings.export.customFolder" class="settings-input" @change="persist" />
+                <input
+                  v-model="localSettings.export.customFolder"
+                  class="settings-input"
+                  :disabled="localSettings.export.defaultFolder !== 'custom'"
+                  @change="persist"
+                />
               </label>
               <label class="settings-row">
-                <span><b>导出后打开文件</b><small>成功导出后用系统默认应用打开文件。</small></span>
-                <input v-model="localSettings.export.openFileAfterExport" type="checkbox" @change="persist" />
-              </label>
-              <label class="settings-row">
-                <span><b>导出后打开所在位置</b><small>未启用打开文件时，导出后在文件管理器中定位。</small></span>
-                <input v-model="localSettings.export.openFolderAfterExport" type="checkbox" @change="persist" />
+                <span><b>导出完成后</b><small>选择成功导出后的唯一后续动作。</small></span>
+                <select v-model="afterExportAction" class="select" @change="persist">
+                  <option value="none">不执行操作</option>
+                  <option value="openFile">打开导出文件</option>
+                  <option value="revealFolder">在文件管理器中定位</option>
+                </select>
               </label>
             </div>
             <div class="settings-group">
               <h4>HTML / PNG</h4>
               <label class="settings-row">
-                <span><b>HTML 包含样式</b><small>当前导出使用内置样式；关闭项预留给无样式 HTML。</small></span>
+                <span><b>HTML 包含样式</b><small>关闭后导出不附带 LightMark 内置主题样式。</small></span>
                 <input v-model="localSettings.export.htmlIncludeStyles" type="checkbox" @change="persist" />
               </label>
               <label class="settings-row">
@@ -433,11 +399,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
 
           <div v-else-if="activeSection === 'shortcuts'" class="settings-stack">
             <div class="settings-group">
-              <h4>快捷键</h4>
-              <label class="settings-row disabled-row">
-                <span><b>自定义快捷键</b><small>Typora 支持自定义 key binding；LightMark 第一版只展示命令列表。</small></span>
-                <input v-model="localSettings.shortcuts.customKeybindings" type="checkbox" disabled />
-              </label>
+              <h4>当前快捷键</h4>
               <div class="settings-table">
                 <div class="settings-table-row settings-table-head"><span>命令</span><span>快捷键</span></div>
                 <div v-for="row in shortcutRows" :key="row.command" class="settings-table-row"><span>{{ row.command }}</span><span>{{ row.shortcut }}</span></div>
@@ -445,18 +407,19 @@ function cloneSettings(settings: AppSettings): AppSettings {
             </div>
           </div>
 
-          <div v-else class="settings-stack">
-            <div class="settings-group">
-              <h4>高级</h4>
-              <label class="settings-row">
-                <span><b>调试模式</b><small>仅写入 JSON，后续用于显示日志和诊断信息。</small></span>
-                <input v-model="localSettings.advanced.debugMode" type="checkbox" @change="persist" />
-              </label>
-              <label class="settings-row disabled-row">
-                <span><b>实验性功能</b><small>预留给不稳定能力的统一入口。</small></span>
-                <input v-model="localSettings.advanced.experimentalFeatures" type="checkbox" disabled />
-              </label>
-              <p class="settings-note">配置文件存放在 Tauri app config 目录的 config.json 中。当前版本会自动迁移旧版 theme 字段。</p>
+          <div v-else class="settings-stack experimental-stack">
+            <div class="settings-intro">
+              这些能力尚未接入，不会显示无效开关。对应配置字段继续保留，以便未来版本兼容启用。
+            </div>
+            <div v-for="group in experimentalGroups" :key="group.title" class="experimental-card">
+              <div class="experimental-card-header">
+                <h4>{{ group.title }}</h4>
+                <span>尚未接入</span>
+              </div>
+              <ul>
+                <li v-for="item in group.items" :key="item">{{ item }}</li>
+              </ul>
+              <p v-if="group.note">{{ group.note }}</p>
             </div>
           </div>
         </main>
@@ -477,6 +440,22 @@ function cloneSettings(settings: AppSettings): AppSettings {
 }
 
 .lm-settings-panel > div > main { background: var(--lm-surface); }
+
+.settings-close {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--lm-radius-sm);
+  background: transparent;
+  color: var(--lm-ink-muted);
+  cursor: pointer;
+}
+
+.settings-close:hover { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.settings-close:focus-visible { border-color: var(--lm-border-strong); box-shadow: 0 0 0 3px var(--lm-focus); }
 
 .settings-stack {
   display: grid;
@@ -552,10 +531,6 @@ function cloneSettings(settings: AppSettings): AppSettings {
   color: var(--lm-ink-muted);
 }
 
-.disabled-row {
-  opacity: 0.55;
-}
-
 .settings-input,
 .settings-number {
   width: 240px;
@@ -570,6 +545,11 @@ function cloneSettings(settings: AppSettings): AppSettings {
 
 .settings-number {
   width: 96px;
+}
+
+.settings-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .dark .settings-input,
@@ -595,12 +575,12 @@ function cloneSettings(settings: AppSettings): AppSettings {
   grid-template-columns: 1fr 160px;
   gap: 16px;
   padding: 7px 0;
-  border-bottom: 1px solid rgb(237 234 228);
+  border-bottom: 1px solid var(--lm-border);
   font-size: 13px;
 }
 
 .dark .settings-table-row {
-  border-color: rgb(43 40 37);
+  border-color: var(--lm-border);
 }
 
 .settings-table-row:last-child {
@@ -608,8 +588,44 @@ function cloneSettings(settings: AppSettings): AppSettings {
 }
 
 .settings-table-head {
-  color: rgb(117 111 102);
+  color: var(--lm-ink-muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.settings-intro {
+  border: 1px solid var(--lm-border);
+  border-radius: var(--lm-radius-md);
+  background: var(--lm-accent-soft);
+  padding: 12px 14px;
+  color: var(--lm-ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.experimental-card {
+  border: 1px solid var(--lm-border);
+  border-radius: var(--lm-radius-md);
+  background: var(--lm-surface-raised);
+  padding: 14px;
+  box-shadow: var(--lm-shadow-sm);
+}
+
+.experimental-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.experimental-card h4 { margin: 0; font-size: 14px; font-weight: 650; }
+.experimental-card-header span { border: 1px solid var(--lm-border); border-radius: 999px; padding: 2px 7px; color: var(--lm-ink-muted); font-size: 11px; }
+.experimental-card ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; margin: 12px 0 0; padding: 0; list-style: none; }
+.experimental-card li { position: relative; padding-left: 13px; color: var(--lm-ink-soft); font-size: 13px; }
+.experimental-card li::before { position: absolute; left: 0; top: 0.55em; width: 4px; height: 4px; border-radius: 50%; background: var(--lm-ink-muted); content: ""; }
+.experimental-card p { margin: 11px 0 0; border-top: 1px solid var(--lm-border); padding-top: 10px; color: var(--lm-ink-muted); font-size: 12px; line-height: 1.55; }
+
+@media (max-width: 960px) {
+  .experimental-card ul { grid-template-columns: 1fr; }
 }
 </style>
