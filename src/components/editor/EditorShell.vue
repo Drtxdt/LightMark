@@ -39,7 +39,7 @@ watch(
 <style scoped>
 .editor-page-shell {
   position: relative;
-  background: var(--lm-editor-page-bg, #fbfaf7);
+  background: var(--lm-editor-page-bg, var(--lm-surface));
 }
 
 .editor-page {
@@ -96,7 +96,7 @@ watch(
 }
 
 :global(.dark) .editor-page-shell {
-  --lm-editor-page-bg: #141311;
+  --lm-editor-page-bg: var(--lm-surface);
 }
 
 @media (prefers-reduced-motion: reduce) {

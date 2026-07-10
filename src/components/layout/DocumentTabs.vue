@@ -115,17 +115,17 @@ async function createTab() {
 
 <template>
   <nav
-    class="document-tabs flex h-9 flex-none items-end gap-1 overflow-x-auto border-b border-paper-200 bg-paper-100/75 px-2 pt-1 dark:border-paper-800 dark:bg-paper-900/85"
+    class="document-tabs flex h-10 flex-none items-end gap-1 overflow-x-auto px-3 pt-1.5"
     aria-label="打开的文档"
   >
     <button
       v-for="tab in visibleTabs"
       :key="tab.id"
-      class="document-tab group flex h-8 max-w-56 min-w-28 items-center gap-2 rounded-t-md border px-3 text-left text-xs transition-colors"
+      class="document-tab group flex h-[34px] max-w-56 min-w-28 items-center gap-2 border px-3 text-left text-xs"
       :class="
         tab.id === activePaneTabId
-          ? 'border-paper-200 border-b-paper-50 bg-paper-50 text-ink-900 shadow-sm dark:border-paper-800 dark:border-b-paper-950 dark:bg-paper-950 dark:text-ink-100'
-          : 'border-transparent bg-transparent text-ink-500 hover:bg-paper-200/70 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'
+          ? 'active'
+          : ''
       "
       :title="tabTitle(tab.path)"
       draggable="true"
@@ -162,7 +162,7 @@ async function createTab() {
     </button>
     <div
       v-if="menu.open"
-      class="tab-menu fixed z-50 min-w-40 overflow-hidden rounded-md border border-paper-200 bg-paper-50 py-1 text-xs text-ink-700 shadow-lg dark:border-paper-800 dark:bg-paper-900 dark:text-ink-100"
+      class="tab-menu fixed z-50 min-w-40 overflow-hidden py-1 text-xs"
       :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
       role="menu"
       @click.stop
@@ -182,7 +182,7 @@ async function createTab() {
       </button>
     </div>
     <button
-      class="new-tab-button mb-0 grid h-8 w-9 flex-none place-items-center rounded-t-md border border-transparent text-base leading-none text-ink-500 transition hover:bg-paper-200/70 hover:text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-300/40 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
+      class="new-tab-button mb-0 grid h-[34px] w-9 flex-none place-items-center border border-transparent text-base leading-none"
       title="新建未命名标签页"
       aria-label="新建未命名标签页"
       @click="createTab"
@@ -195,10 +195,26 @@ async function createTab() {
 <style scoped>
 .document-tabs {
   scrollbar-width: thin;
+  border-bottom: 1px solid var(--lm-border);
+  background: var(--lm-surface-soft);
 }
 
 .document-tab {
+  border-color: transparent;
+  border-radius: 9px 9px 0 0;
+  background: transparent;
+  color: var(--lm-ink-muted);
   outline: none;
+  transition: background var(--lm-transition), color var(--lm-transition), border-color var(--lm-transition);
+}
+
+.document-tab:hover { background: color-mix(in srgb, var(--lm-surface-raised) 55%, transparent); color: var(--lm-ink); }
+.document-tab.active {
+  border-color: var(--lm-border);
+  border-bottom-color: var(--lm-surface);
+  background: var(--lm-surface);
+  color: var(--lm-ink);
+  box-shadow: 0 -2px 10px rgb(72 51 29 / 3%);
 }
 
 .document-tab:focus-visible {
@@ -211,7 +227,14 @@ async function createTab() {
 
 .new-tab-button {
   font-weight: 500;
+  border-radius: 9px 9px 0 0;
+  color: var(--lm-ink-muted);
+  transition: all var(--lm-transition);
 }
+.new-tab-button:hover { background: var(--lm-accent-soft); color: var(--lm-accent); }
+.new-tab-button:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--lm-focus); }
+
+.tab-menu { border: 1px solid var(--lm-border-strong); border-radius: var(--lm-radius-md); background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-md); }
 
 .tab-menu-item {
   display: block;
@@ -221,7 +244,7 @@ async function createTab() {
 }
 
 .tab-menu-item:hover:not(:disabled) {
-  background: rgb(231 229 225 / 80%);
+  background: var(--lm-accent-soft);
 }
 
 .tab-menu-item:disabled {
@@ -230,6 +253,6 @@ async function createTab() {
 }
 
 :global(.dark) .tab-menu-item:hover:not(:disabled) {
-  background: rgb(41 37 36 / 85%);
+  background: var(--lm-accent-soft);
 }
 </style>

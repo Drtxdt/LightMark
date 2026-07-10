@@ -75,19 +75,19 @@ function buttonClass(variant = "secondary") {
   z-index: 80;
   display: grid;
   place-items: center;
-  background: rgb(31 30 27 / 22%);
+  background: rgb(54 42 29 / 22%);
   padding: 24px;
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(3px) saturate(88%);
 }
 
 .dialog-panel {
   width: min(520px, 100%);
   overflow: hidden;
-  border: 1px solid rgb(224 220 212);
-  border-radius: 10px;
-  background: rgb(255 254 251);
-  box-shadow: 0 24px 72px rgb(31 30 27 / 22%);
-  color: rgb(43 39 34);
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-lg);
+  background: var(--lm-surface-raised);
+  box-shadow: var(--lm-shadow-md);
+  color: var(--lm-ink);
   outline: none;
 }
 
@@ -97,7 +97,8 @@ function buttonClass(variant = "secondary") {
 
 .dialog-header h2 {
   margin: 0;
-  color: rgb(31 30 27);
+  color: var(--lm-ink);
+  font-family: Georgia, "Noto Serif SC", serif;
   font-size: 16px;
   font-weight: 700;
   line-height: 1.35;
@@ -105,7 +106,7 @@ function buttonClass(variant = "secondary") {
 
 .dialog-header p {
   margin: 6px 0 0;
-  color: rgb(95 88 78);
+  color: var(--lm-ink-soft);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -115,10 +116,10 @@ function buttonClass(variant = "secondary") {
   overflow: auto;
   margin: 0 20px 4px;
   padding: 8px 10px;
-  border: 1px solid rgb(237 234 228);
+  border: 1px solid var(--lm-border);
   border-radius: 8px;
-  background: rgb(247 244 238 / 68%);
-  color: rgb(83 77 68);
+  background: var(--lm-surface-soft);
+  color: var(--lm-ink-soft);
   font: 12px/1.55 var(--lm-editor-code-font-family, "JetBrains Mono", ui-monospace, monospace);
   list-style: none;
 }
@@ -133,8 +134,8 @@ function buttonClass(variant = "secondary") {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  border-top: 1px solid rgb(237 234 228);
-  background: rgb(247 244 238 / 52%);
+  border-top: 1px solid var(--lm-border);
+  background: var(--lm-surface-soft);
   padding: 12px 14px;
 }
 
@@ -154,7 +155,7 @@ function buttonClass(variant = "secondary") {
 }
 
 .dialog-button:focus-visible {
-  box-shadow: 0 0 0 3px rgb(134 128 116 / 22%);
+  box-shadow: 0 0 0 3px var(--lm-focus);
 }
 
 .dialog-button-secondary {
@@ -168,8 +169,8 @@ function buttonClass(variant = "secondary") {
 }
 
 .dialog-button-primary {
-  border-color: rgb(120 87 48);
-  background: rgb(120 87 48);
+  border-color: var(--lm-accent);
+  background: var(--lm-accent);
   color: rgb(255 254 251);
 }
 
@@ -212,38 +213,45 @@ function buttonClass(variant = "secondary") {
 }
 
 :global(.dark) .dialog-panel {
-  border-color: rgb(52 49 45);
-  background: rgb(23 22 20);
-  box-shadow: 0 24px 72px rgb(0 0 0 / 46%);
-  color: rgb(229 222 210);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface-raised);
+  box-shadow: var(--lm-shadow-md);
+  color: var(--lm-ink);
 }
 
 :global(.dark) .dialog-header h2 {
-  color: rgb(246 241 233);
+  color: var(--lm-ink);
 }
 
 :global(.dark) .dialog-header p {
-  color: rgb(185 179 168);
+  color: var(--lm-ink-soft);
 }
 
 :global(.dark) .dialog-details {
-  border-color: rgb(52 49 45);
-  background: rgb(31 29 26);
-  color: rgb(209 201 188);
+  border-color: var(--lm-border);
+  background: var(--lm-surface-soft);
+  color: var(--lm-ink-soft);
 }
 
 :global(.dark) .dialog-actions {
-  border-color: rgb(52 49 45);
-  background: rgb(31 29 26 / 70%);
+  border-color: var(--lm-border);
+  background: var(--lm-surface-soft);
 }
 
 :global(.dark) .dialog-button-secondary {
-  border-color: rgb(76 70 62);
-  background: rgb(31 29 26);
-  color: rgb(229 222 210);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface-raised);
+  color: var(--lm-ink);
 }
 
 :global(.dark) .dialog-button-secondary:hover {
-  background: rgb(45 41 36);
+  background: var(--lm-accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog-fade-enter-active,
+  .dialog-fade-leave-active,
+  .dialog-fade-enter-active .dialog-panel,
+  .dialog-fade-leave-active .dialog-panel { transition-duration: 0ms; }
 }
 </style>

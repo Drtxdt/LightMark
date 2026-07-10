@@ -73,16 +73,16 @@ function startSplitResize(event: PointerEvent) {
 </script>
 
 <template>
-  <div class="flex h-screen flex-col bg-paper-50 text-ink-900 dark:bg-paper-950 dark:text-ink-100">
+  <div class="lm-app-frame flex h-screen flex-col text-ink-900 dark:text-ink-100">
     <Toolbar />
     <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: gridColumns }">
       <Sidebar v-if="appStore.settings.appearance.showSidebar" />
       <div
         v-if="appStore.settings.appearance.showSidebar"
-        class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
+        class="lm-resize-handle cursor-col-resize"
         @pointerdown="startResize"
       />
-      <main class="flex min-h-0 min-w-0 flex-col overflow-hidden bg-paper-50 dark:bg-paper-950">
+      <main class="lm-workspace flex min-h-0 min-w-0 flex-col overflow-hidden">
         <ExportStatusStrip />
         <template v-if="!appStore.splitLayout.enabled">
           <DocumentTabs pane-id="main" />
@@ -91,17 +91,17 @@ function startSplitResize(event: PointerEvent) {
           <EditorShell class="min-h-0 flex-1" pane-id="main" />
         </template>
         <div v-else class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: splitColumns }">
-          <section class="flex min-h-0 min-w-0 flex-col border-r border-paper-200/70 dark:border-paper-800/70" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('main') }" @pointerdown.capture="activatePane('main')">
+          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('main') }" @pointerdown.capture="activatePane('main')">
             <DocumentTabs pane-id="main" />
             <ExternalFileNotice v-if="isActivePane('main')" />
             <FindReplacePanel v-if="isActivePane('main') && findReplaceStore.open" />
             <EditorShell class="min-h-0 flex-1" pane-id="main" />
           </section>
           <div
-            class="cursor-col-resize border-x border-paper-200 bg-paper-100/70 transition-colors hover:bg-paper-200 dark:border-paper-800 dark:bg-paper-900 dark:hover:bg-paper-800"
+            class="lm-resize-handle cursor-col-resize"
             @pointerdown="startSplitResize"
           />
-          <section class="flex min-h-0 min-w-0 flex-col" :class="{ 'ring-1 ring-inset ring-amber-500/35': isActivePane('secondary') }" @pointerdown.capture="activatePane('secondary')">
+          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('secondary') }" @pointerdown.capture="activatePane('secondary')">
             <DocumentTabs pane-id="secondary" />
             <ExternalFileNotice v-if="isActivePane('secondary')" />
             <FindReplacePanel v-if="isActivePane('secondary') && findReplaceStore.open" />
@@ -113,3 +113,12 @@ function startSplitResize(event: PointerEvent) {
     <StatusBar />
   </div>
 </template>
+
+<style scoped>
+.lm-app-frame { background: var(--lm-canvas); }
+.lm-workspace { background: var(--lm-surface); box-shadow: -8px 0 28px rgb(65 46 28 / 4%); }
+.lm-resize-handle { border-inline: 1px solid var(--lm-border); background: var(--lm-sidebar); transition: background var(--lm-transition); }
+.lm-resize-handle:hover { background: var(--lm-accent-soft); }
+.lm-editor-pane { position: relative; border-right: 1px solid var(--lm-border); }
+.lm-editor-pane.active::after { position: absolute; inset: 0; border: 1px solid color-mix(in srgb, var(--lm-accent) 32%, transparent); pointer-events: none; content: ""; }
+</style>

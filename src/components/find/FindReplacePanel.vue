@@ -117,8 +117,8 @@ function onPanelKeydown(event: KeyboardEvent) {
   min-height: 44px;
   align-items: center;
   gap: 10px;
-  border-bottom: 1px solid rgb(231 225 215 / 86%);
-  background: rgb(250 248 243 / 94%);
+  border-bottom: 1px solid var(--lm-border);
+  background: var(--lm-surface-soft);
   padding: 6px 12px;
 }
 
@@ -135,9 +135,9 @@ function onPanelKeydown(event: KeyboardEvent) {
   flex: 0 1 280px;
   align-items: center;
   gap: 7px;
-  border: 1px solid rgb(219 213 202 / 82%);
-  border-radius: 8px;
-  background: rgb(255 255 255 / 70%);
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-sm);
+  background: var(--lm-surface-raised);
   padding: 4px 8px;
 }
 
@@ -147,7 +147,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 
 .find-label {
   flex: 0 0 auto;
-  color: #8b8377;
+  color: var(--lm-ink-muted);
   font-size: 12px;
 }
 
@@ -156,7 +156,7 @@ function onPanelKeydown(event: KeyboardEvent) {
   flex: 1 1 auto;
   border: 0;
   background: transparent;
-  color: #332f29;
+  color: var(--lm-ink);
   font: 13px/1.4 var(--lm-editor-font-family);
   outline: none;
 }
@@ -170,7 +170,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 
 .find-count {
   min-width: 52px;
-  color: #756f66;
+  color: var(--lm-ink-muted);
   font: 12px/1 "JetBrains Mono", ui-monospace, monospace;
   text-align: right;
 }
@@ -187,7 +187,7 @@ function onPanelKeydown(event: KeyboardEvent) {
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
-  color: #625b51;
+  color: var(--lm-ink-soft);
   cursor: pointer;
   font-size: 12px;
 }
@@ -210,9 +210,9 @@ function onPanelKeydown(event: KeyboardEvent) {
 .find-toggle:hover,
 .find-close:hover,
 .find-toggle.active {
-  border-color: rgb(211 204 192 / 72%);
-  background: rgb(120 113 108 / 12%);
-  color: #2f2b25;
+  border-color: var(--lm-border-strong);
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
 }
 
 .find-split {
@@ -247,13 +247,13 @@ function onPanelKeydown(event: KeyboardEvent) {
 }
 
 :global(.dark) .find-panel {
-  border-bottom-color: rgb(41 37 34 / 92%);
-  background: rgb(24 22 20 / 96%);
+  border-bottom-color: var(--lm-border);
+  background: var(--lm-surface-soft);
 }
 
 :global(.dark) .find-input-wrap {
-  border-color: rgb(76 70 62 / 70%);
-  background: rgb(32 29 26 / 76%);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface-raised);
 }
 
 :global(.dark) .find-label,
@@ -266,7 +266,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 }
 
 :global(.dark) .find-input {
-  color: #f2eee6;
+  color: var(--lm-ink);
 }
 
 :global(.dark) .find-button,

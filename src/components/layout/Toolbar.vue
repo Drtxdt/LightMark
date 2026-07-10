@@ -73,7 +73,7 @@ function openCommandPalette() {
 
 <template>
   <header class="lm-toolbar" :class="{ 'lm-toolbar-dark': appStore.activeTheme === 'dark' }">
-    <div class="lm-toolbar-group" aria-label="文件">
+    <div class="lm-toolbar-group file-tools" aria-label="文件">
       <button class="lm-toolbar-button" title="新建" aria-label="新建" @click="run(createNewFile)">
         <span class="tb-ico tb-ico-new" aria-hidden="true"></span>
       </button>
@@ -144,7 +144,7 @@ function openCommandPalette() {
       <span class="truncate">{{ currentFileName }}</span>
     </div>
 
-    <div class="lm-toolbar-group ml-auto" aria-label="视图和导出">
+    <div class="lm-toolbar-group view-tools ml-auto" aria-label="视图和导出">
       <button class="lm-toolbar-button" title="命令面板" aria-label="命令面板" @click="openCommandPalette">
         <span class="tb-ico tb-ico-command" aria-hidden="true"></span>
       </button>
@@ -724,5 +724,77 @@ function openCommandPalette() {
 :global(.dark) .lm-export-menu-separator,
 .lm-toolbar-dark .lm-export-menu-separator {
   background: rgb(76 70 62 / 82%);
+}
+
+/* Paper desk chrome */
+.lm-toolbar {
+  height: 52px;
+  gap: 10px;
+  border-bottom-color: var(--lm-border);
+  background: color-mix(in srgb, var(--lm-surface-soft) 94%, transparent);
+  padding: 0 12px;
+  box-shadow: inset 0 1px rgb(255 255 255 / 45%);
+}
+
+.lm-toolbar-group {
+  height: 34px;
+  gap: 1px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: transparent;
+  padding: 2px;
+  box-shadow: none;
+}
+
+.lm-toolbar-button {
+  width: 30px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--lm-ink-soft);
+  transition: background var(--lm-transition), color var(--lm-transition), transform var(--lm-transition), opacity var(--lm-transition);
+}
+
+.lm-toolbar-button:hover:not(:disabled) {
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
+}
+
+.lm-toolbar-button:active:not(:disabled) { transform: translateY(1px); }
+.lm-toolbar-button:focus-visible:not(:disabled) { background: var(--lm-accent-soft); box-shadow: 0 0 0 2px var(--lm-focus); }
+.lm-toolbar-button.primary { background: var(--lm-accent-soft); color: var(--lm-accent); }
+.lm-toolbar-split { height: 18px; background: var(--lm-border); }
+.lm-toolbar-title { color: var(--lm-ink-muted); font-family: Georgia, "Noto Serif SC", serif; letter-spacing: 0.01em; }
+.dirty-dot { width: 7px; height: 7px; background: var(--lm-accent); box-shadow: 0 0 0 3px var(--lm-accent-soft); }
+.toolbar-theme-wrap { margin-left: 7px; padding-left: 9px; border-left: 1px solid var(--lm-border); }
+.lm-export-menu { border-color: var(--lm-border-strong); border-radius: var(--lm-radius-md); background: var(--lm-surface-raised); box-shadow: var(--lm-shadow-md); }
+.lm-export-menu-item { border-radius: var(--lm-radius-sm); color: var(--lm-ink); }
+.lm-export-menu-item:hover, .lm-export-menu-item:focus-visible { background: var(--lm-accent-soft); }
+
+:global(.dark) .lm-toolbar,
+.lm-toolbar-dark { border-bottom-color: var(--lm-border); background: color-mix(in srgb, var(--lm-surface-soft) 96%, transparent); }
+:global(.dark) .lm-toolbar-group,
+.lm-toolbar-dark .lm-toolbar-group { border-color: transparent; background: transparent; box-shadow: none; }
+:global(.dark) .lm-toolbar-button,
+.lm-toolbar-dark .lm-toolbar-button { color: var(--lm-ink-soft); }
+:global(.dark) .lm-toolbar-button:hover:not(:disabled),
+.lm-toolbar-dark .lm-toolbar-button:hover:not(:disabled) { background: var(--lm-accent-soft); color: var(--lm-ink); }
+
+@media (max-width: 1180px) {
+  .editor-tools { max-width: 31vw; }
+  .lm-toolbar-title { max-width: 170px; }
+}
+
+@media (max-width: 940px) {
+  .editor-tools { display: none; }
+  .lm-toolbar-title { max-width: none; }
+}
+
+@media (max-width: 720px) {
+  .lm-toolbar-title { display: none; }
+  .view-tools .lm-toolbar-button:first-child { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lm-toolbar-button { transition-duration: 0ms; }
 }
 </style>

@@ -59,8 +59,8 @@ function sourceLabel(candidate: QuickOpenCandidate) {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 bg-ink-900/20 p-20" @click.self="closeQuickOpen">
-    <div class="mx-auto max-w-2xl overflow-hidden rounded-md border border-paper-200 bg-paper-50 shadow-[0_18px_50px_rgba(31,30,27,0.12)] dark:border-paper-800 dark:bg-paper-900">
+  <div class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeQuickOpen">
+    <div class="lm-palette-panel mx-auto max-w-2xl overflow-hidden">
       <input
         v-model="appStore.quickOpenQuery"
         autofocus

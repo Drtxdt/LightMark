@@ -97,27 +97,28 @@ function outlineIndent(level: number) {
 </script>
 
 <template>
-  <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-paper-100/60 dark:bg-paper-900">
-    <div class="flex-none p-3 pb-2">
-      <div class="flex items-center gap-1 rounded-md bg-paper-200/70 p-1 dark:bg-paper-800">
+  <aside class="lm-sidebar flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+    <div class="sidebar-header flex-none p-3 pb-2">
+      <div class="sidebar-kicker">LIGHTMARK</div>
+      <div class="sidebar-switcher flex items-center gap-1 p-1">
         <button
           v-if="appStore.settings.appearance.showOutline"
-          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
-          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'files' }"
+          class="sidebar-switch flex-1 px-2 py-1 text-sm"
+          :class="{ active: activePane === 'files' }"
           @click="activePane = 'files'"
         >
           文件
         </button>
         <button
-          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
-          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'outline' }"
+          class="sidebar-switch flex-1 px-2 py-1 text-sm"
+          :class="{ active: activePane === 'outline' }"
           @click="activePane = 'outline'"
         >
           大纲
         </button>
         <button
-          class="flex-1 rounded px-2 py-1 text-sm text-ink-500 transition-colors hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
-          :class="{ 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-900 dark:text-ink-100': activePane === 'backlinks' }"
+          class="sidebar-switch flex-1 px-2 py-1 text-sm"
+          :class="{ active: activePane === 'backlinks' }"
           @click="activePane = 'backlinks'"
         >
           反链
@@ -130,7 +131,7 @@ function outlineIndent(level: number) {
         <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">工作区</h2>
         <button class="btn-small" @click="openWorkspace()">打开</button>
       </div>
-      <p v-if="!appStore.currentWorkspace" class="text-sm text-ink-500 dark:text-ink-300">尚未打开文件夹。</p>
+      <p v-if="!appStore.currentWorkspace" class="sidebar-empty text-sm">尚未打开文件夹。<br><span>打开一个写作目录开始整理文稿。</span></p>
       <p v-else class="mb-3 truncate text-xs text-ink-500 dark:text-ink-300">{{ appStore.currentWorkspace }}</p>
       <FileTreeNode v-for="node in appStore.fileTree" :key="node.path" :node="node" @select="selectFile" />
     </section>
@@ -171,3 +172,15 @@ function outlineIndent(level: number) {
     </section>
   </aside>
 </template>
+
+<style scoped>
+.lm-sidebar { background: var(--lm-sidebar); color: var(--lm-ink); }
+.sidebar-header { border-bottom: 1px solid var(--lm-border); }
+.sidebar-kicker { margin: 1px 4px 9px; color: var(--lm-ink-muted); font: 700 9px/1 var(--lm-editor-code-font-family); letter-spacing: .18em; }
+.sidebar-switcher { border: 1px solid var(--lm-border); border-radius: 10px; background: color-mix(in srgb, var(--lm-surface) 36%, transparent); }
+.sidebar-switch { border: 0; border-radius: 7px; background: transparent; color: var(--lm-ink-muted); transition: all var(--lm-transition); }
+.sidebar-switch:hover { color: var(--lm-ink); }
+.sidebar-switch.active { background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-sm); }
+.sidebar-empty { margin-top: 14px; border: 1px dashed var(--lm-border-strong); border-radius: var(--lm-radius-md); padding: 16px 14px; color: var(--lm-ink-soft); line-height: 1.5; text-align: center; }
+.sidebar-empty span { color: var(--lm-ink-muted); font-size: 12px; }
+</style>

@@ -593,7 +593,7 @@ function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: st
 </script>
 
 <template>
-  <div ref="host" class="h-full bg-paper-50 text-base dark:bg-paper-950" />
+  <div ref="host" class="lm-editor-scroll h-full text-base" />
   <div
     v-if="wikiCompletion.visible && wikiCompletionCandidates.length > 0"
     class="fixed z-50 max-h-64 w-64 overflow-auto rounded-md border border-paper-200 bg-paper-50 p-1 shadow-[0_14px_36px_rgba(31,30,27,0.16)] dark:border-paper-800 dark:bg-paper-900"

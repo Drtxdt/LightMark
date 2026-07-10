@@ -22,9 +22,9 @@ function submit() {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 bg-ink-900/20 p-20" @click.self="closeGoToLine">
+  <div class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeGoToLine">
     <form
-      class="mx-auto max-w-sm overflow-hidden rounded-md border border-paper-200 bg-paper-50 shadow-[0_18px_50px_rgba(31,30,27,0.12)] dark:border-paper-800 dark:bg-paper-900"
+      class="lm-palette-panel mx-auto max-w-sm overflow-hidden"
       @submit.prevent="submit"
     >
       <input

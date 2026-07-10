@@ -65,13 +65,33 @@ body,
 
 body {
   font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, "Segoe UI Emoji", "Segoe UI", sans-serif;
-  background: #fbfaf7;
-  color: #333333;
+  background: #f3ecdf;
+  color: #342f29;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
 :root {
+  color-scheme: light;
+  --lm-canvas: #eee6d8;
+  --lm-surface: #fdfbf6;
+  --lm-surface-soft: #f7f2e8;
+  --lm-surface-raised: #fffefa;
+  --lm-sidebar: #f2eadc;
+  --lm-ink: #342f29;
+  --lm-ink-soft: #62594e;
+  --lm-ink-muted: #8a7f70;
+  --lm-border: rgba(112, 91, 65, 0.16);
+  --lm-border-strong: rgba(112, 91, 65, 0.26);
+  --lm-accent: #9a6a35;
+  --lm-accent-soft: rgba(174, 119, 57, 0.12);
+  --lm-focus: rgba(166, 111, 52, 0.26);
+  --lm-shadow-sm: 0 1px 2px rgba(67, 48, 29, 0.06), 0 5px 16px rgba(67, 48, 29, 0.04);
+  --lm-shadow-md: 0 18px 48px rgba(55, 39, 24, 0.14), 0 3px 10px rgba(55, 39, 24, 0.06);
+  --lm-radius-sm: 7px;
+  --lm-radius-md: 11px;
+  --lm-radius-lg: 16px;
+  --lm-transition: 170ms cubic-bezier(0.2, 0.75, 0.25, 1);
   --lm-editor-width: 860px;
   --lm-editor-font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --lm-editor-font-size: 16px;
@@ -80,9 +100,28 @@ body {
   --lm-editor-code-font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.dark {
+  color-scheme: dark;
+  --lm-canvas: #100e0c;
+  --lm-surface: #191613;
+  --lm-surface-soft: #211d19;
+  --lm-surface-raised: #29231e;
+  --lm-sidebar: #171411;
+  --lm-ink: #eee7dc;
+  --lm-ink-soft: #c6bbab;
+  --lm-ink-muted: #998d7d;
+  --lm-border: rgba(226, 210, 188, 0.11);
+  --lm-border-strong: rgba(226, 210, 188, 0.2);
+  --lm-accent: #c99a63;
+  --lm-accent-soft: rgba(201, 154, 99, 0.13);
+  --lm-focus: rgba(211, 163, 105, 0.25);
+  --lm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 7px 20px rgba(0, 0, 0, 0.13);
+  --lm-shadow-md: 0 20px 56px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.22);
+}
+
 @layer components {
   .btn {
-    @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm text-ink-700 transition-colors hover:bg-paper-100 hover:text-ink-900 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm text-ink-700 transition-colors hover:bg-paper-200/60 hover:text-ink-900 focus:outline-none focus:ring-2 focus:ring-amber-700/20 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .btn-primary {
@@ -90,7 +129,7 @@ body {
   }
 
   .btn-small {
-    @apply rounded border border-transparent bg-transparent px-2 py-1 text-xs text-ink-500 transition-colors hover:bg-paper-100 hover:text-ink-900 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply rounded-md border border-transparent bg-transparent px-2 py-1 text-xs text-ink-500 transition-colors hover:bg-paper-200/70 hover:text-ink-900 focus:outline-none focus:ring-2 focus:ring-amber-700/20 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .select {
@@ -110,11 +149,11 @@ body {
   }
 
   .file-node {
-    @apply mb-0.5 block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply mb-0.5 block w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200/70 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
   }
 
   .file-node-active {
-    @apply bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100;
+    @apply bg-amber-900/10 text-ink-900 shadow-[inset_2px_0_0_rgba(154,106,53,.65)] dark:bg-amber-200/10 dark:text-ink-100;
   }
 }
 
@@ -2899,4 +2938,209 @@ sub {
 
 .dark .lm-format-grid button:hover {
   background: rgba(214, 211, 209, 0.11);
+}
+
+/* LightMark paper-writing visual system */
+.lm-editor-scroll {
+  background: var(--lm-surface);
+  color: var(--lm-ink);
+}
+
+.ProseMirror,
+.markdown-preview {
+  color: var(--lm-ink);
+  letter-spacing: 0.006em;
+}
+
+.ProseMirror-focused { outline: none; }
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3,
+.ProseMirror h4,
+.ProseMirror h5,
+.ProseMirror h6,
+.ProseMirror .markdown-heading,
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4,
+.markdown-preview h5,
+.markdown-preview h6 {
+  color: var(--lm-ink);
+  font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+  font-weight: 650;
+  letter-spacing: -0.018em;
+}
+
+.ProseMirror .markdown-heading-1,
+.markdown-preview h1 {
+  margin-top: 1.45em;
+  border-bottom: 0;
+  padding-bottom: 0.12em;
+  font-size: 2.18em;
+}
+
+.ProseMirror .markdown-heading-1::after,
+.markdown-preview h1::after {
+  display: block;
+  width: 2.2rem;
+  height: 2px;
+  margin-top: 0.32em;
+  border-radius: 999px;
+  background: var(--lm-accent);
+  content: "";
+  opacity: 0.72;
+}
+
+.ProseMirror .markdown-heading-2,
+.markdown-preview h2 {
+  margin-top: 1.35em;
+  border-bottom-color: var(--lm-border);
+  font-size: 1.62em;
+}
+
+.ProseMirror .markdown-heading-3,
+.markdown-preview h3 { margin-top: 1.25em; font-size: 1.32em; }
+
+.ProseMirror a,
+.markdown-preview a {
+  color: var(--lm-accent);
+  text-decoration-color: color-mix(in srgb, var(--lm-accent) 40%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.ProseMirror blockquote,
+.markdown-preview blockquote {
+  margin: 1.15em 0;
+  border-left: 3px solid color-mix(in srgb, var(--lm-accent) 65%, transparent);
+  border-radius: 0 var(--lm-radius-sm) var(--lm-radius-sm) 0;
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink-soft);
+  padding: 0.7em 1em;
+}
+
+.ProseMirror code,
+.markdown-preview code {
+  border: 1px solid var(--lm-border);
+  border-radius: 5px;
+  background: var(--lm-surface-soft);
+  color: color-mix(in srgb, var(--lm-accent) 78%, var(--lm-ink));
+  padding: 0.12em 0.34em;
+}
+
+.ProseMirror pre,
+.markdown-preview pre,
+.front-matter-node,
+.mermaid-node,
+.toc-node {
+  border-color: var(--lm-border);
+  border-radius: var(--lm-radius-md);
+  background: var(--lm-surface-soft);
+  box-shadow: inset 0 1px rgb(255 255 255 / 35%);
+}
+
+.ProseMirror pre code,
+.markdown-preview pre code { border: 0; background: transparent; color: inherit; padding: 0; }
+
+.ProseMirror table,
+.markdown-preview table {
+  overflow: hidden;
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-sm);
+  border-collapse: separate;
+  border-spacing: 0;
+  box-shadow: var(--lm-shadow-sm);
+}
+
+.ProseMirror th,
+.markdown-preview th { background: var(--lm-surface-soft); color: var(--lm-ink); }
+
+.ProseMirror th,
+.ProseMirror td,
+.markdown-preview th,
+.markdown-preview td { border-color: var(--lm-border); }
+
+.ProseMirror img,
+.markdown-preview img { border-radius: var(--lm-radius-md); box-shadow: 0 10px 28px rgb(53 38 23 / 10%); }
+
+.ProseMirror hr,
+.markdown-preview hr { height: 1px; margin: 2em 0; background: linear-gradient(90deg, transparent, var(--lm-border-strong) 20%, var(--lm-border-strong) 80%, transparent); }
+
+.ProseMirror [data-task-item] input,
+.markdown-preview [data-task-item] input { accent-color: var(--lm-accent); }
+
+.cm-editor { color: var(--lm-ink); }
+.cm-gutters { color: var(--lm-ink-muted) !important; }
+.cm-activeLine, .cm-activeLineGutter { background: var(--lm-accent-soft) !important; }
+.cm-cursor, .cm-dropCursor { border-left-color: var(--lm-accent) !important; }
+
+.lm-context-menu,
+.lm-menu-pop,
+.math-suggest,
+.code-language-menu {
+  border-color: var(--lm-border-strong);
+  border-radius: var(--lm-radius-md);
+  background: var(--lm-surface-raised);
+  box-shadow: var(--lm-shadow-md);
+  color: var(--lm-ink);
+}
+
+.lm-menu-item { border-radius: var(--lm-radius-sm); }
+.lm-menu-item:hover,
+.lm-menu-sub:hover > .lm-menu-item { background: var(--lm-accent-soft); }
+.lm-menu-separator { background: var(--lm-border); }
+
+.dark .ProseMirror,
+.dark .markdown-preview { color: var(--lm-ink); }
+.dark .front-matter-node,
+.dark .toc-node,
+.dark .mermaid-node { border-color: var(--lm-border); background: var(--lm-surface-soft); color: var(--lm-ink); }
+.dark .lm-context-menu,
+.dark .lm-menu-pop,
+.dark .math-suggest { border-color: var(--lm-border-strong); background: var(--lm-surface-raised); color: var(--lm-ink); }
+
+button,
+input,
+select,
+textarea { transition: border-color var(--lm-transition), background-color var(--lm-transition), color var(--lm-transition), box-shadow var(--lm-transition); }
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible { outline: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0ms !important; }
+}
+
+.lm-modal-backdrop {
+  background: rgb(54 42 29 / 22%);
+  backdrop-filter: blur(3px) saturate(88%);
+}
+
+.dark .lm-modal-backdrop { background: rgb(0 0 0 / 48%); }
+
+.lm-palette-panel,
+.lm-settings-panel {
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-lg);
+  background: var(--lm-surface-raised);
+  color: var(--lm-ink);
+  box-shadow: var(--lm-shadow-md);
+}
+
+.lm-palette-panel > input {
+  border-bottom-color: var(--lm-border);
+  color: var(--lm-ink);
+  font-family: Georgia, "Noto Serif SC", serif;
+}
+
+.lm-palette-panel > input:focus { box-shadow: inset 3px 0 0 var(--lm-accent); }
+.lm-palette-panel button { border-radius: var(--lm-radius-sm); }
+.lm-palette-panel button:hover { background: var(--lm-accent-soft); }
+
+@media (max-width: 720px) {
+  .lm-modal-backdrop { padding: 32px 18px; }
 }

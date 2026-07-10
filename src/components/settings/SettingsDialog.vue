@@ -98,9 +98,9 @@ function cloneSettings(settings: AppSettings): AppSettings {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 bg-ink-900/20 p-6 backdrop-blur-[1px]" @click.self="close">
+  <div class="lm-modal-backdrop fixed inset-0 z-50 p-6" @click.self="close">
     <section
-      class="mx-auto flex h-[min(760px,calc(100vh-48px))] max-w-5xl overflow-hidden rounded-lg border border-paper-200 bg-paper-50 shadow-[0_22px_70px_rgba(31,30,27,0.18)] dark:border-paper-800 dark:bg-paper-950"
+      class="lm-settings-panel mx-auto flex h-[min(760px,calc(100vh-48px))] max-w-5xl overflow-hidden"
       role="dialog"
       aria-modal="true"
       aria-label="偏好设置"
@@ -466,34 +466,47 @@ function cloneSettings(settings: AppSettings): AppSettings {
 </template>
 
 <style scoped>
+.lm-settings-panel > aside {
+  border-color: var(--lm-border);
+  background: var(--lm-sidebar);
+}
+
+.lm-settings-panel > div > header {
+  border-color: var(--lm-border);
+  background: color-mix(in srgb, var(--lm-surface-raised) 94%, transparent);
+}
+
+.lm-settings-panel > div > main { background: var(--lm-surface); }
+
 .settings-stack {
   display: grid;
   gap: 18px;
 }
 
 .settings-group {
-  border: 1px solid rgb(224 220 212);
-  border-radius: 8px;
-  background: rgb(255 254 251 / 70%);
+  border: 1px solid var(--lm-border);
+  border-radius: var(--lm-radius-md);
+  background: var(--lm-surface-raised);
   overflow: hidden;
+  box-shadow: var(--lm-shadow-sm);
 }
 
 .dark .settings-group {
-  border-color: rgb(52 49 45);
-  background: rgb(31 30 27 / 38%);
+  border-color: var(--lm-border);
+  background: var(--lm-surface-raised);
 }
 
 .settings-group h4 {
   margin: 0;
   padding: 12px 14px;
-  border-bottom: 1px solid rgb(224 220 212);
+  border-bottom: 1px solid var(--lm-border);
   color: inherit;
   font-size: 13px;
   font-weight: 700;
 }
 
 .dark .settings-group h4 {
-  border-color: rgb(52 49 45);
+  border-color: var(--lm-border);
 }
 
 .settings-row {
@@ -503,12 +516,12 @@ function cloneSettings(settings: AppSettings): AppSettings {
   justify-content: space-between;
   gap: 24px;
   padding: 10px 14px;
-  border-bottom: 1px solid rgb(237 234 228);
+  border-bottom: 1px solid var(--lm-border);
   color: inherit;
 }
 
 .dark .settings-row {
-  border-color: rgb(43 40 37);
+  border-color: var(--lm-border);
 }
 
 .settings-row:last-child {
@@ -529,14 +542,14 @@ function cloneSettings(settings: AppSettings): AppSettings {
 .settings-note {
   display: block;
   margin-top: 3px;
-  color: rgb(117 111 102);
+  color: var(--lm-ink-muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .dark .settings-row small,
 .dark .settings-note {
-  color: rgb(185 179 168);
+  color: var(--lm-ink-muted);
 }
 
 .disabled-row {
@@ -546,9 +559,9 @@ function cloneSettings(settings: AppSettings): AppSettings {
 .settings-input,
 .settings-number {
   width: 240px;
-  border: 1px solid rgb(224 220 212);
-  border-radius: 6px;
-  background: rgb(251 250 247);
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-sm);
+  background: var(--lm-surface);
   padding: 6px 8px;
   color: inherit;
   font-size: 13px;
@@ -561,9 +574,12 @@ function cloneSettings(settings: AppSettings): AppSettings {
 
 .dark .settings-input,
 .dark .settings-number {
-  border-color: rgb(52 49 45);
-  background: rgb(31 30 27);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface);
 }
+
+.settings-input:focus,
+.settings-number:focus { border-color: var(--lm-accent); box-shadow: 0 0 0 3px var(--lm-focus); }
 
 .settings-note {
   margin: 0;

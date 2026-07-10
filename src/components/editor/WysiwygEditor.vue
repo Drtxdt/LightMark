@@ -4639,7 +4639,7 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
 <template>
   <div
     ref="editorShell"
-    class="relative h-full overflow-auto bg-paper-50 dark:bg-paper-950"
+    class="lm-editor-scroll relative h-full overflow-auto"
     @click="handleEditorShellClick"
     @scroll="handleEditorShellScroll"
   >

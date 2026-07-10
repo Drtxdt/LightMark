@@ -90,9 +90,9 @@ async function rebindDeletedTab() {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  border-bottom: 1px solid rgb(217 194 141 / 55%);
-  background: rgb(255 248 229);
-  color: rgb(92 63 12);
+  border-bottom: 1px solid color-mix(in srgb, var(--lm-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--lm-accent-soft) 76%, var(--lm-surface));
+  color: color-mix(in srgb, var(--lm-accent) 68%, var(--lm-ink));
   padding: 0.5rem 0.75rem;
   font-size: 0.75rem;
 }
@@ -105,17 +105,17 @@ async function rebindDeletedTab() {
 
 .notice-button {
   height: 1.75rem;
-  border-radius: 0.375rem;
-  border: 1px solid rgb(120 113 108 / 25%);
-  background: rgb(255 255 255 / 62%);
+  border-radius: var(--lm-radius-sm);
+  border: 1px solid var(--lm-border-strong);
+  background: var(--lm-surface-raised);
   padding: 0 0.625rem;
   font-size: 0.75rem;
   white-space: nowrap;
 }
 
 .notice-button.primary {
-  border-color: rgb(68 64 60 / 30%);
-  background: rgb(68 64 60);
+  border-color: var(--lm-accent);
+  background: var(--lm-accent);
   color: white;
 }
 
@@ -125,9 +125,9 @@ async function rebindDeletedTab() {
 }
 
 :global(.dark) .external-file-notice {
-  border-bottom-color: rgb(168 131 50 / 45%);
-  background: rgb(49 39 18);
-  color: rgb(252 211 77);
+  border-bottom-color: color-mix(in srgb, var(--lm-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--lm-accent-soft) 76%, var(--lm-surface));
+  color: var(--lm-accent);
 }
 
 :global(.dark) .external-file-notice.danger {
@@ -137,13 +137,13 @@ async function rebindDeletedTab() {
 }
 
 :global(.dark) .notice-button {
-  border-color: rgb(214 211 209 / 18%);
-  background: rgb(255 255 255 / 8%);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface-raised);
 }
 
 :global(.dark) .notice-button.primary {
-  border-color: rgb(250 250 249 / 28%);
-  background: rgb(250 250 249);
-  color: rgb(28 25 23);
+  border-color: var(--lm-accent);
+  background: var(--lm-accent);
+  color: var(--lm-surface);
 }
 </style>
