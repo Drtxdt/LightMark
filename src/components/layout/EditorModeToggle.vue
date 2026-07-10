@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { EditorMode } from "../../types";
+import UiIcon from "../ui/UiIcon.vue";
 
 const props = defineProps<{
   modelValue: EditorMode;
@@ -61,9 +62,7 @@ function handleKeydown(event: KeyboardEvent) {
       aria-label="编辑"
       @click="setMode('wysiwyg')"
     >
-      <span class="mode-icon mode-icon-edit" aria-hidden="true">
-        <i></i>
-      </span>
+      <UiIcon name="pen-line" :size="17" />
     </button>
     <button
       type="button"
@@ -74,9 +73,7 @@ function handleKeydown(event: KeyboardEvent) {
       aria-label="源代码"
       @click="setMode('source')"
     >
-      <span class="mode-icon mode-icon-source" aria-hidden="true">
-        <i></i>
-      </span>
+      <UiIcon name="code-xml" :size="17" />
     </button>
   </div>
 </template>
@@ -196,90 +193,6 @@ function handleKeydown(event: KeyboardEvent) {
 .editor-mode-toggle-option.active {
   color: var(--toggle-ink);
   font-weight: 600;
-}
-
-.mode-icon {
-  position: relative;
-  display: block;
-  width: 18px;
-  height: 18px;
-  color: currentColor;
-}
-
-.mode-icon::before,
-.mode-icon::after,
-.mode-icon i,
-.mode-icon i::before,
-.mode-icon i::after {
-  content: "";
-  position: absolute;
-  box-sizing: border-box;
-}
-
-.mode-icon-edit::before {
-  left: 3px;
-  top: 2px;
-  width: 11px;
-  height: 14px;
-  border: 1.5px solid currentColor;
-  border-radius: 2px;
-  background: linear-gradient(135deg, currentColor 0 12%, transparent 12%);
-  opacity: 0.92;
-}
-
-.mode-icon-edit::after {
-  right: 2px;
-  top: 2px;
-  width: 5px;
-  height: 5px;
-  border-radius: 0 2px 0 2px;
-  border-left: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  background: rgba(255, 255, 255, 0.28);
-}
-
-.mode-icon-edit i {
-  left: 6px;
-  top: 7px;
-  width: 7px;
-  height: 1.5px;
-  border-radius: 999px;
-  background: currentColor;
-  box-shadow: 0 4px 0 currentColor;
-  opacity: 0.72;
-}
-
-.mode-icon-source::before,
-.mode-icon-source::after {
-  top: 5px;
-  width: 6px;
-  height: 6px;
-  border-color: currentColor;
-  border-style: solid;
-  opacity: 0.9;
-}
-
-.mode-icon-source::before {
-  left: 2px;
-  border-width: 0 0 1.6px 1.6px;
-  transform: rotate(45deg);
-}
-
-.mode-icon-source::after {
-  right: 2px;
-  border-width: 1.6px 1.6px 0 0;
-  transform: rotate(45deg);
-}
-
-.mode-icon-source i {
-  left: 8px;
-  top: 3px;
-  width: 1.6px;
-  height: 12px;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.72;
-  transform: rotate(16deg);
 }
 
 .editor-mode-toggle-option:disabled {

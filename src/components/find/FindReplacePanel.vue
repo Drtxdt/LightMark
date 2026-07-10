@@ -6,6 +6,7 @@ import {
   refreshFind,
   runFindCommand,
 } from "../../stores/findReplaceStore";
+import UiIcon from "../ui/UiIcon.vue";
 
 const queryInput = ref<HTMLInputElement | null>(null);
 let refreshTimer = 0;
@@ -106,7 +107,9 @@ function onPanelKeydown(event: KeyboardEvent) {
       <button class="find-toggle mono" type="button" :class="{ active: findReplaceStore.regex }" @click="findReplaceStore.regex = !findReplaceStore.regex">
         .*
       </button>
-      <button class="find-close" type="button" title="关闭 Esc" aria-label="关闭查找替换" @click="closeFindPanel"></button>
+      <button class="find-close" type="button" title="关闭 Esc" aria-label="关闭查找替换" @click="closeFindPanel">
+        <UiIcon name="x" :size="15" />
+      </button>
     </div>
   </section>
 </template>
@@ -223,27 +226,9 @@ function onPanelKeydown(event: KeyboardEvent) {
 }
 
 .find-close {
-  position: relative;
+  display: grid;
   width: 26px;
-}
-
-.find-close::before,
-.find-close::after {
-  position: absolute;
-  left: 12px;
-  top: 6px;
-  width: 1.5px;
-  height: 13px;
-  background: currentColor;
-  content: "";
-}
-
-.find-close::before {
-  transform: rotate(45deg);
-}
-
-.find-close::after {
-  transform: rotate(-45deg);
+  place-items: center;
 }
 
 :global(.dark) .find-panel {
@@ -258,7 +243,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 
 :global(.dark) .find-label,
 :global(.dark) .find-count {
-  color: #aaa196;
+  color: var(--lm-ink-muted);
 }
 
 :global(.dark) .find-count.error {
@@ -272,15 +257,15 @@ function onPanelKeydown(event: KeyboardEvent) {
 :global(.dark) .find-button,
 :global(.dark) .find-toggle,
 :global(.dark) .find-close {
-  color: #b9b3a8;
+  color: var(--lm-ink-soft);
 }
 
 :global(.dark) .find-button:hover,
 :global(.dark) .find-toggle:hover,
 :global(.dark) .find-close:hover,
 :global(.dark) .find-toggle.active {
-  border-color: rgb(76 70 62 / 86%);
-  background: rgb(255 255 255 / 8%);
-  color: #f2eee6;
+  border-color: var(--lm-border-strong);
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
 }
 </style>

@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { appStore, clearExportStatus } from "../../stores/appStore";
 import { getExportThemePalette } from "../../utils/exportTheme";
+import UiIcon from "../ui/UiIcon.vue";
 
 const visible = computed(() => appStore.exportStatus.status !== "idle");
 const isRunning = computed(() => appStore.exportStatus.status === "running");
@@ -54,7 +55,7 @@ function close() {
           aria-label="关闭导出状态"
           @click="close"
         >
-          <span aria-hidden="true"></span>
+          <UiIcon name="x" :size="14" />
         </button>
       </div>
     </div>
@@ -148,26 +149,6 @@ function close() {
 .export-status-close:focus-visible {
   background: var(--export-status-hover);
   outline: none;
-}
-
-.export-status-close span::before,
-.export-status-close span::after {
-  position: absolute;
-  top: 10px;
-  left: 6px;
-  width: 10px;
-  height: 1.5px;
-  border-radius: 999px;
-  background: currentColor;
-  content: "";
-}
-
-.export-status-close span::before {
-  transform: rotate(45deg);
-}
-
-.export-status-close span::after {
-  transform: rotate(-45deg);
 }
 
 .export-status-progress {

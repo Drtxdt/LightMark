@@ -4,6 +4,7 @@ import { appStore, navigateToFilePath, openFile, openWorkspace, recordNavigation
 import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
 import type { LargeOutlineItem, OutlineItem } from "../../types";
+import UiIcon from "../ui/UiIcon.vue";
 
 const activePane = ref<"files" | "outline" | "backlinks">("files");
 const outline = computed(() => {
@@ -102,26 +103,29 @@ function outlineIndent(level: number) {
       <div class="sidebar-kicker">LIGHTMARK</div>
       <div class="sidebar-switcher flex items-center gap-1 p-1">
         <button
-          v-if="appStore.settings.appearance.showOutline"
           class="sidebar-switch flex-1 px-2 py-1 text-sm"
           :class="{ active: activePane === 'files' }"
           @click="activePane = 'files'"
         >
-          文件
+          <UiIcon name="files" :size="15" />
+          <span>文件</span>
         </button>
         <button
+          v-if="appStore.settings.appearance.showOutline"
           class="sidebar-switch flex-1 px-2 py-1 text-sm"
           :class="{ active: activePane === 'outline' }"
           @click="activePane = 'outline'"
         >
-          大纲
+          <UiIcon name="list-tree" :size="15" />
+          <span>大纲</span>
         </button>
         <button
           class="sidebar-switch flex-1 px-2 py-1 text-sm"
           :class="{ active: activePane === 'backlinks' }"
           @click="activePane = 'backlinks'"
         >
-          反链
+          <UiIcon name="link" :size="15" />
+          <span>反链</span>
         </button>
       </div>
     </div>
@@ -142,7 +146,7 @@ function outlineIndent(level: number) {
       <button
         v-for="item in outline"
         :key="item.id"
-        class="block w-full truncate rounded px-2 py-1 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
+        class="outline-item block w-full truncate px-2 py-1.5 text-left text-sm"
         :style="{ paddingLeft: outlineIndent(item.level) }"
         @click="jumpToHeading(item)"
       >
@@ -162,7 +166,7 @@ function outlineIndent(level: number) {
       <button
         v-for="item in appStore.wikiBacklinks"
         :key="`${item.sourcePath}:${item.line}:${item.preview}`"
-        class="mb-2 block w-full rounded border border-paper-200 bg-paper-50 px-2.5 py-2 text-left transition-colors hover:bg-paper-100 dark:border-paper-800 dark:bg-paper-950 dark:hover:bg-paper-800"
+        class="backlink-card mb-2 block w-full px-2.5 py-2 text-left"
         @click="openBacklink(item.sourcePath)"
       >
         <span class="block truncate text-sm font-medium text-ink-800 dark:text-ink-100">{{ item.sourceName }}</span>
@@ -178,9 +182,13 @@ function outlineIndent(level: number) {
 .sidebar-header { border-bottom: 1px solid var(--lm-border); }
 .sidebar-kicker { margin: 1px 4px 9px; color: var(--lm-ink-muted); font: 700 9px/1 var(--lm-editor-code-font-family); letter-spacing: .18em; }
 .sidebar-switcher { border: 1px solid var(--lm-border); border-radius: 10px; background: color-mix(in srgb, var(--lm-surface) 36%, transparent); }
-.sidebar-switch { border: 0; border-radius: 7px; background: transparent; color: var(--lm-ink-muted); transition: all var(--lm-transition); }
+.sidebar-switch { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 7px; background: transparent; color: var(--lm-ink-muted); transition: all var(--lm-transition); }
 .sidebar-switch:hover { color: var(--lm-ink); }
 .sidebar-switch.active { background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-sm); }
 .sidebar-empty { margin-top: 14px; border: 1px dashed var(--lm-border-strong); border-radius: var(--lm-radius-md); padding: 16px 14px; color: var(--lm-ink-soft); line-height: 1.5; text-align: center; }
 .sidebar-empty span { color: var(--lm-ink-muted); font-size: 12px; }
+.outline-item { border: 0; border-radius: var(--lm-radius-sm); background: transparent; color: var(--lm-ink-soft); transition: background var(--lm-transition), color var(--lm-transition); }
+.outline-item:hover { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.backlink-card { border: 1px solid var(--lm-border); border-radius: var(--lm-radius-md); background: color-mix(in srgb, var(--lm-surface-raised) 74%, transparent); box-shadow: var(--lm-shadow-sm); transition: border-color var(--lm-transition), background var(--lm-transition), transform var(--lm-transition); }
+.backlink-card:hover { border-color: var(--lm-border-strong); background: var(--lm-surface-raised); transform: translateY(-1px); }
 </style>

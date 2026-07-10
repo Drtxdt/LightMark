@@ -51,6 +51,7 @@ import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
 import type { EditorPaneId } from "../../types";
+import UiIcon from "../ui/UiIcon.vue";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
@@ -4721,12 +4722,12 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
       <div v-if="tableControl.resizeOpen" class="table-resize-popover">
         <div class="table-resize-title">表格尺寸</div>
         <div class="table-resize-controls">
-          <button type="button" aria-label="减少行" @click="setTableResizeDelta('rows', -1)">−</button>
+          <button type="button" aria-label="减少行" @click="setTableResizeDelta('rows', -1)"><UiIcon name="minus" :size="14" /></button>
           <span>{{ tableControl.rows }} 行</span>
-          <button type="button" aria-label="增加行" @click="setTableResizeDelta('rows', 1)">+</button>
-          <button type="button" aria-label="减少列" @click="setTableResizeDelta('columns', -1)">−</button>
+          <button type="button" aria-label="增加行" @click="setTableResizeDelta('rows', 1)"><UiIcon name="plus" :size="14" /></button>
+          <button type="button" aria-label="减少列" @click="setTableResizeDelta('columns', -1)"><UiIcon name="minus" :size="14" /></button>
           <span>{{ tableControl.columns }} 列</span>
-          <button type="button" aria-label="增加列" @click="setTableResizeDelta('columns', 1)">+</button>
+          <button type="button" aria-label="增加列" @click="setTableResizeDelta('columns', 1)"><UiIcon name="plus" :size="14" /></button>
         </div>
         <form class="table-resize-form" @submit.prevent="applyTableResizeFromInput">
           <input
@@ -4813,14 +4814,14 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
 
         <div class="lm-menu-separator"></div>
         <div class="lm-format-grid" aria-label="格式">
-          <button title="加粗" @click="runMenuCommand(() => runFormatCommand('bold'))"><span class="lm-ico lm-ico-bold">B</span></button>
-          <button title="斜体" @click="runMenuCommand(() => runFormatCommand('italic'))"><span class="lm-ico lm-ico-italic">I</span></button>
-          <button title="行内代码" @click="runMenuCommand(() => runFormatCommand('code'))"><span class="lm-ico lm-ico-code"></span></button>
-          <button title="链接" @click="runMenuCommand(toggleLink)"><span class="lm-ico lm-ico-link"></span></button>
-          <button title="引用" @click="runMenuCommand(() => runFormatCommand('blockquote'))"><span class="lm-ico lm-ico-quote"></span></button>
-          <button title="有序列表" @click="runMenuCommand(() => runFormatCommand('orderedList'))"><span class="lm-ico lm-ico-ol"></span></button>
-          <button title="无序列表" @click="runMenuCommand(() => runFormatCommand('bulletList'))"><span class="lm-ico lm-ico-ul"></span></button>
-          <button title="任务清单" @click="runMenuCommand(insertTaskItem)"><span class="lm-ico lm-ico-task"></span></button>
+          <button title="加粗" aria-label="加粗" @click="runMenuCommand(() => runFormatCommand('bold'))"><UiIcon name="bold" :size="16" /></button>
+          <button title="斜体" aria-label="斜体" @click="runMenuCommand(() => runFormatCommand('italic'))"><UiIcon name="italic" :size="16" /></button>
+          <button title="行内代码" aria-label="行内代码" @click="runMenuCommand(() => runFormatCommand('code'))"><UiIcon name="code" :size="16" /></button>
+          <button title="链接" aria-label="链接" @click="runMenuCommand(toggleLink)"><UiIcon name="link" :size="16" /></button>
+          <button title="引用" aria-label="引用" @click="runMenuCommand(() => runFormatCommand('blockquote'))"><UiIcon name="quote" :size="16" /></button>
+          <button title="有序列表" aria-label="有序列表" @click="runMenuCommand(() => runFormatCommand('orderedList'))"><UiIcon name="list-ordered" :size="16" /></button>
+          <button title="无序列表" aria-label="无序列表" @click="runMenuCommand(() => runFormatCommand('bulletList'))"><UiIcon name="list" :size="16" /></button>
+          <button title="任务清单" aria-label="任务清单" @click="runMenuCommand(insertTaskItem)"><UiIcon name="list-checks" :size="16" /></button>
         </div>
 
         <div class="lm-menu-separator"></div>

@@ -14,6 +14,7 @@ import {
 } from "../../stores/appStore";
 import type { DocumentTab, EditorPaneId } from "../../types";
 import { paneTabId, paneTabIds } from "../../utils/splitLayout";
+import UiIcon from "../ui/UiIcon.vue";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
@@ -157,7 +158,7 @@ async function createTab() {
         tabindex="-1"
         @click="onClose($event, tab.id)"
       >
-        ×
+        <UiIcon name="x" :size="14" />
       </span>
     </button>
     <div
@@ -187,7 +188,7 @@ async function createTab() {
       aria-label="新建未命名标签页"
       @click="createTab"
     >
-      +
+      <UiIcon name="plus" :size="17" />
     </button>
   </nav>
 </template>
@@ -223,10 +224,14 @@ async function createTab() {
 
 .tab-close {
   line-height: 1;
+  opacity: 0;
 }
 
+.document-tab:hover .tab-close,
+.document-tab.active .tab-close,
+.document-tab:focus-visible .tab-close { opacity: 0.72; }
+
 .new-tab-button {
-  font-weight: 500;
   border-radius: 9px 9px 0 0;
   color: var(--lm-ink-muted);
   transition: all var(--lm-transition);
