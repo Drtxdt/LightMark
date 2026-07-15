@@ -47,11 +47,14 @@ import {
 } from "../utils/splitLayout";
 import {
   backlinksForPath,
+  createWikiWorkspaceIndex,
   flattenMarkdownFiles,
   resolveWikiLink,
+  updateWikiIndexEntry,
   wikiPageFileName,
   type BacklinkItem,
   type WikiLinkTarget,
+  type WikiWorkspaceIndex,
 } from "../utils/wikiLinks";
 
 export const appStore = reactive({
@@ -87,6 +90,8 @@ export const appStore = reactive({
   wikiBacklinks: [] as BacklinkItem[],
   wikiBacklinksBusy: false,
   wikiBacklinksError: "",
+  wikiIndex: createWikiWorkspaceIndex([]) as WikiWorkspaceIndex,
+  wikiIndexBusy: false,
   pendingModeCursor: null as PendingModeCursor | null,
   pendingEditorPosition: null as EditorPositionSnapshot | null,
   exportStatus: {
@@ -102,6 +107,9 @@ let externalFileCheckInFlight = false;
 let externalFileWatcherRunning = false;
 let externalFileWatcherAvailable = true;
 let backlinkRefreshTimer = 0;
+let wikiIndexRefreshTimer = 0;
+let wikiIndexGeneration = 0;
+let wikiIndexHydrationPromise: Promise<void> | null = null;
 const watchedFilePaths = new Map<string, string>();
 
 export const currentFileName = computed(() => {
@@ -142,6 +150,7 @@ export function setPaneContent(paneId: EditorPaneId, content: string, dirty = tr
     appStore.documentMode = target.documentMode;
   }
   scheduleBacklinksRefresh();
+  scheduleWikiIndexEntryRefresh(target.path, content);
 }
 
 export function getPaneTab(paneId: EditorPaneId) {
@@ -241,11 +250,53 @@ export async function persistConfig() {
 export async function refreshFileTree() {
   if (!appStore.currentWorkspace) {
     appStore.fileTree = [];
+    appStore.wikiIndex = createWikiWorkspaceIndex([]);
     return;
   }
   appStore.fileTree = await invoke<FileNode[]>("list_markdown_files", {
     folder: appStore.currentWorkspace,
   });
+  appStore.wikiIndex = createWikiWorkspaceIndex(appStore.fileTree, appStore.currentWorkspace);
+  const hydration = hydrateWikiWorkspaceIndex();
+  wikiIndexHydrationPromise = hydration;
+  void hydration.finally(() => {
+    if (wikiIndexHydrationPromise === hydration) wikiIndexHydrationPromise = null;
+  });
+}
+
+async function hydrateWikiWorkspaceIndex() {
+  const generation = ++wikiIndexGeneration;
+  const index = appStore.wikiIndex;
+  appStore.wikiIndexBusy = true;
+  try {
+    const entries = [...index.entries];
+    for (let offset = 0; offset < entries.length; offset += 12) {
+      if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex) return;
+      const batch = entries.slice(offset, offset + 12);
+      const contents = await Promise.all(batch.map(async (entry) => [entry.path, await contentForWikiIndex(entry.path)] as const));
+      for (const [path, content] of contents) updateWikiIndexEntry(index, path, content);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    }
+    scheduleBacklinksRefresh();
+  } finally {
+    if (generation === wikiIndexGeneration) appStore.wikiIndexBusy = false;
+  }
+}
+
+async function contentForWikiIndex(path: string) {
+  const tab = appStore.tabs.find((item) => item.path && isSamePath(item.path, path));
+  if (tab?.kind === "normal") return tab.content;
+  return await invoke<string>("read_text_file", { path }).catch(() => "");
+}
+
+function scheduleWikiIndexEntryRefresh(path: string, content: string) {
+  if (!path || typeof window === "undefined") return;
+  if (wikiIndexRefreshTimer) window.clearTimeout(wikiIndexRefreshTimer);
+  wikiIndexRefreshTimer = window.setTimeout(() => {
+    wikiIndexRefreshTimer = 0;
+    updateWikiIndexEntry(appStore.wikiIndex, path, content);
+    scheduleBacklinksRefresh();
+  }, 250);
 }
 
 export async function openWorkspace(folder?: string) {
@@ -347,7 +398,8 @@ export async function openWikiLink(target: WikiLinkTarget) {
     appStore.statusMessage = "请先打开工作区再使用 Wiki Links";
     return false;
   }
-  const resolution = resolveWikiLink(target, appStore.fileTree);
+  if (appStore.wikiIndexBusy && wikiIndexHydrationPromise) await wikiIndexHydrationPromise;
+  const resolution = resolveWikiLink(target, appStore.wikiIndex);
   if (resolution.path) {
     recordNavigationLocation();
     await openFile(resolution.path, { recordNavigation: false });
@@ -399,7 +451,7 @@ export async function refreshBacklinks() {
     for (const path of files) {
       const content = await contentForBacklinkScan(path);
       if (!content) continue;
-      backlinks.push(...backlinksForPath(appStore.currentFilePath, content, path));
+      backlinks.push(...backlinksForPath(appStore.currentFilePath, content, path, appStore.wikiIndex));
     }
     appStore.wikiBacklinks = backlinks.sort((left, right) => {
       return left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN") || left.line - right.line;

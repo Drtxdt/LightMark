@@ -34,7 +34,13 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
-import { parseWikiLinkHref, wikiLinkMarkdown } from "../../utils/wikiLinks";
+import {
+  parseWikiLinkHref,
+  wikiCompletionCandidates as findWikiCompletionCandidates,
+  wikiLinkHref,
+  wikiLinkMarkdown,
+  type WikiCompletionCandidate,
+} from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
 import {
@@ -110,6 +116,15 @@ const tableControl = ref({
   resizeText: "",
   resizeError: "",
 });
+const wikiCompletion = ref({
+  visible: false,
+  query: "",
+  from: 0,
+  to: 0,
+  x: 0,
+  y: 0,
+  highlightedIndex: 0,
+});
 const savedSelection = ref<{ from: number; to: number } | null>(null);
 const linkUrl = ref("");
 const canUseTableMenu = computed(() => contextMenu.value.inTable && contextMenu.value.mode !== "code");
@@ -118,6 +133,7 @@ const paneContent = computed(() => getPaneContent(props.paneId));
 const paneEditorMode = computed(() => getPaneEditorMode(props.paneId));
 const paneDocumentMode = computed(() => getPaneDocumentMode(props.paneId));
 const floatingCodeLanguageCandidates = computed(() => filterCodeLanguages(codeLanguageControl.value.query));
+const wysiwygWikiCandidates = computed(() => findWikiCompletionCandidates(appStore.wikiIndex, wikiCompletion.value.query));
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
 const githubAlertKinds = [
   { kind: "note", label: "Note" },
@@ -1935,6 +1951,7 @@ const editor = useEditor({
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
+      if (handleWikiCompletionKeydown(view, event)) return true;
       if (convertLeadingFrontMatter(view, event)) return true;
       if (convertFencedCodeBlock(view, event)) return true;
       if (event.key === "Backspace" && exitEmptyStoredFormattingOnBackspace(view)) {
@@ -2137,12 +2154,14 @@ const editor = useEditor({
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
+    updateWysiwygWikiCompletion(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
   },
   onSelectionUpdate({ editor }) {
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
+    updateWysiwygWikiCompletion(editor.view);
   },
   onFocus({ editor }) {
     updateCodeLanguageControl(editor.view);
@@ -2150,12 +2169,103 @@ const editor = useEditor({
   },
   onBlur() {
     window.setTimeout(() => {
+      closeWysiwygWikiCompletion();
       if (codeLanguageControl.value.open) return;
       codeLanguageControl.value.visible = false;
       if (!tableControl.value.resizeOpen && !tableControl.value.moreOpen) tableControl.value.visible = false;
     }, 120);
   },
 });
+
+function updateWysiwygWikiCompletion(view = editor.value?.view) {
+  if (!view || !appStore.currentWorkspace || paneEditorMode.value !== "wysiwyg") {
+    closeWysiwygWikiCompletion();
+    return;
+  }
+  const { selection } = view.state;
+  const { $from } = selection;
+  if (!selection.empty || !$from.parent.isTextblock || isWikiCompletionProtected($from)) {
+    closeWysiwygWikiCompletion();
+    return;
+  }
+  const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\0");
+  const match = before.match(/\[\[([^\[\]\n]*)$/);
+  if (!match) {
+    closeWysiwygWikiCompletion();
+    return;
+  }
+  const coords = view.coordsAtPos(selection.from);
+  const shell = editorShell.value;
+  const rect = shell?.getBoundingClientRect();
+  const desiredX = rect && shell ? coords.left - rect.left + shell.scrollLeft : coords.left;
+  const desiredY = rect && shell ? coords.bottom - rect.top + shell.scrollTop + 6 : coords.bottom + 6;
+  const menuWidth = 288;
+  const menuHeight = 272;
+  const x = shell ? Math.max(shell.scrollLeft + 8, Math.min(desiredX, shell.scrollLeft + shell.clientWidth - menuWidth - 8)) : desiredX;
+  const y = shell && desiredY + menuHeight > shell.scrollTop + shell.clientHeight
+    ? Math.max(shell.scrollTop + 8, coords.top - (rect?.top ?? 0) + shell.scrollTop - menuHeight - 6)
+    : desiredY;
+  wikiCompletion.value = {
+    visible: true,
+    query: match[1],
+    from: selection.from - match[0].length,
+    to: selection.from,
+    x,
+    y,
+    highlightedIndex: Math.min(wikiCompletion.value.highlightedIndex, Math.max(wysiwygWikiCandidates.value.length - 1, 0)),
+  };
+}
+
+function isWikiCompletionProtected($from: any) {
+  const protectedNodes = new Set(["codeBlock", "frontMatter", "inlineMath", "blockMath", "rawHtml", "inlineHtml"]);
+  for (let depth = $from.depth; depth >= 0; depth -= 1) {
+    if (protectedNodes.has($from.node(depth).type.name)) return true;
+  }
+  return $from.marks().some((mark: any) => mark.type.name === "code" || mark.type.name === "link");
+}
+
+function handleWikiCompletionKeydown(view: any, event: KeyboardEvent) {
+  if (!wikiCompletion.value.visible) return false;
+  const count = wysiwygWikiCandidates.value.length;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (count > 0) {
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      wikiCompletion.value.highlightedIndex = (wikiCompletion.value.highlightedIndex + delta + count) % count;
+    }
+    return true;
+  }
+  if ((event.key === "Enter" || event.key === "Tab") && count > 0) {
+    event.preventDefault();
+    chooseWysiwygWikiCompletion(wysiwygWikiCandidates.value[wikiCompletion.value.highlightedIndex], view);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeWysiwygWikiCompletion();
+    return true;
+  }
+  return false;
+}
+
+function chooseWysiwygWikiCompletion(candidate: WikiCompletionCandidate | undefined, view = editor.value?.view) {
+  if (!candidate || !view) return;
+  const link = view.state.schema.marks.link.create({ href: wikiLinkHref({ page: candidate.name }) });
+  const linkedText = view.state.schema.text(candidate.name, [link]);
+  const tr = view.state.tr.replaceWith(wikiCompletion.value.from, wikiCompletion.value.to, linkedText);
+  view.dispatch(
+    tr
+      .setSelection(TextSelection.create(tr.doc, wikiCompletion.value.from + candidate.name.length))
+      .setStoredMarks([])
+      .scrollIntoView(),
+  );
+  closeWysiwygWikiCompletion();
+  view.focus();
+}
+
+function closeWysiwygWikiCompletion() {
+  wikiCompletion.value.visible = false;
+}
 
 function getSelectedCodeBlock(view: any) {
   const { selection } = view.state;
@@ -2300,6 +2410,7 @@ function handleFloatingCodeLanguageKeydown(event: KeyboardEvent) {
 function handleEditorShellScroll() {
   if (codeLanguageControl.value.visible) updateCodeLanguageControl();
   if (tableControl.value.visible) updateTableControl();
+  if (wikiCompletion.value.visible) updateWysiwygWikiCompletion();
   captureWysiwygPosition();
 }
 
@@ -2611,6 +2722,7 @@ function parseSingleMarkdownImage(markdown: string) {
 watch(
   () => paneTab.value?.id || "",
   () => {
+    closeWysiwygWikiCompletion();
     editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
     schedulePendingWysiwygPositionRestore();
   },
@@ -2619,6 +2731,7 @@ watch(
 watch(
   () => paneEditorMode.value,
   () => {
+    closeWysiwygWikiCompletion();
     if (paneEditorMode.value === "wysiwyg") {
       editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
       schedulePendingWysiwygCursorRestore();
@@ -3071,6 +3184,7 @@ function hideContextMenu() {
 
 function handleEditorShellClick(event?: MouseEvent) {
   hideContextMenu();
+  if (event?.target instanceof HTMLElement && !event.target.closest(".wiki-completion-menu")) closeWysiwygWikiCompletion();
   if (codeLanguageControl.value.open) closeFloatingCodeLanguageMenu({ focusEditor: false });
   const target = event?.target instanceof HTMLElement ? event.target : null;
   const table = target?.closest("table") as HTMLTableElement | null;
@@ -4645,6 +4759,33 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
     @scroll="handleEditorShellScroll"
   >
     <EditorContent :editor="editor" />
+    <div
+      v-if="wikiCompletion.visible && wysiwygWikiCandidates.length > 0"
+      class="wiki-completion-menu absolute z-50 max-h-64 w-72 overflow-auto rounded-lg border border-paper-200 bg-paper-50 p-1.5 shadow-[0_14px_36px_rgba(31,30,27,0.16)] dark:border-paper-800 dark:bg-paper-900"
+      :style="{ left: `${wikiCompletion.x}px`, top: `${wikiCompletion.y}px` }"
+      role="listbox"
+      aria-label="Wiki Link 候选"
+      @pointerdown.stop
+      @click.stop
+    >
+      <button
+        v-for="(candidate, index) in wysiwygWikiCandidates"
+        :key="candidate.path"
+        type="button"
+        class="block w-full rounded-md px-2.5 py-2 text-left text-sm"
+        :class="index === wikiCompletion.highlightedIndex
+          ? 'bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100'
+          : 'text-ink-700 hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'"
+        role="option"
+        :aria-selected="index === wikiCompletion.highlightedIndex"
+        @mousedown.prevent.stop="chooseWysiwygWikiCompletion(candidate)"
+      >
+        <span class="block truncate font-medium">{{ candidate.name }}</span>
+        <span class="block truncate text-xs opacity-65">
+          {{ candidate.matchedAlias ? `别名：${candidate.matchedAlias} · ` : "" }}{{ candidate.relativePath }}
+        </span>
+      </button>
+    </div>
     <div
       v-if="codeLanguageControl.visible"
       class="code-language-floating"

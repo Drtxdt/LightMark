@@ -21,7 +21,7 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
-import { flattenMarkdownFiles } from "../../utils/wikiLinks";
+import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import type { EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -43,13 +43,7 @@ const wikiCompletion = ref({
 });
 
 const wikiCompletionCandidates = computed(() => {
-  const query = wikiCompletion.value.query.trim().toLocaleLowerCase();
-  return flattenMarkdownFiles(appStore.fileTree)
-    .map((path) => fileStem(path))
-    .filter((name, index, names) => names.findIndex((item) => item.toLocaleLowerCase() === name.toLocaleLowerCase()) === index)
-    .filter((name) => !query || name.toLocaleLowerCase().includes(query))
-    .sort((left, right) => left.localeCompare(right, "zh-Hans-CN"))
-    .slice(0, 8);
+  return findWikiCompletionCandidates(appStore.wikiIndex, wikiCompletion.value.query);
 });
 const paneTab = computed(() => getPaneTab(props.paneId));
 const paneContent = computed(() => getPaneContent(props.paneId));
@@ -486,9 +480,9 @@ function moveWikiCompletion(delta: 1 | -1) {
   wikiCompletion.value.highlightedIndex = (next + count) % count;
 }
 
-function chooseWikiCompletion(currentView: EditorView, candidate = wikiCompletionCandidates.value[wikiCompletion.value.highlightedIndex]) {
+function chooseWikiCompletion(currentView: EditorView, candidate: WikiCompletionCandidate | undefined = wikiCompletionCandidates.value[wikiCompletion.value.highlightedIndex]) {
   if (!candidate) return;
-  const insert = `${candidate}]]`;
+  const insert = `${candidate.name}]]`;
   currentView.dispatch({
     changes: { from: wikiCompletion.value.from, to: wikiCompletion.value.to, insert },
     selection: { anchor: wikiCompletion.value.from + insert.length },
@@ -500,10 +494,6 @@ function chooseWikiCompletion(currentView: EditorView, candidate = wikiCompletio
 function closeWikiCompletion() {
   if (!wikiCompletion.value.visible) return;
   wikiCompletion.value.visible = false;
-}
-
-function fileStem(path: string) {
-  return (path.split(/[\\/]/).pop() || path).replace(/\.(md|markdown)$/i, "");
 }
 
 function refreshSourceFind() {
@@ -601,14 +591,17 @@ function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: st
   >
     <button
       v-for="(candidate, index) in wikiCompletionCandidates"
-      :key="candidate"
+      :key="candidate.path"
       class="block w-full truncate rounded px-2 py-1.5 text-left text-sm"
       :class="index === wikiCompletion.highlightedIndex
         ? 'bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100'
         : 'text-ink-700 hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'"
       @mousedown.prevent="view && chooseWikiCompletion(view, candidate)"
     >
-      {{ candidate }}
+      <span class="block truncate font-medium">{{ candidate.name }}</span>
+      <span class="block truncate text-xs opacity-65">
+        {{ candidate.matchedAlias ? `别名：${candidate.matchedAlias} · ` : "" }}{{ candidate.relativePath }}
+      </span>
     </button>
   </div>
 </template>

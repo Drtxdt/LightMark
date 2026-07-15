@@ -1,4 +1,5 @@
 import type { FileNode } from "../types";
+import { parseDocument } from "yaml";
 
 export interface WikiLinkTarget {
   raw?: string;
@@ -17,6 +18,24 @@ export interface WikiLinkResolution {
   status: "found" | "missing" | "ambiguous";
   path?: string;
   candidates: string[];
+}
+
+export interface WikiDocumentEntry {
+  path: string;
+  name: string;
+  relativePath: string;
+  normalizedName: string;
+  aliases: string[];
+  normalizedAliases: string[];
+}
+
+export interface WikiWorkspaceIndex {
+  root: string;
+  entries: WikiDocumentEntry[];
+}
+
+export interface WikiCompletionCandidate extends WikiDocumentEntry {
+  matchedAlias?: string;
 }
 
 export interface BacklinkItem {
@@ -49,10 +68,63 @@ export function parseWikiLinks(markdown: string): ParsedWikiLink[] {
   return links;
 }
 
-export function resolveWikiLink(target: WikiLinkTarget, nodes: FileNode[]): WikiLinkResolution {
+export function createWikiWorkspaceIndex(nodes: FileNode[], root = ""): WikiWorkspaceIndex {
+  return {
+    root,
+    entries: flattenMarkdownFiles(nodes).map((path) => createWikiDocumentEntry(path, root)),
+  };
+}
+
+export function updateWikiIndexEntry(index: WikiWorkspaceIndex, path: string, markdown: string) {
+  const existing = index.entries.find((entry) => samePath(entry.path, path));
+  const entry = existing ?? createWikiDocumentEntry(path, index.root);
+  const aliases = parseFrontMatterAliases(markdown);
+  entry.aliases = aliases;
+  entry.normalizedAliases = aliases.map(normalizeWikiPageName);
+  if (!existing) index.entries.push(entry);
+  return entry;
+}
+
+export function parseFrontMatterAliases(markdown: string) {
+  const match = markdown.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/);
+  if (!match) return [];
+  try {
+    const document = parseDocument(match[1]);
+    if (document.errors.length > 0) return [];
+    const value = document.toJS() as Record<string, unknown> | null;
+    return uniqueAliases([...(aliasesFromValue(value?.alias)), ...(aliasesFromValue(value?.aliases))]);
+  } catch {
+    return [];
+  }
+}
+
+export function wikiCompletionCandidates(index: WikiWorkspaceIndex, query: string, limit = 8): WikiCompletionCandidate[] {
+  const expected = normalizeWikiPageName(query);
+  return index.entries
+    .map((entry) => {
+      const matchedAlias = expected
+        ? entry.aliases.find((alias) => normalizeWikiPageName(alias).includes(expected))
+        : undefined;
+      const nameExact = Boolean(expected) && entry.normalizedName === expected;
+      const aliasExact = Boolean(expected) && entry.normalizedAliases.includes(expected);
+      const nameIncludes = !expected || entry.normalizedName.includes(expected);
+      if (!nameIncludes && !matchedAlias) return null;
+      const rank = nameExact ? 0 : aliasExact ? 1 : nameIncludes ? 2 : 3;
+      return { ...entry, matchedAlias, rank };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((left, right) => left.rank - right.rank || compareWikiCandidatePaths(left.path, right.path))
+    .slice(0, limit)
+    .map(({ rank: _rank, ...entry }) => entry);
+}
+
+export function resolveWikiLink(target: WikiLinkTarget, source: FileNode[] | WikiWorkspaceIndex): WikiLinkResolution {
   const expected = normalizeWikiPageName(target.page);
-  const candidates = flattenMarkdownFiles(nodes)
-    .filter((path) => normalizeWikiPageName(fileStem(path)) === expected)
+  const index = Array.isArray(source) ? createWikiWorkspaceIndex(source) : source;
+  const nameMatches = index.entries.filter((entry) => entry.normalizedName === expected);
+  const aliasMatches = index.entries.filter((entry) => entry.normalizedAliases.includes(expected));
+  const candidates = (nameMatches.length > 0 ? nameMatches : aliasMatches)
+    .map((entry) => entry.path)
     .sort(compareWikiCandidatePaths);
 
   if (candidates.length === 0) return { status: "missing", candidates: [] };
@@ -63,10 +135,11 @@ export function resolveWikiLink(target: WikiLinkTarget, nodes: FileNode[]): Wiki
   };
 }
 
-export function backlinksForPath(path: string, source: string, sourcePath: string) {
-  const targetPage = normalizeWikiPageName(fileStem(path));
+export function backlinksForPath(path: string, source: string, sourcePath: string, index?: WikiWorkspaceIndex) {
+  const target = index?.entries.find((entry) => samePath(entry.path, path));
+  const targetNames = new Set([normalizeWikiPageName(fileStem(path)), ...(target?.normalizedAliases ?? [])]);
   return parseWikiLinks(source)
-    .filter((link) => normalizeWikiPageName(link.page) === targetPage)
+    .filter((link) => targetNames.has(normalizeWikiPageName(link.page)))
     .map((link): BacklinkItem => ({
       sourcePath,
       sourceName: fileName(sourcePath),
@@ -171,6 +244,47 @@ function compareWikiCandidatePaths(left: string, right: string) {
   const leftDepth = left.replace(/\\/g, "/").split("/").length;
   const rightDepth = right.replace(/\\/g, "/").split("/").length;
   return leftDepth - rightDepth || left.localeCompare(right, "zh-Hans-CN");
+}
+
+function createWikiDocumentEntry(path: string, root: string): WikiDocumentEntry {
+  const name = fileStem(path);
+  return {
+    path,
+    name,
+    relativePath: relativeWikiPath(path, root),
+    normalizedName: normalizeWikiPageName(name),
+    aliases: [],
+    normalizedAliases: [],
+  };
+}
+
+function aliasesFromValue(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  return [];
+}
+
+function uniqueAliases(values: string[]) {
+  const seen = new Set<string>();
+  return values.map((value) => value.trim()).filter((value) => {
+    const normalized = normalizeWikiPageName(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+function relativeWikiPath(path: string, root: string) {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedRoot = root.replace(/\\/g, "/").replace(/\/$/, "");
+  if (normalizedRoot && normalizedPath.toLocaleLowerCase().startsWith(`${normalizedRoot.toLocaleLowerCase()}/`)) {
+    return normalizedPath.slice(normalizedRoot.length + 1);
+  }
+  return fileName(path);
+}
+
+function samePath(left: string, right: string) {
+  return left.replace(/\\/g, "/").toLocaleLowerCase() === right.replace(/\\/g, "/").toLocaleLowerCase();
 }
 
 function normalizeWikiPageName(value: string) {
