@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers } from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers, type KeyBinding } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
   appStore,
@@ -21,6 +21,7 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
+import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import type { EditorPaneId } from "../../types";
 
@@ -180,10 +181,21 @@ const markdownHighlightStyle = HighlightStyle.define([
   { tag: t.contentSeparator, color: "var(--lm-cm-faint)" },
 ]);
 
+const sourceInputKeymap: KeyBinding[] = [
+  ...["(", ")", "[", "]", "{", "}", "'", '"', "`"].map((key): KeyBinding => ({
+    key,
+    run: (currentView) => handleSourcePair(currentView, key),
+  })),
+  { key: "Backspace", run: (currentView) => handleSourcePair(currentView, "Backspace") },
+  { key: "Enter", run: handleSourceListEnter },
+  { key: "Tab", run: (currentView) => handleSourceTab(currentView, false) },
+  { key: "Shift-Tab", run: (currentView) => handleSourceTab(currentView, true) },
+];
+
 function extensions() {
   return [
     lineNumbers(),
-    keymap.of([]),
+    keymap.of(sourceInputKeymap),
     sourceFindField,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
@@ -248,6 +260,105 @@ function extensions() {
       if (update.docChanged || update.selectionSet) captureSourcePosition(update.view);
     }),
   ];
+}
+
+function handleSourcePair(currentView: EditorView, key: string) {
+  if (wikiCompletion.value.visible) return false;
+  const selection = currentView.state.selection.main;
+  const selectedText = currentView.state.sliceDoc(selection.from, selection.to);
+  const before = selection.from > 0 ? currentView.state.sliceDoc(selection.from - 1, selection.from) : "";
+  const after = selection.to < currentView.state.doc.length ? currentView.state.sliceDoc(selection.to, selection.to + 1) : "";
+  const action = decidePairAction({ key, selectedText, before, after });
+  if (!action) return false;
+  if (action.type === "skip") {
+    currentView.dispatch({ selection: { anchor: selection.to + 1 } });
+    return true;
+  }
+  if (action.type === "delete") {
+    currentView.dispatch({ changes: { from: selection.from - 1, to: selection.from + 1 }, selection: { anchor: selection.from - 1 } });
+    return true;
+  }
+  if (action.type === "wrap") {
+    const insert = `${action.open}${selectedText}${action.close}`;
+    currentView.dispatch({
+      changes: { from: selection.from, to: selection.to, insert },
+      selection: { anchor: selection.from + 1, head: selection.from + 1 + selectedText.length },
+    });
+    return true;
+  }
+  currentView.dispatch({
+    changes: { from: selection.from, to: selection.to, insert: `${action.open}${action.close}` },
+    selection: { anchor: selection.from + action.open.length },
+  });
+  return true;
+}
+
+function handleSourceListEnter(currentView: EditorView) {
+  if (wikiCompletion.value.visible) return false;
+  const selection = currentView.state.selection.main;
+  if (!selection.empty) return false;
+  const line = currentView.state.doc.lineAt(selection.from);
+  const before = line.text.slice(0, selection.from - line.from);
+  const action = listContinuationForLine(before);
+  if (!action) return false;
+  if (action.type === "exit") {
+    currentView.dispatch({ changes: { from: line.from, to: selection.from, insert: "" }, selection: { anchor: line.from } });
+    return true;
+  }
+  currentView.dispatch({
+    changes: { from: selection.from, to: selection.from, insert: action.insert },
+    selection: { anchor: selection.from + action.insert.length },
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+function handleSourceTab(currentView: EditorView, reverse: boolean) {
+  if (wikiCompletion.value.visible) return false;
+  const selection = currentView.state.selection.main;
+  const line = currentView.state.doc.lineAt(selection.from);
+  if (selection.empty && isMarkdownTableLine(line.text)) return moveSourceTableCell(currentView, reverse);
+  const documentText = currentView.state.doc.toString();
+  const isList = /^\s*(?:[-+*]|\d+[.)])\s+/.test(line.text);
+  if (!isList && !isInsideFencedCode(documentText, selection.from)) return false;
+
+  const firstLine = currentView.state.doc.lineAt(selection.from);
+  const lastLine = currentView.state.doc.lineAt(selection.to);
+  const changes = [] as Array<{ from: number; to?: number; insert: string }>;
+  for (let number = firstLine.number; number <= lastLine.number; number += 1) {
+    const target = currentView.state.doc.line(number);
+    if (reverse) {
+      const remove = target.text.startsWith("  ") ? 2 : target.text.startsWith("\t") || target.text.startsWith(" ") ? 1 : 0;
+      if (remove) changes.push({ from: target.from, to: target.from + remove, insert: "" });
+    } else {
+      changes.push({ from: target.from, insert: "  " });
+    }
+  }
+  if (changes.length === 0) return true;
+  currentView.dispatch({ changes });
+  return true;
+}
+
+function moveSourceTableCell(currentView: EditorView, reverse: boolean) {
+  const position = currentView.state.selection.main.from;
+  const line = currentView.state.doc.lineAt(position);
+  const relative = position - line.from;
+  const pipes = Array.from(line.text.matchAll(/\|/g), (match) => match.index ?? 0);
+  const target = reverse
+    ? [...pipes].reverse().find((pipe) => pipe < relative - 1)
+    : pipes.find((pipe) => pipe > relative);
+  if (typeof target === "number") {
+    currentView.dispatch({ selection: { anchor: line.from + target + (reverse ? 1 : 1) } });
+    return true;
+  }
+  const adjacentNumber = line.number + (reverse ? -1 : 1);
+  if (adjacentNumber < 1 || adjacentNumber > currentView.state.doc.lines) return true;
+  const adjacent = currentView.state.doc.line(adjacentNumber);
+  if (!isMarkdownTableLine(adjacent.text)) return true;
+  const adjacentPipes = Array.from(adjacent.text.matchAll(/\|/g), (match) => match.index ?? 0);
+  const pipe = reverse ? adjacentPipes.at(-2) : adjacentPipes[0];
+  if (typeof pipe === "number") currentView.dispatch({ selection: { anchor: adjacent.from + pipe + 1 } });
+  return true;
 }
 
 async function insertImageFilesIntoSource(files: File[], currentView: EditorView, position?: number) {
@@ -483,8 +594,10 @@ function moveWikiCompletion(delta: 1 | -1) {
 function chooseWikiCompletion(currentView: EditorView, candidate: WikiCompletionCandidate | undefined = wikiCompletionCandidates.value[wikiCompletion.value.highlightedIndex]) {
   if (!candidate) return;
   const insert = `${candidate.name}]]`;
+  const trailing = currentView.state.sliceDoc(wikiCompletion.value.to, Math.min(currentView.state.doc.length, wikiCompletion.value.to + 2));
+  const replaceTo = wikiCompletion.value.to + (trailing.startsWith("]]") ? 2 : trailing.startsWith("]") ? 1 : 0);
   currentView.dispatch({
-    changes: { from: wikiCompletion.value.from, to: wikiCompletion.value.to, insert },
+    changes: { from: wikiCompletion.value.from, to: replaceTo, insert },
     selection: { anchor: wikiCompletion.value.from + insert.length },
   });
   closeWikiCompletion();

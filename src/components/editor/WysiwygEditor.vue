@@ -34,6 +34,7 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
+import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
 import {
   parseWikiLinkHref,
   wikiCompletionCandidates as findWikiCompletionCandidates,
@@ -1952,6 +1953,8 @@ const editor = useEditor({
     },
     handleKeyDown(view, event) {
       if (handleWikiCompletionKeydown(view, event)) return true;
+      if (handleWysiwygPair(view, event)) return true;
+      if (handleWysiwygTab(view, event)) return true;
       if (convertLeadingFrontMatter(view, event)) return true;
       if (convertFencedCodeBlock(view, event)) return true;
       if (event.key === "Backspace" && exitEmptyStoredFormattingOnBackspace(view)) {
@@ -2252,7 +2255,14 @@ function chooseWysiwygWikiCompletion(candidate: WikiCompletionCandidate | undefi
   if (!candidate || !view) return;
   const link = view.state.schema.marks.link.create({ href: wikiLinkHref({ page: candidate.name }) });
   const linkedText = view.state.schema.text(candidate.name, [link]);
-  const tr = view.state.tr.replaceWith(wikiCompletion.value.from, wikiCompletion.value.to, linkedText);
+  const trailing = view.state.doc.textBetween(
+    wikiCompletion.value.to,
+    Math.min(view.state.doc.content.size, wikiCompletion.value.to + 2),
+    "",
+    "\0",
+  );
+  const replaceTo = wikiCompletion.value.to + (trailing.startsWith("]]") ? 2 : trailing.startsWith("]") ? 1 : 0);
+  const tr = view.state.tr.replaceWith(wikiCompletion.value.from, replaceTo, linkedText);
   view.dispatch(
     tr
       .setSelection(TextSelection.create(tr.doc, wikiCompletion.value.from + candidate.name.length))
@@ -2265,6 +2275,86 @@ function chooseWysiwygWikiCompletion(candidate: WikiCompletionCandidate | undefi
 
 function closeWysiwygWikiCompletion() {
   wikiCompletion.value.visible = false;
+}
+
+function handleWysiwygPair(view: any, event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return false;
+  const { selection } = view.state;
+  const { $from, $to } = selection;
+  if (!$from.parent.isTextblock || $from.parent !== $to.parent) return false;
+  const selectedText = view.state.doc.textBetween(selection.from, selection.to, "\n", "\0");
+  const before = selection.from > 0 ? view.state.doc.textBetween(selection.from - 1, selection.from, "", "\0") : "";
+  const after = selection.to < view.state.doc.content.size ? view.state.doc.textBetween(selection.to, selection.to + 1, "", "\0") : "";
+  const action = decidePairAction({ key: event.key, selectedText, before, after });
+  if (!action) return false;
+
+  event.preventDefault();
+  if (action.type === "skip") {
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, selection.to + 1)));
+    return true;
+  }
+  if (action.type === "delete") {
+    const tr = view.state.tr.delete(selection.from - 1, selection.from + 1);
+    view.dispatch(tr.setSelection(TextSelection.create(tr.doc, selection.from - 1)));
+    return true;
+  }
+  if (action.type === "wrap") {
+    let tr = view.state.tr.insertText(action.close, selection.to).insertText(action.open, selection.from);
+    tr = tr.setSelection(TextSelection.create(tr.doc, selection.from + 1, selection.to + 1));
+    view.dispatch(tr);
+    return true;
+  }
+  let tr = view.state.tr.insertText(`${action.open}${action.close}`, selection.from, selection.to);
+  tr = tr.setSelection(TextSelection.create(tr.doc, selection.from + action.open.length));
+  view.dispatch(tr);
+  return true;
+}
+
+function handleWysiwygTab(view: any, event: KeyboardEvent) {
+  if (event.key !== "Tab" || event.ctrlKey || event.metaKey || event.altKey) return false;
+  const editorCommands = (editor.value as any)?.commands;
+  const { $from } = view.state.selection;
+  const nodeNames = Array.from({ length: $from.depth + 1 }, (_, depth) => $from.node(depth).type.name);
+
+  if (nodeNames.includes("tableCell") || nodeNames.includes("tableHeader")) {
+    event.preventDefault();
+    const command = event.shiftKey ? editorCommands?.goToPreviousCell : editorCommands?.goToNextCell;
+    if (typeof command === "function") command();
+    return true;
+  }
+  if (nodeNames.includes("listItem")) {
+    event.preventDefault();
+    const command = event.shiftKey ? editorCommands?.liftListItem : editorCommands?.sinkListItem;
+    if (typeof command === "function") command("listItem");
+    return true;
+  }
+  if ($from.parent.type.name === "codeBlock") {
+    event.preventDefault();
+    indentWysiwygCodeSelection(view, event.shiftKey);
+    return true;
+  }
+  return false;
+}
+
+function indentWysiwygCodeSelection(view: any, reverse: boolean) {
+  const { selection } = view.state;
+  const { $from, $to } = selection;
+  if ($from.parent.type.name !== "codeBlock" || $from.parent !== $to.parent) return false;
+  if (selection.empty) {
+    if (!reverse) view.dispatch(view.state.tr.insertText("  ", selection.from));
+    return true;
+  }
+
+  const blockStart = $from.start();
+  const text = $from.parent.textContent;
+  const edits = codeBlockIndentEdits(text, selection.from - blockStart, selection.to - blockStart, reverse);
+  let tr = view.state.tr;
+  for (const edit of edits.reverse()) {
+    if (edit.insert) tr = tr.insertText(edit.insert, blockStart + edit.from, blockStart + edit.to);
+    else tr = tr.delete(blockStart + edit.from, blockStart + edit.to);
+  }
+  if (tr.docChanged) view.dispatch(tr.scrollIntoView());
+  return true;
 }
 
 function getSelectedCodeBlock(view: any) {
@@ -4615,6 +4705,7 @@ function continueTaskItem(view: any) {
 
   const listItem = view.state.schema.nodes.listItem;
   if (!listItem) return false;
+  if (!view.state.selection.$from.parent.textContent.trim()) return false;
 
   const splitCommand = (editor.value as any)?.commands?.splitListItem;
   if (typeof splitCommand === "function" && splitCommand("listItem")) {
