@@ -15,7 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
-import { DOMSerializer } from "@tiptap/pm/model";
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   appStore,
@@ -35,6 +35,7 @@ import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMat
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
+import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import {
   parseWikiLinkHref,
   wikiCompletionCandidates as findWikiCompletionCandidates,
@@ -2848,6 +2849,7 @@ onMounted(() => {
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
 });
 
@@ -2859,6 +2861,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
@@ -2876,6 +2879,31 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
     markdownHead: docPosToMarkdownOffset(activeEditor.view.state, head, markdown),
     reason: "mode-switch",
   });
+}
+
+function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean }>) {
+  const activeEditor = editor.value;
+  if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal" || !activeEditor) return;
+  const state = activeEditor.view.state;
+  const currentMarkdown = editorHtmlToMarkdown(activeEditor.getHTML());
+  const anchorOffset = docPosToMarkdownOffset(state, state.selection.anchor, currentMarkdown);
+  const headOffset = docPosToMarkdownOffset(state, state.selection.head, currentMarkdown);
+  const mappedAnchor = mapMarkdownOffset(event.detail.source, event.detail.result, anchorOffset);
+  const mappedHead = mapMarkdownOffset(event.detail.source, event.detail.result, headOffset);
+  const container = document.createElement("div");
+  container.innerHTML = renderMarkdownForEditorWithAssets(event.detail.result.text);
+  const nextDoc = ProseMirrorDOMParser.fromSchema(state.schema).parse(container);
+  let transaction = state.tr.replaceWith(0, state.doc.content.size, nextDoc.content);
+  const nextState = { doc: transaction.doc };
+  const anchor = markdownOffsetToDocPos(nextState, mappedAnchor, event.detail.result.text);
+  const head = markdownOffsetToDocPos(nextState, mappedHead, event.detail.result.text);
+  transaction = transaction.setSelection(TextSelection.create(transaction.doc, anchor, head)).scrollIntoView();
+  event.detail.handled = true;
+  activeEditor.view.dispatch(transaction);
+  // The visual document is semantic HTML; retain the formatter's canonical
+  // Markdown in the tab instead of immediately re-serializing table padding.
+  setPaneContent(props.paneId, event.detail.result.text, true);
+  activeEditor.view.focus();
 }
 
 function captureWysiwygPosition(view = editor.value?.view) {

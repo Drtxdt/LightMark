@@ -21,6 +21,7 @@ import { findOptions, findReplaceStore, setFindResult } from "../../stores/findR
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
+import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import type { EditorPaneId } from "../../types";
@@ -411,6 +412,7 @@ onMounted(() => {
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
 });
 
 watch(
@@ -433,9 +435,24 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   view?.destroy();
   view = null;
 });
+
+function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean }>) {
+  if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
+  const selection = view.state.selection.main;
+  const anchor = mapMarkdownOffset(event.detail.source, event.detail.result, selection.anchor);
+  const head = mapMarkdownOffset(event.detail.source, event.detail.result, selection.head);
+  event.detail.handled = true;
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: event.detail.result.text },
+    selection: { anchor, head },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
 
 function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || event.detail?.to !== "wysiwyg" || !view) return;

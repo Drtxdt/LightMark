@@ -33,6 +33,7 @@ import type {
   ThemeMode,
 } from "../types";
 import { buildTextDiffSummary } from "../utils/textDiff";
+import { buildMarkdownFormatDiff, formatMarkdown, type MarkdownFormatResult } from "../utils/markdownFormat";
 import { mergeEditorPosition } from "../utils/editorPosition";
 import { extractOutlineWithLines } from "../utils/outline";
 import {
@@ -133,6 +134,50 @@ export const quickOpenCandidates = computed(() => {
 
 export function setContent(content: string, dirty = true) {
   setPaneContent(appStore.splitLayout.activePaneId, content, dirty);
+}
+
+export async function formatCurrentMarkdown() {
+  const paneId = appStore.splitLayout.activePaneId;
+  const tab = getPaneTab(paneId);
+  if (!tab) {
+    appStore.statusMessage = "没有可格式化的活动文档。";
+    return false;
+  }
+  if (tab.documentMode === "large") {
+    appStore.statusMessage = "大文件模式暂不支持 Markdown 格式化。";
+    return false;
+  }
+  const source = getPaneContent(paneId);
+  const result = formatMarkdown(source);
+  if (!result.changed) {
+    appStore.statusMessage = "当前文档已经符合保守格式规范。";
+    return false;
+  }
+  const decision = await showDialog({
+    title: "格式化当前 Markdown",
+    message: `将调整 ${result.stats.changedLines} 行；保护区内容保持不变。应用后可一次撤销。`,
+    details: buildMarkdownFormatDiff(source, result.text),
+    cancelId: "cancel",
+    defaultId: "apply",
+    buttons: [
+      { id: "cancel", label: "取消", variant: "secondary" },
+      { id: "apply", label: "应用格式化", variant: "primary" },
+    ],
+  });
+  if (decision !== "apply") {
+    appStore.statusMessage = "已取消格式化。";
+    return false;
+  }
+  const detail: { paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean } = {
+    paneId,
+    source,
+    result,
+    handled: false,
+  };
+  window.dispatchEvent(new CustomEvent("lightmark:apply-markdown-format", { detail }));
+  if (!detail.handled) setPaneContent(paneId, result.text, true);
+  appStore.statusMessage = `格式化完成：调整 ${result.stats.changedLines} 行。`;
+  return true;
 }
 
 export function setPaneContent(paneId: EditorPaneId, content: string, dirty = true) {

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import {
   appStore,
+  formatCurrentMarkdown,
   openFile,
   openFileInOtherPane,
   openGoToLine,
@@ -24,6 +25,7 @@ const coreCommands = [
   { name: "打开文件", handler: () => openFile() },
   { name: "打开文件夹", handler: () => openWorkspace() },
   { name: "保存", handler: () => saveCurrentFile() },
+  { name: "格式化当前 Markdown", handler: () => formatCurrentMarkdown() },
   { name: "切换左右分屏", handler: () => toggleSplitLayout() },
   { name: "在另一栏打开当前文件", handler: () => openFileInOtherPane(appStore.currentFilePath) },
   { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
@@ -46,7 +48,6 @@ async function execute(command: { name: string; handler: () => unknown | Promise
   try {
     await command.handler();
     appStore.commandPaletteOpen = false;
-    appStore.statusMessage = "";
   } catch (error) {
     appStore.statusMessage = String(error);
   }

@@ -4,6 +4,7 @@ import { currentFileName } from "../../stores/appStore";
 import {
   appStore,
   createNewFile,
+  formatCurrentMarkdown,
   openFile,
   openWorkspace,
   saveCurrentFile,
@@ -146,6 +147,9 @@ function openCommandPalette() {
     </div>
 
     <div class="lm-toolbar-group view-tools ml-auto" aria-label="视图和导出">
+      <button class="lm-toolbar-button toolbar-priority-low" title="格式化当前 Markdown" aria-label="格式化当前 Markdown" :disabled="appStore.documentMode === 'large'" @click="run(formatCurrentMarkdown)">
+        <UiIcon name="format" />
+      </button>
       <button class="lm-toolbar-button" title="命令面板" aria-label="命令面板" @click="openCommandPalette">
         <UiIcon name="command" />
       </button>
