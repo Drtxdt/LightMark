@@ -18,6 +18,7 @@ import {
 } from "./html";
 import { exportThemeCssVariables, getExportThemePalette } from "./exportTheme";
 import { renderWikiLinksInEscapedText } from "./wikiLinks";
+import { renderMarkdownTables } from "./tableMarkdown";
 
 const md = new MarkdownIt({
   html: true,
@@ -47,11 +48,14 @@ export function renderMarkdown(markdown: string) {
     placeholders.push(html);
     return token;
   };
-  return restorePlaceholders(md.render(enhanceMarkdownForRender(markdown, stash)), placeholders);
+  const enhanced = enhanceMarkdownForRender(markdown, stash);
+  const withTables = renderMarkdownTables(enhanced, (source) => md.renderInline(source));
+  return restorePlaceholders(md.render(withTables), placeholders);
 }
 
 export function renderMarkdownForEditor(markdown: string) {
-  return editorMd.render(markSpecialBlocksForEditor(markdown));
+  const prepared = markSpecialBlocksForEditor(markdown);
+  return editorMd.render(renderMarkdownTables(prepared, (source) => editorMd.renderInline(source)));
 }
 
 export function buildExportHtml(
@@ -143,6 +147,8 @@ export function buildExportHtml(
       tr { break-inside: avoid; page-break-inside: avoid; }
       h1, h2, h3, h4, h5, h6, blockquote, .markdown-alert, .mermaid-export, .katex-display, .katex-display-export { break-inside: avoid; }
       a { color: inherit; }
+      img { max-height: 220mm; object-fit: contain; break-inside: avoid; page-break-inside: avoid; }
+      figure { break-inside: avoid; page-break-inside: avoid; }
     }
     ${options.extraStyles ?? ""}
   </style>`

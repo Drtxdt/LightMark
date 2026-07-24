@@ -59,3 +59,19 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
 OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
 TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
+
+## CodeMirror
+
+LightMark uses the CodeMirror 6 editor packages, including the official commands
+and history implementation.
+
+- Source: https://github.com/codemirror
+- License: MIT License
+
+## image-rs
+
+LightMark uses the Rust `image` crate's PNG codec to assemble long-document
+screenshots rendered by the system browser.
+
+- Source: https://github.com/image-rs/image
+- License: MIT License OR Apache License 2.0

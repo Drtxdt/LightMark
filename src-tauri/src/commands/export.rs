@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+use image::{GenericImage, GenericImageView, RgbaImage};
 
 use super::models::ExportSettings;
 
@@ -19,6 +20,10 @@ pub struct ExportRequest {
     pub markdown: String,
     pub html: Option<String>,
     pub plain_html: Option<String>,
+    #[serde(default)]
+    pub raster_width: Option<u32>,
+    #[serde(default)]
+    pub raster_height: Option<u32>,
     pub settings: ExportSettings,
 }
 
@@ -68,8 +73,110 @@ fn export_document_blocking(request: ExportRequest) -> Result<ExportResult, Stri
             &request.settings,
         ),
         "pdf" => export_html_pdf(request),
+        "png" => export_html_png(request),
         _ => export_with_pandoc(request),
     }
+}
+
+fn export_html_png(request: ExportRequest) -> Result<ExportResult, String> {
+    const TILE_HEIGHT: u32 = 16_000;
+    const MAX_PIXELS: u64 = 100_000_000;
+    let html = request
+        .html
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "PNG 导出缺少 HTML 内容。".to_string())?;
+    let Some(browser) = resolve_pdf_browser() else {
+        return Err("未找到 Microsoft Edge、Chrome 或 Chromium，无法生成 PNG 长图。".to_string());
+    };
+    let width = request.raster_width.unwrap_or(900).clamp(320, 4096);
+    let height = request.raster_height.unwrap_or(1).max(1);
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "PNG 尺寸超出支持范围。".to_string())?;
+    if pixels > MAX_PIXELS {
+        return Err(format!("PNG 长图共 {pixels} 像素，超过一亿像素安全上限。请缩短文档或改用 PDF。"));
+    }
+    let Some(target_path) = choose_export_path(&request.current_path, &request.target, "png", &request.settings) else {
+        return Err("Export cancelled".to_string());
+    };
+    let profile_path = make_temp_dir("lightmark-edge-profile")?;
+    let current_folder = PathBuf::from(&request.current_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut temp_paths: Vec<PathBuf> = Vec::new();
+    let result = (|| -> Result<String, String> {
+        let mut canvas = RgbaImage::new(width, height);
+        let mut offset = 0_u32;
+        let mut commands = Vec::new();
+        while offset < height {
+            let tile_height = TILE_HEIGHT.min(height - offset);
+            // Headless `--screenshot` does not reliably wait for a scripted
+            // scroll position. Shift the laid-out body instead so every tile
+            // receives a deterministic slice of the same rendered document.
+            let tile_html = html.replace(
+                "</head>",
+                &format!(
+                    "<style>body{{position:relative!important;top:-{offset}px!important}}</style></head>"
+                ),
+            );
+            let html_path = write_temp_html(&tile_html)?;
+            let screenshot_path = make_temp_file_path("lightmark-export-tile", "png")?;
+            temp_paths.push(html_path.clone());
+            temp_paths.push(screenshot_path.clone());
+            let args = vec![
+                "--headless=new".to_string(),
+                "--disable-gpu".to_string(),
+                "--disable-extensions".to_string(),
+                "--hide-scrollbars".to_string(),
+                "--allow-file-access-from-files".to_string(),
+                "--force-device-scale-factor=1".to_string(),
+                "--run-all-compositor-stages-before-draw".to_string(),
+                "--virtual-time-budget=3000".to_string(),
+                format!("--user-data-dir={}", profile_path.to_string_lossy()),
+                format!("--window-size={width},{tile_height}"),
+                format!("--screenshot={}", screenshot_path.to_string_lossy()),
+                path_to_file_url(&html_path),
+            ];
+            let command = format!("{} {}", browser.display(), args.join(" "));
+            let output = run_process_with_timeout(&browser, &args, &current_folder, PANDOC_TIMEOUT)
+                .map_err(|err| format!("无法完成 PNG 导出。\n命令：{command}\n{err}"))?;
+            if !output.status.success() || !screenshot_path.is_file() {
+                return Err(format!(
+                    "PNG 分片渲染失败。\n命令：{command}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            let tile = image::open(&screenshot_path)
+                .map_err(|err| format!("无法读取 PNG 分片 {}：{err}", screenshot_path.display()))?
+                .to_rgba8();
+            let copy_width = width.min(tile.width());
+            let copy_height = tile_height.min(tile.height());
+            canvas
+                .copy_from(&tile.view(0, 0, copy_width, copy_height).to_image(), 0, offset)
+                .map_err(|err| format!("无法合并 PNG 分片：{err}"))?;
+            commands.push(command);
+            offset += tile_height;
+        }
+        canvas
+            .save_with_format(&target_path, image::ImageFormat::Png)
+            .map_err(|err| format!("无法写入 PNG 文件 {}：{err}", target_path.display()))?;
+        Ok(commands.join("\n"))
+    })();
+    for path in temp_paths {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_dir_all(&profile_path);
+    let command = result?;
+    Ok(ExportResult {
+        path: target_path.to_string_lossy().to_string(),
+        format: request.target,
+        used_pandoc_path: None,
+        command: Some(command),
+        stdout: None,
+        stderr: None,
+    })
 }
 
 #[tauri::command]

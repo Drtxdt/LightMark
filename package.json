@@ -17,13 +17,17 @@
     "check:split-layout": "node scripts/check-split-layout.mjs",
     "check:input-rules": "node scripts/check-input-rules.mjs",
     "check:markdown-format": "node scripts/check-markdown-format.mjs",
-    "check:breadcrumbs": "node scripts/check-breadcrumbs.mjs"
+    "check:breadcrumbs": "node scripts/check-breadcrumbs.mjs",
+    "check:tables": "node scripts/check-table-roundtrip.mjs",
+    "check:editor-history": "node scripts/check-editor-history.mjs",
+    "check:export-preparation": "node scripts/check-export-preparation.mjs"
   },
   "dependencies": {
-    "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/language": "^6.12.3",
-    "@codemirror/state": "^6.5.2",
-    "@codemirror/view": "^6.38.8",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.0",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@lezer/highlight": "^1.2.3",
     "@lucide/vue": "^1.24.0",

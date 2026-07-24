@@ -2,14 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import ts from "../node_modules/typescript/lib/typescript.js";
+import { compileTypeScriptModuleGraph } from "./transpile-module-graph.mjs";
 
 const sourcePath = path.resolve("src/utils/markdownFormat.ts");
-const source = fs.readFileSync(sourcePath, "utf8");
-const tempPath = path.resolve(`scripts/.lightmark-markdown-format-${Date.now()}.mjs`);
-fs.writeFileSync(tempPath, ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText, "utf8");
+const tempDir = path.resolve(`scripts/.lightmark-markdown-format-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
+const tempPath = compileTypeScriptModuleGraph(sourcePath, tempDir);
 
 try {
   const { formatMarkdown, mapMarkdownOffset } = await import(pathToFileURL(tempPath).href);
@@ -82,7 +80,7 @@ try {
   assert.match(sourceEditor, /handleApplyMarkdownFormat/);
   assert.match(wysiwygEditor, /ProseMirrorDOMParser/);
 } finally {
-  fs.rmSync(tempPath, { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
 console.log("markdown format checks passed");

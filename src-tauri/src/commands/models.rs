@@ -29,6 +29,10 @@ pub struct SessionRestoreState {
     pub open_tabs: Vec<SessionTabState>,
     #[serde(default)]
     pub active_tab_key: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub split_layout: Option<SessionSplitLayoutState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -38,6 +42,121 @@ pub struct SessionTabState {
     pub kind: String,
     pub editor_mode: String,
     pub last_active_at: u64,
+    #[serde(default)]
+    pub position: Option<EditorPositionSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSplitLayoutState {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub active_pane_id: String,
+    #[serde(default)]
+    pub main_tab_keys: Vec<String>,
+    #[serde(default)]
+    pub secondary_tab_keys: Vec<String>,
+    #[serde(default)]
+    pub main_active_tab_key: Option<String>,
+    #[serde(default)]
+    pub secondary_active_tab_key: Option<String>,
+    #[serde(default)]
+    pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorPositionSnapshot {
+    #[serde(default)]
+    pub editor_mode: String,
+    #[serde(default)]
+    pub markdown_anchor: usize,
+    #[serde(default)]
+    pub markdown_head: usize,
+    #[serde(default)]
+    pub markdown_line: usize,
+    #[serde(default)]
+    pub markdown_column: usize,
+    #[serde(default)]
+    pub markdown_line_text: String,
+    #[serde(default)]
+    pub scroll_top: f64,
+    #[serde(default)]
+    pub scroll_ratio: f64,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_roundtrip_preserves_workspace_split_and_position() {
+        let value = json!({
+            "recentFiles": [],
+            "settings": {},
+            "session": {
+                "workspacePath": "E:\\notes",
+                "activeTabKey": "E:\\notes\\main.md",
+                "openTabs": [{
+                    "path": "E:\\notes\\main.md",
+                    "kind": "file",
+                    "editorMode": "source",
+                    "lastActiveAt": 42,
+                    "position": {
+                        "editorMode": "source",
+                        "markdownAnchor": 12,
+                        "markdownHead": 18,
+                        "markdownLine": 3,
+                        "markdownColumn": 4,
+                        "markdownLineText": "heading",
+                        "scrollTop": 120.5,
+                        "scrollRatio": 0.25,
+                        "updatedAt": 43
+                    }
+                }],
+                "splitLayout": {
+                    "enabled": true,
+                    "activePaneId": "secondary",
+                    "mainTabKeys": ["E:\\notes\\main.md"],
+                    "secondaryTabKeys": ["E:\\notes\\other.md"],
+                    "mainActiveTabKey": "E:\\notes\\main.md",
+                    "secondaryActiveTabKey": "E:\\notes\\other.md",
+                    "ratio": 0.55
+                }
+            }
+        });
+
+        let config: AppConfig = serde_json::from_value(value).expect("session config should deserialize");
+        let serialized = serde_json::to_value(config).expect("session config should serialize");
+        let session = &serialized["session"];
+
+        assert_eq!(session["workspacePath"], "E:\\notes");
+        assert_eq!(session["splitLayout"]["activePaneId"], "secondary");
+        assert_eq!(session["splitLayout"]["ratio"], 0.55);
+        assert_eq!(session["openTabs"][0]["position"]["markdownAnchor"], 12);
+        assert_eq!(session["openTabs"][0]["position"]["scrollTop"], 120.5);
+    }
+
+    #[test]
+    fn old_session_without_new_fields_remains_compatible() {
+        let value = json!({
+            "recentFiles": [],
+            "settings": {},
+            "session": {
+                "openTabs": [],
+                "activeTabKey": null
+            }
+        });
+
+        let config: AppConfig = serde_json::from_value(value).expect("legacy config should deserialize");
+        let session = config.session.expect("legacy session should remain present");
+        assert!(session.workspace_path.is_none());
+        assert!(session.split_layout.is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

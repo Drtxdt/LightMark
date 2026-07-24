@@ -73,7 +73,18 @@ export interface AppConfig {
 export interface SessionRestoreState {
   openTabs: SessionTabState[];
   activeTabKey?: string;
-  splitLayout?: SplitLayoutState;
+  workspacePath?: string;
+  splitLayout?: SessionSplitLayoutState;
+}
+
+export interface SessionSplitLayoutState {
+  enabled: boolean;
+  activePaneId: EditorPaneId;
+  mainTabKeys: string[];
+  secondaryTabKeys: string[];
+  mainActiveTabKey?: string;
+  secondaryActiveTabKey?: string;
+  ratio: number;
 }
 
 export interface SplitLayoutState {
@@ -220,6 +231,8 @@ export interface ExportRequest {
   markdown: string;
   html?: string;
   plainHtml?: string;
+  rasterWidth?: number;
+  rasterHeight?: number;
   settings: ExportSettings;
 }
 

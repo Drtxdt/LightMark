@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers, type KeyBinding } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
@@ -196,7 +197,8 @@ const sourceInputKeymap: KeyBinding[] = [
 function extensions() {
   return [
     lineNumbers(),
-    keymap.of(sourceInputKeymap),
+    history(),
+    keymap.of([...sourceInputKeymap, ...historyKeymap]),
     sourceFindField,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
@@ -420,9 +422,10 @@ watch(
   () => {
     if (!view) return;
     applyingExternalChange = true;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: paneContent.value },
-    });
+    view.setState(EditorState.create({
+      doc: paneContent.value,
+      extensions: extensions(),
+    }));
     applyingExternalChange = false;
     restorePendingSourcePosition();
   },
@@ -450,6 +453,7 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
     changes: { from: 0, to: view.state.doc.length, insert: event.detail.result.text },
     selection: { anchor, head },
     scrollIntoView: true,
+    annotations: isolateHistory.of("full"),
   });
   view.focus();
 }
@@ -551,9 +555,12 @@ function handleFindCommand(event: CustomEvent<string>) {
   refreshSourceFind();
 }
 
-function handleJumpLine(event: CustomEvent<number>) {
+function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: EditorPaneId }>) {
   if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
-  const targetLine = Math.max(1, Math.min(Math.floor(event.detail) + 1, view.state.doc.lines));
+  const detail = event.detail;
+  if (typeof detail === "object" && detail?.paneId && detail.paneId !== props.paneId) return;
+  const requestedLine = typeof detail === "number" ? detail : detail?.line ?? 0;
+  const targetLine = Math.max(1, Math.min(Math.floor(requestedLine) + 1, view.state.doc.lines));
   const line = view.state.doc.line(targetLine);
   view.dispatch({
     selection: { anchor: line.from },
@@ -562,9 +569,9 @@ function handleJumpLine(event: CustomEvent<number>) {
   view.focus();
 }
 
-function handleJumpHeading(event: CustomEvent<{ line?: number }>) {
+function handleJumpHeading(event: CustomEvent<{ line?: number; paneId?: EditorPaneId }>) {
   if (typeof event.detail?.line !== "number") return;
-  handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail.line }));
+  handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail }));
 }
 
 function updateWikiCompletion(currentView: EditorView) {

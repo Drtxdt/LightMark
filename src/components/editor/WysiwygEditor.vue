@@ -16,6 +16,7 @@ import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
+import { closeHistory } from "@tiptap/pm/history";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   appStore,
@@ -44,7 +45,7 @@ import {
   type WikiCompletionCandidate,
 } from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
-import { markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
+import { escapeMarkdownTableCell, markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
 import {
   getImageFilesFromClipboard,
   getImageFilesFromDrop,
@@ -1470,7 +1471,7 @@ turndown.addRule("table", {
   replacement: (_content, node) => {
     if (!(node instanceof HTMLTableElement)) return "";
     const rows = Array.from(node.rows).map((row) =>
-      Array.from(row.cells).map((cell) => normalizeTableCell(cell.textContent || "")),
+      Array.from(row.cells).map(serializeTableCell),
     );
     if (rows.length === 0) return "";
 
@@ -2897,9 +2898,15 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
   const nextState = { doc: transaction.doc };
   const anchor = markdownOffsetToDocPos(nextState, mappedAnchor, event.detail.result.text);
   const head = markdownOffsetToDocPos(nextState, mappedHead, event.detail.result.text);
-  transaction = transaction.setSelection(TextSelection.create(transaction.doc, anchor, head)).scrollIntoView();
+  transaction = closeHistory(
+    transaction
+      .setSelection(TextSelection.create(transaction.doc, anchor, head))
+      .setMeta("addToHistory", true)
+      .scrollIntoView(),
+  );
   event.detail.handled = true;
   activeEditor.view.dispatch(transaction);
+  activeEditor.view.dispatch(closeHistory(activeEditor.view.state.tr));
   // The visual document is semantic HTML; retain the formatter's canonical
   // Markdown in the tab instead of immediately re-serializing table padding.
   setPaneContent(props.paneId, event.detail.result.text, true);
@@ -3720,7 +3727,7 @@ function getCurrentTableElement() {
 
 function formatMarkdownTable(table: HTMLTableElement) {
   const rows = Array.from(table.rows).map((row) =>
-    Array.from(row.cells).map((cell) => normalizeTableCell(cell.textContent || "")),
+    Array.from(row.cells).map(serializeTableCell),
   );
   if (!rows.length) return "";
   const columnCount = Math.max(...rows.map((row) => row.length));
@@ -3853,6 +3860,11 @@ function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
 
+function serializeTableCell(cell: HTMLTableCellElement) {
+  const markdown = turndown.turndown(cell.innerHTML).replace(/\r?\n+/g, " ").trim();
+  return escapeMarkdownTableCell(markdown);
+}
+
 function normalizeFootnoteSource(value: string) {
   return value.replace(/\r\n?/g, "\n").trim();
 }
@@ -3860,6 +3872,13 @@ function normalizeFootnoteSource(value: string) {
 function editorHtmlToMarkdown(html: string) {
   const document = new DOMParser().parseFromString(html, "text/html");
   const footnoteSources: string[] = [];
+  const frontMatterSources: string[] = [];
+
+  document.querySelectorAll<HTMLElement>('section[data-type="front-matter"]').forEach((node) => {
+    const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${frontMatterSources.length}@@`;
+    frontMatterSources.push((node.dataset.yaml || node.textContent || "").replace(/\r\n?/g, "\n"));
+    node.replaceWith(document.createTextNode(token));
+  });
 
   document.querySelectorAll<HTMLElement>('span[data-type="footnote-ref"], sup[data-footnote-ref]').forEach((node) => {
     const id = node.dataset.footnoteRef || "";
@@ -3876,6 +3895,10 @@ function editorHtmlToMarkdown(html: string) {
   footnoteSources.forEach((source, index) => {
     const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${index}@@`;
     markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
+  });
+  frontMatterSources.forEach((source, index) => {
+    const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${index}@@`;
+    markdown = markdown.split(token).join(`---\n${source.replace(/^\n+|\n+$/g, "")}\n---\n\n`);
   });
   return normalizeLeadingImageWhitespace(markdown);
 }
@@ -4253,8 +4276,9 @@ function scrollInternalLink(href: string) {
   target?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
-function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string }>) {
+function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string; line?: number; paneId?: EditorPaneId }>) {
   if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
   const id = event.detail?.id;
   const target = id ? document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${cssEscape(id)}"]`) : null;
   const fallback = event.detail?.text ? findHeadingByText(event.detail.text) : null;
@@ -4267,6 +4291,13 @@ function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string }>) {
       .setSelection(TextSelection.near(activeEditor.view.state.doc.resolve(position + 1)))
       .scrollIntoView(),
   );
+  if (typeof event.detail?.line === "number") {
+    const line = Math.max(0, event.detail.line);
+    appStore.paneContextLines[props.paneId] = line;
+    window.requestAnimationFrame(() => {
+      appStore.paneContextLines[props.paneId] = line;
+    });
+  }
   activeEditor.view.focus();
 }
 

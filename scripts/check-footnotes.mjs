@@ -1,47 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import ts from "../node_modules/typescript/lib/typescript.js";
+import { compileTypeScriptModuleGraph } from "./transpile-module-graph.mjs";
 
 const sourcePath = path.resolve("src/utils/markdown.ts");
-const source = fs.readFileSync(sourcePath, "utf8");
-const htmlSourcePath = path.resolve("src/utils/html.ts");
-const htmlSource = fs.readFileSync(htmlSourcePath, "utf8");
-const exportThemeSourcePath = path.resolve("src/utils/exportTheme.ts");
-const exportThemeSource = fs.readFileSync(exportThemeSourcePath, "utf8");
 const timestamp = Date.now();
 const tempDir = path.resolve(`scripts/.lightmark-check-${timestamp}`);
 fs.mkdirSync(tempDir, { recursive: true });
-const htmlTempPath = path.join(tempDir, `.lightmark-html-${timestamp}.mjs`);
-const exportThemeTempPath = path.join(tempDir, `.lightmark-export-theme-${timestamp}.mjs`);
-const tempPath = path.join(tempDir, `.lightmark-markdown-${timestamp}.mjs`);
-const htmlCompiled = ts.transpileModule(htmlSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2022,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  },
-}).outputText;
-const exportThemeCompiled = ts.transpileModule(exportThemeSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2022,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  },
-}).outputText;
-const compiled = ts.transpileModule(source, {
-  compilerOptions: {
-    module: ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2022,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  },
-}).outputText
-  .replace('from "./html";', `from "./${path.basename(htmlTempPath)}";`)
-  .replace('from "./exportTheme";', `from "./${path.basename(exportThemeTempPath)}";`);
-
-fs.writeFileSync(htmlTempPath, htmlCompiled, "utf8");
-fs.writeFileSync(exportThemeTempPath, exportThemeCompiled, "utf8");
-fs.writeFileSync(tempPath, compiled, "utf8");
+const tempPath = compileTypeScriptModuleGraph(sourcePath, tempDir);
 
 try {
   const { renderMarkdown, renderMarkdownForEditor } = await import(pathToFileURL(tempPath).href);
@@ -265,8 +231,5 @@ function hello() {
 
   console.log("footnote render check passed");
 } finally {
-  fs.rmSync(tempPath, { force: true });
-  fs.rmSync(htmlTempPath, { force: true });
-  fs.rmSync(exportThemeTempPath, { force: true });
   fs.rmSync(tempDir, { force: true, recursive: true });
 }

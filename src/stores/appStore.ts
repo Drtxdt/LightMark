@@ -26,6 +26,7 @@ import type {
   PendingModeCursor,
   QuickOpenCandidate,
   SessionRestoreState,
+  SessionSplitLayoutState,
   SessionTabState,
   SimilarFileCandidate,
   SplitLayoutState,
@@ -285,6 +286,15 @@ export async function loadConfig() {
   appStore.currentWorkspace = "";
   appStore.fileTree = [];
   if (shouldRestoreSession(config)) {
+    if (config.session?.workspacePath) {
+      appStore.currentWorkspace = config.session.workspacePath;
+      try {
+        await refreshFileTree();
+      } catch {
+        appStore.currentWorkspace = "";
+        appStore.fileTree = [];
+      }
+    }
     await restoreSession(config.session);
   }
 }
@@ -1530,10 +1540,10 @@ async function restoreSession(session: SessionRestoreState | undefined) {
   }
   if (restored.length === 0) return;
   appStore.tabs = restored;
-  appStore.splitLayout = normalizeSplitLayout(session.splitLayout, restored.map((tab) => tab.id), restored[0]?.id ?? "");
+  appStore.splitLayout = restoreSplitLayout(session.splitLayout, restored);
   const active =
-    restored.find((tab) => appStore.splitLayout.activePaneId && tab.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ??
     restored.find((tab) => session.activeTabKey && isSamePath(tab.path, session.activeTabKey)) ??
+    restored.find((tab) => tab.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ??
     restored.slice().sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   projectTab(active);
   if (active.path) {
@@ -1555,8 +1565,40 @@ function buildSessionRestoreState(): SessionRestoreState | undefined {
   return {
     openTabs,
     activeTabKey: getActiveTab()?.path || undefined,
-    splitLayout: normalizeSplitLayout(appStore.splitLayout, appStore.tabs.map((tab) => tab.id), appStore.activeTabId),
+    workspacePath: appStore.currentWorkspace || undefined,
+    splitLayout: buildSessionSplitLayout(),
   };
+}
+
+function buildSessionSplitLayout(): SessionSplitLayoutState {
+  const pathForId = (id: string) => appStore.tabs.find((tab) => tab.id === id)?.path || "";
+  return {
+    enabled: appStore.splitLayout.enabled,
+    activePaneId: appStore.splitLayout.activePaneId,
+    mainTabKeys: appStore.splitLayout.mainTabIds.map(pathForId).filter(Boolean),
+    secondaryTabKeys: appStore.splitLayout.secondaryTabIds.map(pathForId).filter(Boolean),
+    mainActiveTabKey: pathForId(appStore.splitLayout.mainTabId) || undefined,
+    secondaryActiveTabKey: pathForId(appStore.splitLayout.secondaryTabId) || undefined,
+    ratio: appStore.splitLayout.ratio,
+  };
+}
+
+function restoreSplitLayout(layout: SessionSplitLayoutState | undefined, tabs: DocumentTab[]) {
+  const idForPath = (path: string | undefined) => tabs.find((tab) => path && isSamePath(tab.path, path))?.id || "";
+  const idsForPaths = (paths: string[] | undefined) => (paths || []).map(idForPath).filter(Boolean);
+  return normalizeSplitLayout(
+    {
+      enabled: layout?.enabled,
+      activePaneId: layout?.activePaneId,
+      mainTabId: idForPath(layout?.mainActiveTabKey),
+      secondaryTabId: idForPath(layout?.secondaryActiveTabKey),
+      mainTabIds: idsForPaths(layout?.mainTabKeys),
+      secondaryTabIds: idsForPaths(layout?.secondaryTabKeys),
+      ratio: layout?.ratio,
+    },
+    tabs.map((tab) => tab.id),
+    idForPath(layout?.mainActiveTabKey) || tabs[0]?.id || "",
+  );
 }
 
 function createTab(input: {

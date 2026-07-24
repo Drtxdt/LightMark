@@ -33,7 +33,10 @@ function jumpToBreadcrumb(item: BreadcrumbItem) {
     );
     return;
   }
-  window.dispatchEvent(new CustomEvent("lightmark:jump-heading", { detail: item }));
+  appStore.paneContextLines[activePaneId.value] = item.line;
+  window.dispatchEvent(new CustomEvent("lightmark:jump-heading", {
+    detail: { ...item, paneId: activePaneId.value },
+  }));
 }
 </script>
 

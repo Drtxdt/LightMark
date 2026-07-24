@@ -45,7 +45,8 @@ try {
 
   const sourceEditor = fs.readFileSync(path.resolve("src/components/editor/SourceEditor.vue"), "utf8");
   const wysiwygEditor = fs.readFileSync(path.resolve("src/components/editor/WysiwygEditor.vue"), "utf8");
-  assert.match(sourceEditor, /keymap\.of\(sourceInputKeymap\)/);
+  assert.match(sourceEditor, /keymap\.of\(\[\.\.\.sourceInputKeymap,\s*\.\.\.historyKeymap\]\)/);
+  assert.match(sourceEditor, /history\(\)/);
   assert.match(sourceEditor, /handleSourceListEnter/);
   assert.match(sourceEditor, /moveSourceTableCell/);
   assert.match(sourceEditor, /trailing\.startsWith\("\]\]"\)/);

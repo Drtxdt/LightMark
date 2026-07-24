@@ -14,7 +14,12 @@ export interface MarkdownFormatResult {
   lineMap: number[];
 }
 
-type TableRow = { cells: string[]; leadingPipe: boolean; trailingPipe: boolean };
+import {
+  delimiterAlignment,
+  parseMarkdownTableRow,
+  tableCellVisibleWidth,
+  type MarkdownTableRow,
+} from "./tableMarkdown";
 
 const FENCE_RE = /^\s*(`{3,}|~{3,})/;
 const LIST_RE = /^(\s+)([-+*]|\d+[.)])\s+/;
@@ -24,73 +29,20 @@ function splitLines(source: string) {
   return source.split(/\r?\n/);
 }
 
-function visibleWidth(value: string) {
-  return Array.from(value.replace(/\\\|/g, "|")).length;
-}
-
-function parseTableRow(line: string): TableRow | null {
-  if (!line.includes("|")) return null;
-  const trimmed = line.trim();
-  const leadingPipe = trimmed.startsWith("|");
-  const trailingPipe = trimmed.endsWith("|") && !trimmed.endsWith("\\|");
-  const body = trimmed.slice(leadingPipe ? 1 : 0, trailingPipe ? -1 : undefined);
-  const cells: string[] = [];
-  let current = "";
-  let escaped = false;
-  let codeFenceLength = 0;
-  for (let index = 0; index < body.length; index += 1) {
-    const character = body[index];
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (character === "`") {
-      let run = 1;
-      while (body[index + run] === "`") run += 1;
-      current += "`".repeat(run);
-      codeFenceLength = codeFenceLength === run ? 0 : codeFenceLength || run;
-      index += run - 1;
-      continue;
-    }
-    if (character === "|" && codeFenceLength === 0) {
-      cells.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  cells.push(current.trim());
-  return cells.length > 1 ? { cells, leadingPipe, trailingPipe } : null;
-}
-
-function delimiterAlignment(cell: string): "left" | "center" | "right" | "none" | null {
-  const compact = cell.replace(/\s/g, "");
-  if (!/^:?-{3,}:?$/.test(compact)) return null;
-  if (compact.startsWith(":") && compact.endsWith(":")) return "center";
-  if (compact.startsWith(":")) return "left";
-  if (compact.endsWith(":")) return "right";
-  return "none";
-}
-
-function formatTable(rows: TableRow[]) {
+function formatTable(rows: MarkdownTableRow[]) {
   const columnCount = rows[1].cells.length;
-  const alignments = rows[1].cells.map(delimiterAlignment);
+  const alignments = rows[1].cells.map((cell) => delimiterAlignment(cell.source));
   if (columnCount === 0 || alignments.some((alignment) => alignment === null)) return null;
   if (rows.some((row) => row.cells.length !== columnCount)) return null;
   const widths = Array.from({ length: columnCount }, (_, column) => {
-    const contentWidth = Math.max(...rows.filter((_, row) => row !== 1).map((row) => visibleWidth(row.cells[column])), 0);
+    const contentWidth = Math.max(...rows.filter((_, row) => row !== 1).map((row) => tableCellVisibleWidth(row.cells[column].source)), 0);
     return Math.max(3, contentWidth, alignments[column] === "center" ? 5 : 4);
   });
   const useLeadingPipe = rows[0].leadingPipe;
   const useTrailingPipe = rows[0].trailingPipe;
   return rows.map((row, rowIndex) => {
-    const cells = row.cells.map((cell, column) => {
+    const cells = row.cells.map((tableCell, column) => {
+      const cell = tableCell.source;
       const width = widths[column];
       if (rowIndex === 1) {
         const alignment = alignments[column];
@@ -98,7 +50,7 @@ function formatTable(rows: TableRow[]) {
         const right = alignment === "right" || alignment === "center" ? ":" : "";
         return `${left}${"-".repeat(Math.max(3, width - left.length - right.length))}${right}`;
       }
-      return cell + " ".repeat(Math.max(0, width - visibleWidth(cell)));
+      return cell + " ".repeat(Math.max(0, width - tableCellVisibleWidth(cell)));
     });
     return `${useLeadingPipe ? "| " : ""}${cells.join(" | ")}${useTrailingPipe ? " |" : ""}`;
   });
@@ -191,13 +143,13 @@ export function formatMarkdown(source: string): MarkdownFormatResult {
       continue;
     }
 
-    const header = parseTableRow(original);
-    const delimiter = index + 1 < input.length ? parseTableRow(input[index + 1]) : null;
-    if (header && delimiter && delimiter.cells.every((cell) => delimiterAlignment(cell) !== null)) {
+    const header = parseMarkdownTableRow(original);
+    const delimiter = index + 1 < input.length ? parseMarkdownTableRow(input[index + 1]) : null;
+    if (header && delimiter && delimiter.cells.every((cell) => delimiterAlignment(cell.source) !== null)) {
       const parsedRows = [header, delimiter];
       let end = index + 2;
       while (end < input.length) {
-        const row = parseTableRow(input[end]);
+        const row = parseMarkdownTableRow(input[end]);
         if (!row || row.cells.length !== delimiter.cells.length) break;
         parsedRows.push(row);
         end += 1;

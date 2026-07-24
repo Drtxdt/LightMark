@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { appStore, defaultSettings, resetSettings, updateSettings } from "../../stores/appStore";
-import { confirmDialog } from "../../stores/dialogStore";
+import { confirmDialog, dialogStore } from "../../stores/dialogStore";
 import { detectPandoc } from "../../utils/export";
 import type { AppSettings, PandocStatus } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
@@ -21,6 +21,8 @@ const activeSection = ref<SettingsSection>("general");
 const localSettings = ref<AppSettings>(cloneSettings(appStore.settings));
 const saveState = ref("");
 const pandocStatus = ref<PandocStatus | null>(null);
+const panel = ref<HTMLElement | null>(null);
+let previousFocus: HTMLElement | null = null;
 
 const sections: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "general", label: "基础", description: "会话、最近文件和草稿保存" },
@@ -85,8 +87,23 @@ watch(
 );
 
 onMounted(() => {
+  previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  window.addEventListener("keydown", handleGlobalKeydown, true);
+  void nextTick(() => panel.value?.focus());
   void refreshPandocStatus();
 });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown, true);
+  previousFocus?.focus();
+});
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape" || dialogStore.active) return;
+  event.preventDefault();
+  event.stopPropagation();
+  close();
+}
 
 async function persist() {
   try {
@@ -134,6 +151,8 @@ function cloneSettings(settings: AppSettings): AppSettings {
 <template>
   <div class="lm-modal-backdrop fixed inset-0 z-50 p-6" @click.self="close">
     <section
+      ref="panel"
+      tabindex="-1"
       class="lm-settings-panel mx-auto flex h-[min(760px,calc(100vh-48px))] max-w-5xl overflow-hidden"
       role="dialog"
       aria-modal="true"

@@ -136,10 +136,12 @@ export function resolveWikiLink(target: WikiLinkTarget, source: FileNode[] | Wik
 }
 
 export function backlinksForPath(path: string, source: string, sourcePath: string, index?: WikiWorkspaceIndex) {
-  const target = index?.entries.find((entry) => samePath(entry.path, path));
-  const targetNames = new Set([normalizeWikiPageName(fileStem(path)), ...(target?.normalizedAliases ?? [])]);
   return parseWikiLinks(source)
-    .filter((link) => targetNames.has(normalizeWikiPageName(link.page)))
+    .filter((link) => {
+      if (!index) return normalizeWikiPageName(link.page) === normalizeWikiPageName(fileStem(path));
+      const resolution = resolveWikiLink(link, index);
+      return Boolean(resolution.path && samePath(resolution.path, path));
+    })
     .map((link): BacklinkItem => ({
       sourcePath,
       sourceName: fileName(sourcePath),

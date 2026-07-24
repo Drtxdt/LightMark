@@ -13,6 +13,7 @@ import type {
 import { appStore, completeExportStatus, currentFileName, failExportStatus, startExportStatus } from "../stores/appStore";
 import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
+import { resolveMarkdownImageSource } from "./imageAssets";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -79,19 +80,16 @@ export async function exportCurrentDocument(input: {
   const theme = exportTheme(input.settings);
   const body = await renderExportBody(input.markdown, theme);
   const extraStyles = await getExportExtraStyles();
-  const styledHtml = buildExportHtml(currentFileName.value, body, {
+  const styledHtml = await inlineExportResources(buildExportHtml(currentFileName.value, body, {
     includeStyles: shouldIncludeExportStyles(input.target, input.settings),
     theme,
     currentPath: input.currentPath,
     extraStyles,
-  });
-  const plainHtml = buildExportHtml(currentFileName.value, body, { includeStyles: false, theme, currentPath: input.currentPath });
-
-  if (input.target === "png") {
-    const result = await exportHtmlAsPng(input.currentPath, styledHtml, input.settings);
-    await handleAfterExport(result.path, input.settings);
-    return result;
-  }
+  }));
+  const plainHtml = await inlineExportResources(
+    buildExportHtml(currentFileName.value, body, { includeStyles: false, theme, currentPath: input.currentPath }),
+  );
+  const raster = input.target === "png" ? await measureExportHtml(styledHtml) : null;
 
   const request: ExportRequest = {
     target: input.target,
@@ -100,6 +98,8 @@ export async function exportCurrentDocument(input: {
     markdown: input.markdown,
     html: styledHtml,
     plainHtml,
+    rasterWidth: raster?.width,
+    rasterHeight: raster?.height,
     settings: input.settings,
   };
   const result = await invoke<ExportResult>("export_document", { request });
@@ -246,18 +246,39 @@ function stripKatexNonWoffFallbacks(css: string) {
   return css.replace(/,url\(fonts\/[^)]+?\.(?:woff|ttf)\) format\("(?:woff|truetype)"\)/g, "");
 }
 
-async function exportHtmlAsPng(currentPath: string, html: string, settings: ExportSettings): Promise<ExportResult> {
-  const bytes = await renderHtmlToPngBytes(html);
-  return invoke<ExportResult>("save_export_bytes", {
-    currentPath,
-    target: "png",
-    extension: "png",
-    bytes,
-    settings,
-  });
+async function inlineExportResources(html: string) {
+  const parser = new DOMParser();
+  const documentHtml = parser.parseFromString(html, "text/html");
+  const images = Array.from(documentHtml.querySelectorAll<HTMLImageElement>("img[src]"));
+  for (const image of images) {
+    const source = image.getAttribute("src") || "";
+    if (!source || /^(?:data:|blob:|#)/i.test(source)) continue;
+    const resolved = resolveMarkdownImageSource(source);
+    let response: Response;
+    try {
+      response = await fetch(resolved);
+    } catch (error) {
+      throw new Error(`无法内嵌导出资源：${source}\n${String(error)}`);
+    }
+    if (!response.ok) throw new Error(`无法内嵌导出资源：${source}（HTTP ${response.status}）`);
+    const buffer = await response.arrayBuffer();
+    const mime = response.headers.get("content-type")?.split(";")[0] || mimeForImageSource(source);
+    image.setAttribute("src", `data:${mime};base64,${arrayBufferToBase64(buffer)}`);
+    image.removeAttribute("srcset");
+  }
+  return `<!doctype html>\n${documentHtml.documentElement.outerHTML}`;
 }
 
-async function renderHtmlToPngBytes(html: string) {
+function mimeForImageSource(source: string) {
+  const extension = source.split(/[?#]/)[0].split(".").pop()?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "gif") return "image/gif";
+  if (extension === "webp") return "image/webp";
+  if (extension === "svg") return "image/svg+xml";
+  return "image/png";
+}
+
+async function measureExportHtml(html: string) {
   const parser = new DOMParser();
   const documentHtml = parser.parseFromString(html, "text/html");
   const main = documentHtml.querySelector("main");
@@ -271,35 +292,11 @@ async function renderHtmlToPngBytes(html: string) {
   container.style.color = "#1f1e1b";
   container.innerHTML = `<style>${style}</style>${main ? main.outerHTML : documentHtml.body.innerHTML}`;
   document.body.appendChild(container);
-  await nextAnimationFrame();
-
-  const width = Math.ceil(container.scrollWidth);
-  const height = Math.ceil(container.scrollHeight);
-  const serialized = new XMLSerializer().serializeToString(container);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
-<foreignObject width="100%" height="100%">${serialized}</foreignObject>
-</svg>`;
-
-  const image = new Image();
-  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
   try {
-    await new Promise<void>((resolve, reject) => {
-      image.onload = () => resolve();
-      image.onerror = () => reject(new Error("PNG 渲染失败。"));
-      image.src = url;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("当前环境不支持 Canvas 导出。");
-    context.drawImage(image, 0, 0);
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((value) => (value ? resolve(value) : reject(new Error("PNG 编码失败。"))), "image/png");
-    });
-    return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    await Promise.all(Array.from(container.querySelectorAll("img")).map((image) => image.decode().catch(() => {})));
+    await nextAnimationFrame();
+    return { width: Math.ceil(container.scrollWidth), height: Math.ceil(container.scrollHeight) };
   } finally {
-    URL.revokeObjectURL(url);
     container.remove();
   }
 }
