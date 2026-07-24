@@ -4258,7 +4258,16 @@ function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string }>) {
   const id = event.detail?.id;
   const target = id ? document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${cssEscape(id)}"]`) : null;
   const fallback = event.detail?.text ? findHeadingByText(event.detail.text) : null;
-  (target || fallback)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  const heading = target || fallback;
+  const activeEditor = editor.value;
+  if (!heading || !activeEditor) return;
+  const position = activeEditor.view.posAtDOM(heading, 0);
+  activeEditor.view.dispatch(
+    activeEditor.view.state.tr
+      .setSelection(TextSelection.near(activeEditor.view.state.doc.resolve(position + 1)))
+      .scrollIntoView(),
+  );
+  activeEditor.view.focus();
 }
 
 function findHeadingByText(text: string) {

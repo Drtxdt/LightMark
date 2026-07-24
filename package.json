@@ -16,7 +16,8 @@
     "check:editor-position": "node scripts/check-editor-position.mjs",
     "check:split-layout": "node scripts/check-split-layout.mjs",
     "check:input-rules": "node scripts/check-input-rules.mjs",
-    "check:markdown-format": "node scripts/check-markdown-format.mjs"
+    "check:markdown-format": "node scripts/check-markdown-format.mjs",
+    "check:breadcrumbs": "node scripts/check-breadcrumbs.mjs"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { appStore, applyLargeFileEdits, readLargeFileChunk } from "../../stores/appStore";
+import { appStore, applyLargeFileEdits, readLargeFileChunk, updateLargeFileViewportLine } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
-import type { DirtyState, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
+import type { DirtyState, EditorPaneId, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 
 type LineRecord = {
@@ -19,6 +19,10 @@ type MarkdownBlock = {
   text: string;
   html: string;
 };
+
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
+  paneId: "main",
+});
 
 const lineHeight = 28;
 const viewportBufferLines = 90;
@@ -59,6 +63,7 @@ watch(
     loading.value = false;
     loadedLines.value = [];
     viewportStartLine.value = 0;
+    updateLargeFileViewportLine(props.paneId, 0);
     loadedStartLine.value = 0;
     loadedEndLine.value = 0;
     editingKey.value = "";
@@ -88,6 +93,7 @@ function syncViewportFromScroll() {
   scrollFrame = 0;
   if (!scroller.value) return;
   const visibleLine = Math.max(0, Math.floor(scroller.value.scrollTop / lineHeight));
+  updateLargeFileViewportLine(props.paneId, visibleLine);
   const nextStart = Math.max(0, visibleLine - viewportBufferLines);
   if (Math.abs(nextStart - viewportStartLine.value) < reloadMarginLines && isLineWindowCovered(visibleLine)) return;
   viewportStartLine.value = nextStart;
@@ -427,11 +433,15 @@ function parseOutlineItems(markdown: string, startLine: number): LargeOutlineIte
     .filter((item): item is LargeOutlineItem => Boolean(item));
 }
 
-function handleJumpLine(event: CustomEvent<number>) {
-  const line = Math.max(0, Math.min(event.detail, Math.max(totalLines.value - 1, 0)));
+function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: EditorPaneId }>) {
+  const detail = event.detail;
+  if (typeof detail === "object" && detail?.paneId && detail.paneId !== props.paneId) return;
+  const requestedLine = typeof detail === "number" ? detail : detail?.line ?? 0;
+  const line = Math.max(0, Math.min(requestedLine, Math.max(totalLines.value - 1, 0)));
   if (scroller.value) {
     scroller.value.scrollTop = line * lineHeight;
   }
+  updateLargeFileViewportLine(props.paneId, line);
   viewportStartLine.value = Math.max(0, line - 20);
   void loadAround(viewportStartLine.value);
 }

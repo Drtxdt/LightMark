@@ -26,7 +26,7 @@ watch(
 
 <template>
   <section class="editor-page-shell h-full min-h-0 overflow-hidden">
-    <LargeMarkdownEditor v-if="paneDocumentMode === 'large'" :key="paneTab?.id" />
+    <LargeMarkdownEditor v-if="paneDocumentMode === 'large'" :key="paneTab?.id" :pane-id="paneId" />
     <Transition v-else :name="pageTransition">
       <div :key="`${paneTab?.id || 'empty'}:${paneEditorMode}`" class="editor-page">
         <WysiwygEditor v-if="paneEditorMode === 'wysiwyg'" :pane-id="paneId" />

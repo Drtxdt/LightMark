@@ -65,6 +65,8 @@ export const appStore = reactive({
   currentContent: "",
   documentMode: "normal" as DocumentMode,
   largeFile: null as LargeFileState | null,
+  paneContextLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
+  largeFileViewportLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
   isDirty: false,
   editorMode: "wysiwyg" as EditorMode,
   tabs: [] as DocumentTab[],
@@ -217,6 +219,7 @@ export function getPaneContent(paneId: EditorPaneId) {
 }
 
 export function updatePanePosition(paneId: EditorPaneId, position: EditorPositionSnapshot) {
+  appStore.paneContextLines[paneId] = Math.max(0, position.markdownLine - 1);
   const tab = getPaneTab(paneId);
   if (!tab || tab.kind !== "normal") return;
   const next = mergeEditorPosition(tab.position, position, tab.content.length);
@@ -224,6 +227,10 @@ export function updatePanePosition(paneId: EditorPaneId, position: EditorPositio
   if (paneId === appStore.splitLayout.activePaneId || tab.id === appStore.activeTabId) {
     appStore.pendingEditorPosition = next;
   }
+}
+
+export function updateLargeFileViewportLine(paneId: EditorPaneId, line: number) {
+  appStore.largeFileViewportLines[paneId] = Math.max(0, Math.floor(Number.isFinite(line) ? line : 0));
 }
 
 export function getPanePendingModeCursor(paneId: EditorPaneId) {
@@ -1618,6 +1625,8 @@ function ensureSecondarySplitTab() {
 
 function projectTabInPane(tab: DocumentTab, paneId: EditorPaneId) {
   appStore.splitLayout = splitLayoutForPaneActivation(appStore.splitLayout, paneId, tab.id, tabIds());
+  appStore.paneContextLines[paneId] = Math.max(0, (tab.position?.markdownLine ?? 1) - 1);
+  appStore.largeFileViewportLines[paneId] = 0;
   projectTab(tab);
 }
 
