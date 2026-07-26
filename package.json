@@ -20,7 +20,8 @@
     "check:breadcrumbs": "node scripts/check-breadcrumbs.mjs",
     "check:tables": "node scripts/check-table-roundtrip.mjs",
     "check:editor-history": "node scripts/check-editor-history.mjs",
-    "check:export-preparation": "node scripts/check-export-preparation.mjs"
+    "check:export-preparation": "node scripts/check-export-preparation.mjs",
+    "check:regression-closures": "node scripts/check-regression-closures.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

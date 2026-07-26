@@ -5,6 +5,7 @@ import {
   appStore,
   createNewFile,
   formatCurrentMarkdown,
+  openCommandPalette,
   openFile,
   openWorkspace,
   saveCurrentFile,
@@ -68,9 +69,6 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   );
 }
 
-function openCommandPalette() {
-  appStore.commandPaletteOpen = true;
-}
 </script>
 
 <template>

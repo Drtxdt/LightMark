@@ -75,3 +75,11 @@ screenshots rendered by the system browser.
 
 - Source: https://github.com/image-rs/image
 - License: MIT License OR Apache License 2.0
+
+## resvg
+
+LightMark uses the Rust `resvg` renderer to rasterize local SVG images for
+Pandoc PDF export without requiring a separately installed `rsvg-convert`.
+
+- Source: https://github.com/linebender/resvg
+- License: MIT License OR Apache License 2.0

@@ -374,6 +374,20 @@ export interface LargeFileState {
   outline: LargeOutlineItem[];
 }
 
+export interface WysiwygFormatHistoryEntry {
+  before: string;
+  after: string;
+  beforeAnchor: number;
+  beforeHead: number;
+  afterAnchor: number;
+  afterHead: number;
+}
+
+export interface WysiwygFormatHistory {
+  undo: WysiwygFormatHistoryEntry[];
+  redo: WysiwygFormatHistoryEntry[];
+}
+
 export interface DocumentTab {
   id: string;
   kind: DocumentTabKind;
@@ -385,6 +399,12 @@ export interface DocumentTab {
   isDirty: boolean;
   editorMode: EditorMode;
   pendingModeCursor: PendingModeCursor | null;
+  /**
+   * Runtime-only exact Markdown snapshots for formatter undo/redo.
+   * ProseMirror cannot represent trailing spaces and excess blank lines, so
+   * those source details must not be delegated to its semantic history.
+   */
+  wysiwygFormatHistory: WysiwygFormatHistory;
   position?: EditorPositionSnapshot;
   fileSnapshot?: FileSnapshot;
   externalState: ExternalFileState;

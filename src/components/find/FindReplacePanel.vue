@@ -27,12 +27,14 @@ watch(
 
 onMounted(() => {
   window.addEventListener("lightmark:find-focus", focusQuery);
+  window.addEventListener("lightmark:close-transient-editor-ui", closeFindPanel);
   void nextTick(focusQuery);
 });
 
 onBeforeUnmount(() => {
   window.clearTimeout(refreshTimer);
   window.removeEventListener("lightmark:find-focus", focusQuery);
+  window.removeEventListener("lightmark:close-transient-editor-ui", closeFindPanel);
 });
 
 function focusQuery() {

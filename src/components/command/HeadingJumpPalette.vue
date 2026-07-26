@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import {
   appStore,
   closeHeadingJump,
@@ -8,11 +8,16 @@ import {
 } from "../../stores/appStore";
 import type { LargeOutlineItem, OutlineItem } from "../../types";
 import { extractOutline } from "../../utils/outline";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 type HeadingCandidate = {
   item: OutlineItem | LargeOutlineItem;
   score: number;
 };
+const backdrop = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
+const input = ref<HTMLInputElement | null>(null);
+useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeHeadingJump });
 
 const outline = computed<Array<OutlineItem | LargeOutlineItem>>(() => {
   if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
@@ -150,14 +155,13 @@ function lineLabel(item: OutlineItem | LargeOutlineItem) {
 </script>
 
 <template>
-  <div class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeHeadingJump">
-    <div class="lm-palette-panel mx-auto max-w-xl overflow-hidden">
+  <div ref="backdrop" class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeHeadingJump">
+    <div ref="panel" tabindex="-1" class="lm-palette-panel mx-auto max-w-xl overflow-hidden" role="dialog" aria-modal="true" aria-label="前往指定标题">
       <input
+        ref="input"
         v-model="appStore.headingJumpQuery"
-        autofocus
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="前往指定标题"
-        @keydown.esc="closeHeadingJump"
         @keydown.down.prevent="moveSelection(1)"
         @keydown.up.prevent="moveSelection(-1)"
         @keydown.enter.prevent="jumpSelected"

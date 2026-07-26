@@ -1,0 +1,50 @@
+import { readFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+
+const root = new URL("../", import.meta.url);
+const read = (path) => readFile(new URL(path, root), "utf8");
+
+const [wysiwyg, appStore, settings, overlay, command, quickOpen, heading, goToLine] = await Promise.all([
+  read("src/components/editor/WysiwygEditor.vue"),
+  read("src/stores/appStore.ts"),
+  read("src/components/settings/SettingsDialog.vue"),
+  read("src/composables/useOverlayFocus.ts"),
+  read("src/components/command/CommandPalette.vue"),
+  read("src/components/command/QuickOpenPalette.vue"),
+  read("src/components/command/HeadingJumpPalette.vue"),
+  read("src/components/command/GoToLinePalette.vue"),
+]);
+
+assert.match(wysiwyg, /wysiwygFormatHistory\.undo\.push/);
+assert.match(wysiwyg, /before:\s*event\.detail\.source/);
+assert.match(wysiwyg, /setMeta\("addToHistory", false\)/);
+assert.match(wysiwyg, /const markdown = paneContent\.value;/);
+assert.doesNotMatch(
+  wysiwyg.match(/function handleModeCursorCapture[\s\S]*?\n}/)?.[0] ?? "",
+  /setPaneContent/,
+  "mode switches must not mark a document dirty or reserialize Markdown",
+);
+
+assert.match(appStore, /function closeTransientPalettes/);
+assert.match(appStore, /lightmark:close-transient-editor-ui/);
+assert.match(overlay, /window\.addEventListener\("keydown", handleKeydown, true\)/);
+assert.match(overlay, /event\.stopImmediatePropagation\(\)/);
+assert.match(overlay, /requestAnimationFrame/);
+
+for (const [name, source] of [
+  ["command", command],
+  ["quick-open", quickOpen],
+  ["heading", heading],
+  ["go-to-line", goToLine],
+]) {
+  assert.match(source, /useOverlayFocus/);
+  assert.match(source, /aria-modal="true"/);
+  assert.doesNotMatch(source, /\sautofocus(?:\s|>)/, `${name} must use deterministic WebView focus`);
+}
+
+const experimentalBlock =
+  settings.match(/const experimentalGroups[\s\S]*?^];/m)?.[0] ?? "";
+assert.doesNotMatch(experimentalBlock, /自动配对/, "implemented auto-pairing must not be listed as experimental");
+assert.match(settings, /自动配对已作为默认编辑行为启用/);
+
+console.log("Regression closure checks passed.");

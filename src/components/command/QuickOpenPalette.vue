@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { appStore, closeQuickOpen, openFile, openFileInOtherPane, quickOpenCandidates } from "../../stores/appStore";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import type { QuickOpenCandidate } from "../../types";
 
 const candidates = computed(() => quickOpenCandidates.value);
+const backdrop = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
+const input = ref<HTMLInputElement | null>(null);
+useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeQuickOpen });
 
 watch(
   () => [appStore.quickOpenQuery, candidates.value.length] as const,
@@ -59,14 +64,13 @@ function sourceLabel(candidate: QuickOpenCandidate) {
 </script>
 
 <template>
-  <div class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeQuickOpen">
-    <div class="lm-palette-panel mx-auto max-w-2xl overflow-hidden">
+  <div ref="backdrop" class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeQuickOpen">
+    <div ref="panel" tabindex="-1" class="lm-palette-panel mx-auto max-w-2xl overflow-hidden" role="dialog" aria-modal="true" aria-label="快速打开文件">
       <input
+        ref="input"
         v-model="appStore.quickOpenQuery"
-        autofocus
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="快速打开文件"
-        @keydown.esc="closeQuickOpen"
         @keydown.down.prevent="moveSelection(1)"
         @keydown.up.prevent="moveSelection(-1)"
         @keydown.enter.prevent="handleEnter"

@@ -48,7 +48,7 @@ const shortcutRows = [
 const experimentalGroups: Array<{ title: string; items: string[]; note?: string }> = [
   {
     title: "写作辅助",
-    items: ["括号与 Markdown 符号自动配对", "纯文本粘贴策略", "拼写检查", "专注模式与打字机模式"],
+    items: ["纯文本粘贴策略", "拼写检查", "专注模式与打字机模式"],
   },
   {
     title: "Markdown 精细控制",
@@ -429,6 +429,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
           <div v-else class="settings-stack experimental-stack">
             <div class="settings-intro">
               这些能力尚未接入，不会显示无效开关。对应配置字段继续保留，以便未来版本兼容启用。
+              括号、方括号、引号与 Markdown 符号自动配对已作为默认编辑行为启用，因此不列在实验能力中。
             </div>
             <div v-for="group in experimentalGroups" :key="group.title" class="experimental-card">
               <div class="experimental-card-header">

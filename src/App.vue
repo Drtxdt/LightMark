@@ -23,6 +23,7 @@ import {
   goForwardNavigation,
   checkOpenFileSnapshots,
   loadConfig,
+  openCommandPalette,
   openHeadingJump,
   openGoToLine,
   openQuickOpen,
@@ -82,7 +83,7 @@ onMounted(async () => {
     saveCurrentFile().catch((error) => (appStore.statusMessage = String(error)));
   });
   unbindPalette = bindShortcut("ctrl+shift+p", () => {
-    appStore.commandPaletteOpen = true;
+    openCommandPalette();
   });
   unbindQuickOpen = bindShortcut("ctrl+p", () => {
     openQuickOpen();

@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rfd::FileDialog;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use image::{GenericImage, GenericImageView, RgbaImage};
 
@@ -316,12 +317,14 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
     let Some(target_path) = choose_export_path(&request.current_path, &request.target, &spec.extension, &request.settings) else {
         return Err("Export cancelled".to_string());
     };
-    let markdown = prepare_markdown_for_pandoc(&request.markdown, &request.target);
-    let temp_path = write_temp_markdown(&markdown)?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let markdown = prepare_markdown_for_pandoc(&request.markdown, &request.target);
+    let (markdown, svg_temp_dir) =
+        prepare_local_svg_images_for_pandoc(&markdown, &request.target, &current_folder)?;
+    let temp_path = write_temp_markdown(&markdown)?;
 
     let mut args = vec![
         temp_path.to_string_lossy().to_string(),
@@ -343,8 +346,12 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
 
     let command = format!("{} {}", pandoc.display(), args.join(" "));
     let output = run_process_with_timeout(&pandoc, &args, &current_folder, PANDOC_TIMEOUT)
-        .map_err(|err| format!("无法完成 Pandoc 导出。\n命令：{command}\n{err}"))?;
+        .map_err(|err| format!("无法完成 Pandoc 导出。\n命令：{command}\n{err}"));
     let _ = fs::remove_file(&temp_path);
+    if let Some(path) = &svg_temp_dir {
+        let _ = fs::remove_dir_all(path);
+    }
+    let output = output?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -651,6 +658,130 @@ fn prepare_markdown_for_pandoc(markdown: &str, target: &str) -> String {
     output
 }
 
+fn prepare_local_svg_images_for_pandoc(
+    markdown: &str,
+    target: &str,
+    current_folder: &Path,
+) -> Result<(String, Option<PathBuf>), String> {
+    // Pandoc delegates SVG conversion for LaTeX/PDF to rsvg-convert, which is
+    // not normally present on Windows. Rasterize only this writer path; DOCX,
+    // EPUB and HTML writers retain native SVG support.
+    if target != "pdfPandoc" || !markdown.to_ascii_lowercase().contains(".svg") {
+        return Ok((markdown.to_string(), None));
+    }
+    let image_pattern = Regex::new(r#"!\[([^\]]*)\]\((<[^>]+>|[^\s\)]+)([^\)]*)\)"#)
+        .map_err(|err| format!("无法初始化 SVG 图片解析器：{err}"))?;
+    let mut output = String::with_capacity(markdown.len());
+    let mut last = 0;
+    let mut temp_dir: Option<PathBuf> = None;
+    let mut converted = 0_usize;
+
+    for captures in image_pattern.captures_iter(markdown) {
+        let full = captures.get(0).expect("full markdown image capture");
+        let destination = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+        let clean_destination = destination.trim_matches(|ch| ch == '<' || ch == '>');
+        if !clean_destination.to_ascii_lowercase().ends_with(".svg")
+            || clean_destination.contains("://")
+            || clean_destination.starts_with("data:")
+        {
+            continue;
+        }
+        let decoded = percent_decode_path(clean_destination)?;
+        let source = {
+            let path = PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if path.is_absolute() { path } else { current_folder.join(path) }
+        };
+        if !source.is_file() {
+            return Err(format!("Pandoc PDF 导出找不到本地 SVG：{}", source.display()));
+        }
+        let directory = match &temp_dir {
+            Some(path) => path.clone(),
+            None => {
+                let path = make_temp_dir("lightmark-pandoc-svg")?;
+                temp_dir = Some(path.clone());
+                path
+            }
+        };
+        let raster_path = directory.join(format!("image-{converted}.png"));
+        if let Err(error) = rasterize_svg_to_png(&source, &raster_path) {
+            if let Some(path) = &temp_dir {
+                let _ = fs::remove_dir_all(path);
+            }
+            return Err(error);
+        }
+        output.push_str(&markdown[last..full.start()]);
+        output.push_str("![");
+        output.push_str(captures.get(1).map(|value| value.as_str()).unwrap_or(""));
+        output.push_str("](");
+        output.push('<');
+        output.push_str(&raster_path.to_string_lossy().replace('\\', "/"));
+        output.push('>');
+        output.push_str(captures.get(3).map(|value| value.as_str()).unwrap_or(""));
+        output.push(')');
+        last = full.end();
+        converted += 1;
+    }
+    if converted == 0 {
+        return Ok((markdown.to_string(), None));
+    }
+    output.push_str(&markdown[last..]);
+    Ok((output, temp_dir))
+}
+
+fn rasterize_svg_to_png(source: &Path, target: &Path) -> Result<(), String> {
+    let data = fs::read(source)
+        .map_err(|err| format!("无法读取本地 SVG {}：{err}", source.display()))?;
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(&data, &options)
+        .map_err(|err| format!("无法解析本地 SVG {}：{err}", source.display()))?;
+    let intrinsic = tree.size();
+    let longest = intrinsic.width().max(intrinsic.height()).max(1.0);
+    let scale = (1600.0 / longest).clamp(1.0, 4.0);
+    let width = (intrinsic.width() * scale).ceil().clamp(1.0, 4096.0) as u32;
+    let height = (intrinsic.height() * scale).ceil().clamp(1.0, 4096.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| format!("本地 SVG 尺寸超出支持范围：{}", source.display()))?;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    pixmap
+        .save_png(target)
+        .map_err(|err| format!("无法生成 SVG 替代图片 {}：{err}", target.display()))
+}
+
+fn percent_decode_path(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(format!("SVG 路径包含无效 URL 编码：{value}"));
+            }
+            let high = decode_hex(bytes[index + 1]);
+            let low = decode_hex(bytes[index + 2]);
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(format!("SVG 路径包含无效 URL 编码：{value}"));
+            };
+            output.push(high * 16 + low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).map_err(|_| format!("SVG 路径不是有效 UTF-8：{value}"))
+}
+
+fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn wrap_cjk_math_text(math: &str) -> String {
     let mut output = String::with_capacity(math.len() + 16);
     let mut chars = math.chars().peekable();
@@ -818,5 +949,43 @@ mod tests {
         let url = path_to_file_url(Path::new("E:\\my docs\\导出.html"));
 
         assert_eq!(url, "file:///E:/my%20docs/%E5%AF%BC%E5%87%BA.html");
+    }
+
+    #[test]
+    fn decodes_percent_encoded_svg_paths() {
+        assert_eq!(
+            percent_decode_path("assets/%E5%9B%BE%20%E7%89%87.svg").unwrap(),
+            "assets/图 片.svg"
+        );
+    }
+
+    #[test]
+    fn leaves_remote_svg_images_for_pandoc() {
+        let markdown = "![remote](https://example.com/image.svg)";
+        let (prepared, temp) =
+            prepare_local_svg_images_for_pandoc(markdown, "pdfPandoc", Path::new(".")).unwrap();
+        assert_eq!(prepared, markdown);
+        assert!(temp.is_none());
+    }
+
+    #[test]
+    fn rasterizes_local_svg_images_for_pandoc_pdf() {
+        let fixture = make_temp_dir("lightmark-svg-test").unwrap();
+        let source = fixture.join("图 片.svg");
+        fs::write(
+            &source,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="20"><rect width="32" height="20" fill="#c88936"/></svg>"##,
+        )
+        .unwrap();
+        let markdown = "![测试](<图%20片.svg> \"标题\")";
+        let (prepared, generated) =
+            prepare_local_svg_images_for_pandoc(markdown, "pdfPandoc", &fixture).unwrap();
+        let generated = generated.expect("generated SVG raster directory");
+
+        assert!(prepared.contains("image-0.png"));
+        assert!(prepared.contains("\"标题\""));
+        assert!(generated.join("image-0.png").is_file());
+        let _ = fs::remove_dir_all(fixture);
+        let _ = fs::remove_dir_all(generated);
     }
 }

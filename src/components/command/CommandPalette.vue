@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import {
   appStore,
+  closeCommandPalette,
   formatCurrentMarkdown,
   openFile,
   openFileInOtherPane,
@@ -13,10 +14,15 @@ import {
   switchMode,
   toggleSplitLayout,
 } from "../../stores/appStore";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { pluginCommands } from "../../plugins/registry";
 import { exportTargets, runDocumentExport } from "../../utils/export";
 
 const query = ref("");
+const backdrop = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
+const input = ref<HTMLInputElement | null>(null);
+useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeCommandPalette });
 
 const coreCommands = [
   { name: "快速打开文件", handler: () => openQuickOpen() },
@@ -47,7 +53,7 @@ const commands = computed(() => {
 async function execute(command: { name: string; handler: () => unknown | Promise<unknown> }) {
   try {
     await command.handler();
-    appStore.commandPaletteOpen = false;
+    closeCommandPalette();
   } catch (error) {
     appStore.statusMessage = String(error);
   }
@@ -55,14 +61,13 @@ async function execute(command: { name: string; handler: () => unknown | Promise
 </script>
 
 <template>
-  <div class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="appStore.commandPaletteOpen = false">
-    <div class="lm-palette-panel mx-auto max-w-xl overflow-hidden">
+  <div ref="backdrop" class="lm-modal-backdrop fixed inset-0 z-50 p-20" @click.self="closeCommandPalette">
+    <div ref="panel" tabindex="-1" class="lm-palette-panel mx-auto max-w-xl overflow-hidden" role="dialog" aria-modal="true" aria-label="命令面板">
       <input
+        ref="input"
         v-model="query"
-        autofocus
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="搜索命令"
-        @keydown.esc="appStore.commandPaletteOpen = false"
       />
       <div class="max-h-80 overflow-auto p-2">
         <button

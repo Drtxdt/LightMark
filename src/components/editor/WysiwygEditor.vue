@@ -16,8 +16,7 @@ import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
-import { closeHistory } from "@tiptap/pm/history";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   appStore,
   consumePanePendingEditorPosition,
@@ -59,7 +58,7 @@ import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
-import type { EditorPaneId } from "../../types";
+import type { EditorPaneId, WysiwygFormatHistoryEntry } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -84,6 +83,9 @@ type ToolbarEditorCommand =
   | "alert";
 type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
 type EditorFindMatch = TextMatch & { docFrom: number; docTo: number };
+
+const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
+let suppressWysiwygUpdate = false;
 
 const contextMenu = ref({
   visible: false,
@@ -1954,6 +1956,7 @@ const editor = useEditor({
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
+      if (handleExactFormatHistoryKeydown(view, event)) return true;
       if (handleWikiCompletionKeydown(view, event)) return true;
       if (handleWysiwygPair(view, event)) return true;
       if (handleWysiwygTab(view, event)) return true;
@@ -2155,6 +2158,8 @@ const editor = useEditor({
     },
   },
   onUpdate({ editor }) {
+    if (suppressWysiwygUpdate) return;
+    getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
     setPaneContent(props.paneId, editorHtmlToMarkdown(editor.getHTML()), true);
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
@@ -2851,6 +2856,7 @@ onMounted(() => {
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
+  window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.addEventListener("resize", handleEditorShellScroll);
 });
 
@@ -2863,6 +2869,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
+  window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.removeEventListener("resize", handleEditorShellScroll);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
@@ -2871,8 +2878,10 @@ onBeforeUnmount(() => {
 function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
   const activeEditor = editor.value;
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "wysiwyg" || event.detail?.to !== "source" || !activeEditor) return;
-  const markdown = editorHtmlToMarkdown(activeEditor.getHTML());
-  setPaneContent(props.paneId, markdown, true);
+  // `onUpdate` already keeps the tab synchronized after real edits. Reusing
+  // that exact source here avoids normalizing whitespace and marking a clean
+  // document dirty merely because the user changed editor modes.
+  const markdown = paneContent.value;
   const { anchor, head } = activeEditor.view.state.selection;
   setPanePendingModeCursor(props.paneId, {
     targetMode: "source",
@@ -2886,7 +2895,7 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
   const activeEditor = editor.value;
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal" || !activeEditor) return;
   const state = activeEditor.view.state;
-  const currentMarkdown = editorHtmlToMarkdown(activeEditor.getHTML());
+  const currentMarkdown = event.detail.source;
   const anchorOffset = docPosToMarkdownOffset(state, state.selection.anchor, currentMarkdown);
   const headOffset = docPosToMarkdownOffset(state, state.selection.head, currentMarkdown);
   const mappedAnchor = mapMarkdownOffset(event.detail.source, event.detail.result, anchorOffset);
@@ -2898,19 +2907,83 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
   const nextState = { doc: transaction.doc };
   const anchor = markdownOffsetToDocPos(nextState, mappedAnchor, event.detail.result.text);
   const head = markdownOffsetToDocPos(nextState, mappedHead, event.detail.result.text);
-  transaction = closeHistory(
-    transaction
-      .setSelection(TextSelection.create(transaction.doc, anchor, head))
-      .setMeta("addToHistory", true)
-      .scrollIntoView(),
-  );
+  transaction = transaction
+    .setSelection(TextSelection.create(transaction.doc, anchor, head))
+    .setMeta("addToHistory", false)
+    .scrollIntoView();
+  const tab = getPaneTab(props.paneId);
+  if (tab) {
+    tab.wysiwygFormatHistory.undo.push({
+      before: event.detail.source,
+      after: event.detail.result.text,
+      beforeAnchor: anchorOffset,
+      beforeHead: headOffset,
+      afterAnchor: mappedAnchor,
+      afterHead: mappedHead,
+    });
+    if (tab.wysiwygFormatHistory.undo.length > WYSIWYG_FORMAT_HISTORY_LIMIT) {
+      tab.wysiwygFormatHistory.undo.splice(0, tab.wysiwygFormatHistory.undo.length - WYSIWYG_FORMAT_HISTORY_LIMIT);
+    }
+    tab.wysiwygFormatHistory.redo.splice(0);
+  }
   event.detail.handled = true;
+  suppressWysiwygUpdate = true;
   activeEditor.view.dispatch(transaction);
-  activeEditor.view.dispatch(closeHistory(activeEditor.view.state.tr));
+  suppressWysiwygUpdate = false;
   // The visual document is semantic HTML; retain the formatter's canonical
   // Markdown in the tab instead of immediately re-serializing table padding.
   setPaneContent(props.paneId, event.detail.result.text, true);
   activeEditor.view.focus();
+}
+
+function handleExactFormatHistoryKeydown(view: EditorView, event: KeyboardEvent) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
+  const key = event.key.toLowerCase();
+  const redo = key === "y" || (key === "z" && event.shiftKey);
+  const undo = key === "z" && !event.shiftKey;
+  if (!undo && !redo) return false;
+
+  const tab = getPaneTab(props.paneId);
+  if (!tab) return false;
+  const source = redo ? tab.wysiwygFormatHistory.redo : tab.wysiwygFormatHistory.undo;
+  const target = redo ? tab.wysiwygFormatHistory.undo : tab.wysiwygFormatHistory.redo;
+  const entry = source.at(-1);
+  if (!entry) return false;
+  const expected = redo ? entry.before : entry.after;
+  if (tab.content !== expected) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+  source.pop();
+  target.push(entry);
+  restoreExactMarkdownSnapshot(view, entry, redo);
+  return true;
+}
+
+function restoreExactMarkdownSnapshot(
+  view: EditorView,
+  entry: WysiwygFormatHistoryEntry,
+  redo: boolean,
+) {
+  const markdown = redo ? entry.after : entry.before;
+  const anchorOffset = redo ? entry.afterAnchor : entry.beforeAnchor;
+  const headOffset = redo ? entry.afterHead : entry.beforeHead;
+  const container = document.createElement("div");
+  container.innerHTML = renderMarkdownForEditorWithAssets(markdown);
+  const nextDoc = ProseMirrorDOMParser.fromSchema(view.state.schema).parse(container);
+  let transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, nextDoc.content);
+  const nextState = { doc: transaction.doc };
+  const anchor = markdownOffsetToDocPos(nextState, anchorOffset, markdown);
+  const head = markdownOffsetToDocPos(nextState, headOffset, markdown);
+  transaction = transaction
+    .setSelection(TextSelection.create(transaction.doc, anchor, head))
+    .setMeta("addToHistory", false)
+    .scrollIntoView();
+  suppressWysiwygUpdate = true;
+  view.dispatch(transaction);
+  suppressWysiwygUpdate = false;
+  setPaneContent(props.paneId, markdown, true);
+  view.focus();
 }
 
 function captureWysiwygPosition(view = editor.value?.view) {

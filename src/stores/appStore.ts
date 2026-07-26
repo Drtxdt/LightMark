@@ -542,6 +542,7 @@ async function contentForBacklinkScan(path: string) {
 }
 
 export function openQuickOpen() {
+  closeTransientPalettes("quickOpen");
   appStore.quickOpenQuery = "";
   appStore.quickOpenActiveIndex = 0;
   appStore.quickOpenOpen = true;
@@ -552,6 +553,7 @@ export function closeQuickOpen() {
 }
 
 export function openHeadingJump() {
+  closeTransientPalettes("headingJump");
   appStore.headingJumpQuery = "";
   appStore.headingJumpActiveIndex = 0;
   appStore.headingJumpOpen = true;
@@ -562,11 +564,29 @@ export function closeHeadingJump() {
 }
 
 export function openGoToLine() {
+  closeTransientPalettes("goToLine");
   appStore.goToLineOpen = true;
 }
 
 export function closeGoToLine() {
   appStore.goToLineOpen = false;
+}
+
+export function openCommandPalette() {
+  closeTransientPalettes("commandPalette");
+  appStore.commandPaletteOpen = true;
+}
+
+export function closeCommandPalette() {
+  appStore.commandPaletteOpen = false;
+}
+
+function closeTransientPalettes(except?: "quickOpen" | "headingJump" | "goToLine" | "commandPalette") {
+  if (except !== "quickOpen") appStore.quickOpenOpen = false;
+  if (except !== "headingJump") appStore.headingJumpOpen = false;
+  if (except !== "goToLine") appStore.goToLineOpen = false;
+  if (except !== "commandPalette") appStore.commandPaletteOpen = false;
+  window.dispatchEvent(new CustomEvent("lightmark:close-transient-editor-ui"));
 }
 
 export function recordNavigationLocation(location?: Partial<NavigationLocation>) {
@@ -1626,6 +1646,7 @@ function createTab(input: {
     isDirty: input.isDirty,
     editorMode: input.editorMode,
     pendingModeCursor: null,
+    wysiwygFormatHistory: { undo: [], redo: [] },
     position: input.position,
     fileSnapshot: input.fileSnapshot,
     externalState: "clean",
