@@ -21,6 +21,7 @@ type LatexSuggestTarget = {
   setCaret: (position: number) => void;
   focus: () => void;
   onChange: () => void;
+  getAdditionalSuggestions?: () => LatexSuggestion[];
 };
 
 const byName = (names: string[], category: string): LatexSuggestion[] =>
@@ -610,6 +611,14 @@ export const latexSuggestions: LatexSuggestion[] = [
     ],
     "快捷模板",
   ),
+
+  ...byEntries(
+    [
+      ["\\ce", "化学式", "\\ce{}"],
+      ["\\pu", "物理量与单位", "\\pu{}"],
+    ],
+    "化学",
+  ),
 ];
 
 export function createLatexSuggestController(target: LatexSuggestTarget): LatexSuggestController {
@@ -676,7 +685,10 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
     const token = match[0];
     const query = token.slice(1).toLowerCase();
     range = { from: caret - token.length, to: caret };
-    items = latexSuggestions
+    const additional = target.getAdditionalSuggestions?.() ?? [];
+    const suggestions = [...additional, ...latexSuggestions]
+      .filter((item, index, all) => all.findIndex((candidate) => candidate.command === item.command) === index);
+    items = suggestions
       .filter((item) => {
         const command = item.command.slice(1).toLowerCase();
         return command.startsWith(query) || item.label.toLowerCase().includes(query);

@@ -1,4 +1,4 @@
-import katex from "katex";
+import { evaluateMathTokens, parseInlineMathText } from "./mathMarkdown";
 
 const inlineHtmlTags = new Set([
   "span",
@@ -173,7 +173,9 @@ export function renderInlineMarkdownInHtml(html: string, options: { inlineOnly?:
   let match = tagPattern.exec(sanitized);
 
   while (match) {
-    output += rawTextStack.length > 0 ? sanitized.slice(cursor, match.index) : renderInlineMarkdownText(sanitized.slice(cursor, match.index));
+    output += rawTextStack.length > 0
+      ? sanitized.slice(cursor, match.index)
+      : renderInlineMarkdownText(sanitized.slice(cursor, match.index), Boolean(options.inlineOnly));
     output += match[0];
 
     const tag = match[1].toLowerCase();
@@ -185,7 +187,9 @@ export function renderInlineMarkdownInHtml(html: string, options: { inlineOnly?:
     match = tagPattern.exec(sanitized);
   }
 
-  output += rawTextStack.length > 0 ? sanitized.slice(cursor) : renderInlineMarkdownText(sanitized.slice(cursor));
+  output += rawTextStack.length > 0
+    ? sanitized.slice(cursor)
+    : renderInlineMarkdownText(sanitized.slice(cursor), Boolean(options.inlineOnly));
   return output;
 }
 
@@ -456,35 +460,24 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function renderInlineMarkdownText(value: string) {
-  return renderInlineMathText(value)
+function renderInlineMarkdownText(value: string, allowMath = true) {
+  return (allowMath ? renderInlineMathText(value) : value)
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>")
     .replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
 }
 
 function renderInlineMathText(value: string) {
-  return value
-    .replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
-      return `${prefix}${renderMathSource(tex, true)}`;
-    })
-    .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
-      return `${prefix}${renderMathSource(tex, false)}`;
-    });
-}
-
-function renderMathSource(tex: string, displayMode: boolean) {
-  const source = decodeHtmlEntities(tex.trim());
-  if (!source) return "";
-  try {
-    return katex.renderToString(source, {
-      displayMode,
-      throwOnError: false,
-      strict: false,
-      trust: false,
-    });
-  } catch {
-    const delimiter = displayMode ? "$$" : "$";
-    return `${delimiter}${escapeHtmlText(source)}${delimiter}`;
+  const tokens = parseInlineMathText(value)
+    .map((token) => ({ ...token, tex: decodeHtmlEntities(token.tex) }));
+  const evaluated = evaluateMathTokens(tokens);
+  let next = value;
+  for (const entry of [...evaluated.entries].reverse()) {
+    const { token, result: rendered } = entry;
+    const replacement = rendered.ok
+      ? (entry.definitionOnly ? "" : rendered.html)
+      : `<span class="math-render-error" title="${escapeAttribute(rendered.error.message)}">${escapeHtmlText(token.raw)}</span>`;
+    next = `${next.slice(0, token.from)}${replacement}${next.slice(token.to)}`;
   }
+  return next;
 }

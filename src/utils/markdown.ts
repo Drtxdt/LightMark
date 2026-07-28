@@ -1,11 +1,10 @@
 import MarkdownIt from "markdown-it";
 import type Token from "markdown-it/lib/token.mjs";
-import markdownItKatex from "markdown-it-katex";
 import hljs from "highlight.js";
-import katex from "katex";
 import {
   escapeAttribute,
   escapeHtml,
+  decodeHtmlEntities,
   findInlineHtmlMatch,
   findRawHtmlMatch,
   isInlineHtmlTag,
@@ -19,6 +18,12 @@ import {
 import { exportThemeCssVariables, getExportThemePalette } from "./exportTheme";
 import { renderWikiLinksInEscapedText } from "./wikiLinks";
 import { renderMarkdownTables } from "./tableMarkdown";
+import {
+  evaluateMathTokens,
+  evaluateMarkdownMath,
+  parseInlineMathText,
+  parseMarkdownMath,
+} from "./mathMarkdown";
 
 const md = new MarkdownIt({
   html: true,
@@ -31,7 +36,6 @@ const md = new MarkdownIt({
   },
 });
 
-md.use(markdownItKatex);
 installLightMarkMarkdown(md);
 
 const editorMd = new MarkdownIt({
@@ -190,7 +194,7 @@ function markSpecialBlocksForEditor(markdown: string) {
     return token;
   };
 
-  let next = normalizeLatexMathDelimiters(markdown).replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   });
 
@@ -202,19 +206,19 @@ function markSpecialBlocksForEditor(markdown: string) {
     return `${prefix}\n${stash(`<div data-type="mermaid" data-code="${escapeHtml(code.trim())}"></div>`)}\n`;
   });
 
-  next = next.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    return `${prefix}\n${stash(`<div data-type="block-math" data-tex="${escapeHtml(tex.trim())}"></div>`)}\n`;
-  });
-
   next = convertFootnotes(next, stash, true);
   next = next.replace(/```[\s\S]*?```/g, (code) => stash(code));
-  next = next.replace(/`([^`\n]*)`/g, (_match, code) => {
-    return stash(`<code>${escapeHtml(code)}</code>`);
+  next = replaceInlineCodeSpans(next, (source, code) => {
+    const delimiterLength = source.match(/^`+/)?.[0].length ?? 1;
+    return stash(
+      `<code data-code-raw="${escapeAttribute(source)}" data-code-original="${escapeAttribute(code)}" data-code-delimiter-length="${delimiterLength}">${escapeHtml(code)}</code>`,
+    );
   });
   next = protectHtmlBlocks(next, stash);
   next = protectInlineHtml(next, stash);
   next = protectRawHtml(next, stash);
-  next = protectInlineMath(next, stash);
+  next = protectMathForEditor(next, stash);
+  next = protectEscapedDollarsForEditor(next, stash);
 
   next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
@@ -236,6 +240,17 @@ function markSpecialBlocksForEditor(markdown: string) {
   return next;
 }
 
+function protectEscapedDollarsForEditor(value: string, stash: (html: string) => string) {
+  return value.replace(/\\+\$/g, (raw) => {
+    const slashCount = raw.length - 1;
+    if (slashCount % 2 === 0) return raw;
+    const display = `${"\\".repeat(Math.floor(slashCount / 2))}$`;
+    return stash(
+      `<span data-type="escaped-dollar" data-raw="${escapeAttribute(raw)}" data-display="${escapeAttribute(display)}">${escapeHtml(display)}</span>`,
+    );
+  });
+}
+
 function restorePlaceholders(value: string, placeholders: string[]) {
   let next = value;
   let changed = true;
@@ -252,7 +267,7 @@ function restorePlaceholders(value: string, placeholders: string[]) {
 }
 
 function enhanceMarkdownForRender(markdown: string, stash?: (html: string) => string) {
-  let next = normalizeLatexMathDelimiters(markdown).replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
@@ -268,7 +283,10 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
   instance.linkify.set({ fuzzyLink: true });
   instance.core.ruler.after("block", "lightmark_github_alerts", (state) => transformGithubAlerts(state.tokens, state.Token, state.md, state.env));
 
-  instance.renderer.rules.text = (tokens, idx) => renderInlineEnhancements(instance.utils.escapeHtml(tokens[idx].content));
+  instance.renderer.rules.text = (tokens, idx) => {
+    const escaped = instance.utils.escapeHtml(tokens[idx].content);
+    return isTextInsideInlineCodeHtml(tokens, idx) ? escaped : renderInlineEnhancements(escaped);
+  };
   instance.renderer.rules.html_inline = (tokens, idx) => {
     const content = tokens[idx].content;
     if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
@@ -299,16 +317,45 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
   };
 }
 
+function isTextInsideInlineCodeHtml(tokens: Token[], index: number) {
+  let depth = 0;
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    if (tokens[cursor].type !== "html_inline") continue;
+    const source = tokens[cursor].content;
+    depth += (source.match(/<code(?:\s[^>]*)?>/gi) || []).length;
+    depth -= (source.match(/<\/code\s*>/gi) || []).length;
+  }
+  return depth > 0;
+}
+
 function trimFenceStructuralTrailingNewline(content: string) {
   return content.endsWith("\n") ? content.slice(0, -1) : content;
 }
 
 function renderInlineEnhancements(html: string) {
-  return renderWikiLinksInEscapedText(html)
+  const mathHtml: string[] = [];
+  let protectedHtml = html;
+  const tokens = parseInlineMathText(html)
+    .map((token) => ({ ...token, tex: decodeHtmlEntities(token.tex) }));
+  const evaluated = evaluateMathTokens(tokens);
+  for (const entry of [...evaluated.entries].reverse()) {
+    const { token, result: rendered } = entry;
+    const replacement = rendered.ok
+      ? rendered.html
+      : `<span class="math-render-error" title="${escapeAttribute(rendered.error.message)}">${token.raw}</span>`;
+    const placeholder = `@@LIGHTMARK_INLINE_MATH_${mathHtml.length}@@`;
+    mathHtml.push(replacement);
+    protectedHtml = `${protectedHtml.slice(0, token.from)}${placeholder}${protectedHtml.slice(token.to)}`;
+  }
+  let enhanced = renderWikiLinksInEscapedText(protectedHtml)
     .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
     .replace(/(^|[^^\s])\^([^^\n]+)\^/g, "$1<sup>$2</sup>")
     .replace(/(^|[^~\s])~([^~\n]+)~/g, "$1<sub>$2</sub>")
     .replace(/:([a-z0-9_+-]+):/gi, (_match, name) => emojiMap[name] || `:${name}:`);
+  mathHtml.forEach((value, index) => {
+    enhanced = enhanced.split(`@@LIGHTMARK_INLINE_MATH_${index}@@`).join(value);
+  });
+  return enhanced;
 }
 
 function convertTaskItems(markdown: string) {
@@ -471,10 +518,37 @@ function protectCodeForFootnoteRefs(markdown: string) {
     codePlaceholders.push(code);
     return token;
   };
-  const protectedMarkdown = markdown
-    .replace(/```[\s\S]*?```/g, (code) => stashCode(code))
-    .replace(/`[^`\n]*`/g, (code) => stashCode(code));
+  const withoutFences = markdown.replace(/```[\s\S]*?```/g, (code) => stashCode(code));
+  const protectedMarkdown = replaceInlineCodeSpans(withoutFences, (source) => stashCode(source));
   return `${protectedMarkdown}\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_${codePlaceholders.map((item) => encodeURIComponent(item)).join("|")}@@`;
+}
+
+function replaceInlineCodeSpans(markdown: string, replacement: (source: string, code: string) => string) {
+  const lines = markdown.split("\n");
+  return lines.map((line) => {
+    let output = "";
+    let cursor = 0;
+    for (let index = 0; index < line.length;) {
+      if (line[index] !== "`") {
+        index += 1;
+        continue;
+      }
+      let length = 1;
+      while (line[index + length] === "`") length += 1;
+      const delimiter = "`".repeat(length);
+      const close = line.indexOf(delimiter, index + length);
+      if (close < 0) {
+        index += length;
+        continue;
+      }
+      output += line.slice(cursor, index);
+      const source = line.slice(index, close + length);
+      output += replacement(source, line.slice(index + length, close));
+      cursor = close + length;
+      index = cursor;
+    }
+    return `${output}${line.slice(cursor)}`;
+  }).join("\n");
 }
 
 function restoreCodeForFootnoteRefs(markdown: string) {
@@ -507,102 +581,30 @@ function buildTocHtml(markdown: string) {
   return `<nav class="toc-node" data-type="table-of-contents"><div class="toc-node-label">[TOC]</div>${items}</nav>`;
 }
 
-function protectInlineMath(markdown: string, stash: (html: string) => string) {
-  return markdown
-    .replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
-      return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
-    })
-    .replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
-      return `${prefix}${stash(`<span data-type="inline-math" data-tex="${escapeHtml(tex.trim())}"></span>`)}`;
-    });
-}
-
-function renderLatexMathForMarkdown(markdown: string, stashRenderedHtml?: (html: string) => string) {
-  const placeholders: string[] = [];
-  const stash = (value: string) => {
-    const token = `@@LIGHTMARK_LATEX_PROTECTED_${placeholders.length}@@`;
-    placeholders.push(value);
-    return token;
-  };
-  const render = (tex: string, displayMode: boolean) => {
-    const html = renderKatexHtml(tex, displayMode);
-    return stashRenderedHtml ? stashRenderedHtml(html) : html;
-  };
-
-  let next = markdown
-    .replace(/```[\s\S]*?```/g, (code) => stash(code))
-    .replace(/`[^`\n]*`/g, (code) => stash(code));
-
-  next = next.replace(/(^|\n)\s*\$\$\s*\n([\s\S]*?)\n\s*\$\$\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    return `${prefix}\n${render(tex.trim(), true)}\n`;
-  });
-  next = next.replace(/(^|\n)\s*\\\[\s*\n?([\s\S]*?)\n?\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    return `${prefix}\n${render(tex.trim(), true)}\n`;
-  });
-  next = next.replace(/(^|\n)\s*\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?|split)\}\s*\n?([\s\S]*?)\n?\s*\\end\{\2\}\s*(?=\n|$)/g, (_match, prefix, environment, tex) => {
-    return `${prefix}\n${render(`\\begin{${environment}}\n${tex.trim()}\n\\end{${environment}}`, true)}\n`;
-  });
-  next = next.replace(/\\\(([\s\S]*?)\\\)/g, (_match, tex) => {
-    return render(tex.trim(), false);
-  });
-  next = next.replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
-    return `${prefix}${render(tex.trim(), false)}`;
-  });
-  next = next.replace(/(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g, (_match, prefix, tex) => {
-    return `${prefix}${render(tex.trim(), false)}`;
-  });
-
-  placeholders.forEach((value, index) => {
-    next = next.split(`@@LIGHTMARK_LATEX_PROTECTED_${index}@@`).join(value);
-  });
+function protectMathForEditor(markdown: string, stash: (html: string) => string) {
+  const { tokens } = parseMarkdownMath(markdown);
+  let next = markdown;
+  for (const token of [...tokens].reverse()) {
+    const tag = token.kind === "display" && token.delimiter !== "inline-double-dollar" ? "div" : "span";
+    const type = tag === "div" ? "block-math" : "inline-math";
+    const html = `<${tag} data-type="${type}" data-tex="${escapeAttribute(token.tex)}" data-original-tex="${escapeAttribute(token.tex)}" data-math-raw="${escapeAttribute(token.raw)}" data-math-delimiter="${token.delimiter}" data-display-mode="${String(token.displayMode)}"></${tag}>`;
+    next = `${next.slice(0, token.from)}${stash(html)}${next.slice(token.to)}`;
+  }
   return next;
 }
 
-function renderKatexHtml(tex: string, displayMode: boolean) {
-  if (!tex.trim()) return "";
-  try {
-    return katex.renderToString(tex, {
-      displayMode,
-      throwOnError: false,
-      strict: false,
-    });
-  } catch {
-    return `<span class="math-render-error">${escapeHtml(tex)}</span>`;
+function renderLatexMathForMarkdown(markdown: string, stashRenderedHtml?: (html: string) => string) {
+  const evaluated = evaluateMarkdownMath(markdown);
+  let next = markdown;
+  for (const entry of [...evaluated.entries].reverse()) {
+    const { token, result: rendered } = entry;
+    const isBlock = token.kind === "display" && token.delimiter !== "inline-double-dollar";
+    const html = rendered.ok
+      ? (entry.definitionOnly ? "" : rendered.html)
+      : `<${isBlock ? "div" : "span"} class="math-render-error" title="${escapeAttribute(rendered.error.message)}">${escapeHtml(token.raw)}</${isBlock ? "div" : "span"}>`;
+    const replacement = stashRenderedHtml ? stashRenderedHtml(html) : html;
+    next = `${next.slice(0, token.from)}${replacement}${next.slice(token.to)}`;
   }
-}
-
-function normalizeLatexMathDelimiters(markdown: string) {
-  const placeholders: string[] = [];
-  const stash = (value: string) => {
-    const token = `@@LIGHTMARK_MATH_SOURCE_${placeholders.length}@@`;
-    placeholders.push(value);
-    return token;
-  };
-
-  let next = markdown
-    .replace(/```[\s\S]*?```/g, (code) => stash(code))
-    .replace(/`[^`\n]*`/g, (code) => stash(code));
-
-  next = next.replace(/(^|\n)\s*\\\[\s*([^\n]+?)\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    return `${prefix}$$\n${tex.trim()}\n$$`;
-  });
-  next = next.replace(/(^|\n)\s*\\\[\s*\n([\s\S]*?)\n\s*\\\]\s*(?=\n|$)/g, (_match, prefix, tex) => {
-    return `${prefix}$$\n${tex.trim()}\n$$`;
-  });
-  next = next.replace(
-    /(^|\n)\s*\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?|split)\}\s*\n?([\s\S]*?)\n?\s*\\end\{\2\}\s*(?=\n|$)/g,
-    (_match, prefix, environment, tex) => {
-      return `${prefix}$$\n\\begin{${environment}}\n${tex.trim()}\n\\end{${environment}}\n$$`;
-    },
-  );
-  next = next.replace(/(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g, (_match, prefix, tex) => {
-    if (!tex.trim()) return _match;
-    return `${prefix}$${tex.trim()}$`;
-  });
-
-  placeholders.forEach((value, index) => {
-    next = next.split(`@@LIGHTMARK_MATH_SOURCE_${index}@@`).join(value);
-  });
   return next;
 }
 

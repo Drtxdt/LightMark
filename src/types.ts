@@ -231,6 +231,8 @@ export interface ExportRequest {
   markdown: string;
   html?: string;
   plainHtml?: string;
+  pandocMarkdown?: string;
+  pandocLatexHeader?: string;
   rasterWidth?: number;
   rasterHeight?: number;
   settings: ExportSettings;

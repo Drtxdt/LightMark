@@ -126,6 +126,8 @@ export function renderMarkdownTables(
 }
 
 export function markdownPipeRowToTableHtml(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null;
   const row = parseMarkdownTableRow(text);
   if (!row || row.cells.every((cell) => !cell.source)) return null;
   if (row.cells.every((cell) => delimiterAlignment(cell.source) !== null)) return null;

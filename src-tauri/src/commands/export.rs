@@ -22,6 +22,10 @@ pub struct ExportRequest {
     pub html: Option<String>,
     pub plain_html: Option<String>,
     #[serde(default)]
+    pub pandoc_markdown: Option<String>,
+    #[serde(default)]
+    pub pandoc_latex_header: Option<String>,
+    #[serde(default)]
     pub raster_width: Option<u32>,
     #[serde(default)]
     pub raster_height: Option<u32>,
@@ -321,7 +325,11 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let markdown = prepare_markdown_for_pandoc(&request.markdown, &request.target);
+    let pandoc_source = request
+        .pandoc_markdown
+        .as_deref()
+        .unwrap_or(&request.markdown);
+    let markdown = prepare_markdown_for_pandoc(pandoc_source, &request.target);
     let (markdown, svg_temp_dir) =
         prepare_local_svg_images_for_pandoc(&markdown, &request.target, &current_folder)?;
     let temp_path = write_temp_markdown(&markdown)?;
@@ -343,11 +351,28 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         args.push(format);
     }
     args.extend(spec.extra_args);
+    let latex_header_path = if matches!(request.target.as_str(), "pdfPandoc" | "latex") {
+        request
+            .pandoc_latex_header
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(write_temp_latex_header)
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(path) = &latex_header_path {
+        args.push("--include-in-header".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
 
     let command = format!("{} {}", pandoc.display(), args.join(" "));
     let output = run_process_with_timeout(&pandoc, &args, &current_folder, PANDOC_TIMEOUT)
         .map_err(|err| format!("无法完成 Pandoc 导出。\n命令：{command}\n{err}"));
     let _ = fs::remove_file(&temp_path);
+    if let Some(path) = &latex_header_path {
+        let _ = fs::remove_file(path);
+    }
     if let Some(path) = &svg_temp_dir {
         let _ = fs::remove_dir_all(path);
     }
@@ -355,6 +380,11 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
+        if stderr.contains("mhchem.sty") && stderr.contains("not found") {
+            return Err(format!(
+                "Pandoc PDF 导出缺少 LaTeX mhchem 宏包。请安装 mhchem，或改用 LightMark 原生 PDF 导出。\n命令：{command}\n{stderr}"
+            ));
+        }
         return Err(format!("Pandoc 导出失败。\n命令：{command}\n{stderr}"));
     }
     Ok(ExportResult {
@@ -823,6 +853,12 @@ fn write_temp_markdown(markdown: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn write_temp_latex_header(header: &str) -> Result<PathBuf, String> {
+    let path = make_temp_file_path("lightmark-math-header", "tex")?;
+    fs::write(&path, header).map_err(|err| format!("无法写入临时 LaTeX header：{err}"))?;
+    Ok(path)
+}
+
 fn write_temp_html(html: &str) -> Result<PathBuf, String> {
     let path = make_temp_file_path("lightmark-export", "html")?;
     fs::write(&path, html).map_err(|err| format!("无法写入临时导出文件：{err}"))?;
@@ -966,6 +1002,16 @@ mod tests {
             prepare_local_svg_images_for_pandoc(markdown, "pdfPandoc", Path::new(".")).unwrap();
         assert_eq!(prepared, markdown);
         assert!(temp.is_none());
+    }
+
+    #[test]
+    fn writes_and_cleans_math_latex_header() {
+        let header = "\\usepackage[version=4]{mhchem}\n";
+        let path = write_temp_latex_header(header).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), header);
+        fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

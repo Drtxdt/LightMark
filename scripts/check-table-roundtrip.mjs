@@ -22,7 +22,7 @@ try {
   for (const html of [renderMarkdown(source), renderMarkdownForEditor(source)]) {
     assert.equal((html.match(/<tr/g) || []).length, 2, html);
     assert.equal((html.match(/<(?:th|td)(?:\s|>)/g) || []).length, 6);
-    assert.match(html, /<code>x\|y<\/code>/);
+    assert.match(html, /<code\b[^>]*>x\|y<\/code>/);
     assert.match(html, />42</);
   }
   console.log("table roundtrip checks passed");

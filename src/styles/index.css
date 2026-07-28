@@ -884,6 +884,12 @@ sub {
   white-space: nowrap;
 }
 
+.escaped-dollar-node {
+  display: inline;
+  color: inherit;
+  font: inherit;
+}
+
 .math-node-inline:hover {
   background: #f5f3ee;
 }
@@ -967,6 +973,37 @@ sub {
   background: transparent;
 }
 
+.math-macro-definition {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2rem;
+  margin: 0.25rem 0;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--lm-border);
+  border-radius: var(--lm-radius-sm);
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink-muted);
+  font-family: var(--lm-ui-font-family);
+  cursor: text;
+}
+
+.math-node-block .math-macro-definition {
+  justify-content: flex-start;
+  margin: 0.45rem 0;
+}
+
+.math-macro-definition-label {
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.math-macro-definition-names {
+  color: var(--lm-accent);
+  font-size: 0.78rem;
+}
+
 .math-node-block-editing {
   border: 0;
   background: transparent;
@@ -982,9 +1019,68 @@ sub {
 }
 
 .math-render-error {
-  color: #756f66;
+  color: #9b4c38;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;
+}
+
+.math-node .math-render-error {
+  display: inline-flex;
+  max-width: min(100%, 42rem);
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.28rem 0.55rem;
+  border: 1px solid rgb(155 76 56 / 24%);
+  border-radius: 6px;
+  background: rgb(180 83 60 / 7%);
+  padding: 0.32rem 0.48rem;
+  cursor: text;
+  white-space: normal;
+}
+
+.math-node-block .math-render-error {
+  display: flex;
+  margin: 0.5rem 0;
+}
+
+.math-render-error-label {
+  color: #9b4c38;
+  font-family: var(--lm-ui-font-family);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.math-render-error-detail {
+  color: #756f66;
+  font-family: var(--lm-ui-font-family);
+  font-size: 0.76rem;
+}
+
+.math-render-error-source {
+  flex-basis: 100%;
+  overflow-x: auto;
+  color: #5b4630;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+
+.dark .math-render-error,
+.dark .math-render-error-label {
+  color: #d58a72;
+}
+
+.dark .math-node .math-render-error {
+  border-color: rgb(213 138 114 / 26%);
+  background: rgb(213 138 114 / 8%);
+}
+
+.dark .math-render-error-detail {
+  color: #b9b3a8;
+}
+
+.dark .math-render-error-source {
+  color: #f0d49c;
 }
 
 .math-live-preview {

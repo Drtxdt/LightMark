@@ -207,7 +207,7 @@ function hello() {
     [rawPreviewHtml.includes("raw-html-token") && rawPreviewHtml.includes("&lt;input"), "preview renders unsupported input as muted raw html"],
     [rawPreviewHtml.includes("raw-html-comment") && rawPreviewHtml.includes("&lt;!-- this is a comment --&gt;"), "preview renders html comments as muted comments"],
     [rawPreviewHtml.includes("&lt;span style=\"color:red;\"&gt;这里没有闭合"), "preview keeps unclosed tags as raw html"],
-    [rawEditorHtml.includes("<code>$E = mc^2$</code>"), "editor keeps dollar math inside inline code"],
+    [/<code\b[^>]*>\$E = mc\^2\$<\/code>/.test(rawEditorHtml), "editor keeps dollar math inside inline code"],
     [!rawEditorHtml.includes('data-tex="E = mc^2"'), "editor does not convert inline-code math to math node"],
     [rawPreviewHtml.includes("<code>$E = mc^2$</code>"), "preview keeps dollar math inside inline code"],
     [rawEditorHtml.includes("console.log(&quot;Hello from pre&quot;);"), "editor html block stores quotes with one attribute escape"],

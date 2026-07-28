@@ -25,6 +25,7 @@ import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
+import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
 import type { EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -34,6 +35,7 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 let applyingExternalChange = false;
+let mathDiagnosticTimer: number | null = null;
 let sourceFindMatches: TextMatch[] = [];
 const wikiCompletion = ref({
   visible: false,
@@ -61,6 +63,20 @@ const sourceFindField = StateField.define<DecorationSet>({
   update(value, transaction) {
     for (const effect of transaction.effects) {
       if (effect.is(setSourceFindDecorations)) return effect.value;
+    }
+    return value.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const setMathDiagnosticDecorations = StateEffect.define<DecorationSet>();
+const mathDiagnosticField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setMathDiagnosticDecorations)) return effect.value;
     }
     return value.map(transaction.changes);
   },
@@ -125,6 +141,11 @@ const minimalTheme = EditorView.theme({
     borderColor: "#e7e1d7",
     color: "#756f66",
   },
+  ".cm-math-error": {
+    textDecoration: "underline wavy #b4533c 1px",
+    textUnderlineOffset: "3px",
+    cursor: "help",
+  },
   ".dark &": {
     "--lm-cm-heading-1": "#f5f1e8",
     "--lm-cm-heading-2": "#eee7dc",
@@ -156,6 +177,9 @@ const minimalTheme = EditorView.theme({
     backgroundColor: "#1b1a18",
     borderColor: "#3b3833",
     color: "#b9b3a8",
+  },
+  ".dark & .cm-math-error": {
+    textDecorationColor: "#d58a72",
   },
 });
 
@@ -200,6 +224,7 @@ function extensions() {
     history(),
     keymap.of([...sourceInputKeymap, ...historyKeymap]),
     sourceFindField,
+    mathDiagnosticField,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
@@ -248,6 +273,19 @@ function extensions() {
         void insertImageFilesIntoSource(files, currentView, position ?? currentView.state.doc.length);
         return true;
       },
+      mousedown(event, currentView) {
+        const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>(".cm-math-error") : null;
+        const offset = Number.parseInt(target?.dataset.mathErrorOffset || "", 10);
+        if (!target || !Number.isFinite(offset)) return false;
+        event.preventDefault();
+        const anchor = Math.max(0, Math.min(offset, currentView.state.doc.length));
+        currentView.dispatch({
+          selection: { anchor },
+          effects: EditorView.scrollIntoView(anchor, { y: "center" }),
+        });
+        currentView.focus();
+        return true;
+      },
       scroll(_event, currentView) {
         captureSourcePosition(currentView);
         return false;
@@ -259,10 +297,39 @@ function extensions() {
         setPaneContent(props.paneId, update.state.doc.toString(), true);
         if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
       }
+      if (update.docChanged) scheduleMathDiagnostics(update.view);
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
       if (update.docChanged || update.selectionSet) captureSourcePosition(update.view);
     }),
   ];
+}
+
+function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
+  if (mathDiagnosticTimer !== null) window.clearTimeout(mathDiagnosticTimer);
+  mathDiagnosticTimer = window.setTimeout(() => {
+    mathDiagnosticTimer = null;
+    if (currentView !== view || paneDocumentMode.value !== "normal") return;
+    const source = currentView.state.doc.toString();
+    const diagnostics = evaluateMarkdownMath(source).diagnostics;
+    const ranges = diagnostics
+      .map((diagnostic) => {
+        const from = Math.max(0, Math.min(diagnostic.from, currentView.state.doc.length));
+        const to = Math.max(from + 1, Math.min(diagnostic.to, currentView.state.doc.length));
+        if (from >= currentView.state.doc.length || to <= from) return null;
+        return Decoration.mark({
+          class: "cm-math-error",
+          attributes: {
+            title: diagnostic.message,
+            "aria-label": diagnostic.message,
+            "data-math-error-offset": String(from),
+          },
+        }).range(from, to);
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    currentView.dispatch({
+      effects: setMathDiagnosticDecorations.of(Decoration.set(ranges, true)),
+    });
+  }, delay);
 }
 
 function handleSourcePair(currentView: EditorView, key: string) {
@@ -406,6 +473,7 @@ onMounted(() => {
       extensions: extensions(),
     }),
   });
+  scheduleMathDiagnostics(view, 0);
   restorePendingSourceCursor();
   restorePendingSourcePosition();
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
@@ -427,11 +495,13 @@ watch(
       extensions: extensions(),
     }));
     applyingExternalChange = false;
+    scheduleMathDiagnostics(view, 0);
     restorePendingSourcePosition();
   },
 );
 
 onBeforeUnmount(() => {
+  if (mathDiagnosticTimer !== null) window.clearTimeout(mathDiagnosticTimer);
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);

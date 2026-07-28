@@ -14,6 +14,7 @@ import { appStore, completeExportStatus, currentFileName, failExportStatus, star
 import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
 import { resolveMarkdownImageSource } from "./imageAssets";
+import { preparePandocMath } from "./mathMarkdown";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -90,6 +91,9 @@ export async function exportCurrentDocument(input: {
     buildExportHtml(currentFileName.value, body, { includeStyles: false, theme, currentPath: input.currentPath }),
   );
   const raster = input.target === "png" ? await measureExportHtml(styledHtml) : null;
+  const pandocMath = input.target === "pdfPandoc" || input.target === "latex"
+    ? preparePandocMath(input.markdown)
+    : null;
 
   const request: ExportRequest = {
     target: input.target,
@@ -98,6 +102,8 @@ export async function exportCurrentDocument(input: {
     markdown: input.markdown,
     html: styledHtml,
     plainHtml,
+    pandocMarkdown: pandocMath?.markdown,
+    pandocLatexHeader: pandocMath?.latexHeader,
     rasterWidth: raster?.width,
     rasterHeight: raster?.height,
     settings: input.settings,

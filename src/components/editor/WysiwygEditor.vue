@@ -33,6 +33,7 @@ import {
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import { mathTokenFromParts, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
@@ -57,6 +58,7 @@ import {
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
+import { EscapedDollarNode } from "../../extensions/EscapedDollarNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
 import type { EditorPaneId, WysiwygFormatHistoryEntry } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
@@ -1298,6 +1300,40 @@ turndown.addRule("subscript", {
   replacement: (content) => `~${content}~`,
 });
 
+const LightMarkInlineCode = Mark.create({
+  name: "code",
+  code: true,
+  excludes: "_",
+
+  addAttributes() {
+    return {
+      raw: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-code-raw") || "",
+        renderHTML: (attributes) => attributes.raw ? { "data-code-raw": attributes.raw } : {},
+      },
+      originalText: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-code-original") || element.textContent || "",
+        renderHTML: (attributes) => attributes.originalText ? { "data-code-original": attributes.originalText } : {},
+      },
+      delimiterLength: {
+        default: 1,
+        parseHTML: (element) => Number.parseInt(element.getAttribute("data-code-delimiter-length") || "1", 10) || 1,
+        renderHTML: (attributes) => ({ "data-code-delimiter-length": String(attributes.delimiterLength || 1) }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: "code" }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["code", mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
 turndown.addRule("wikiLink", {
   filter: (node) => {
     if (!(node instanceof HTMLElement) || node.nodeName !== "A") return false;
@@ -1456,7 +1492,17 @@ turndown.addRule("inlineMath", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-math",
   replacement: (content, node) => {
     const tex = node instanceof HTMLElement ? node.dataset.tex || node.textContent || content || "" : content;
-    return `$${tex}$`;
+    if (!(node instanceof HTMLElement)) return `$${tex}$`;
+    const delimiter = (node.dataset.mathDelimiter || "inline-dollar") as MathDelimiter;
+    const raw = node.dataset.mathRaw || "";
+    const originalTex = node.dataset.originalTex ?? tex;
+    const token = mathTokenFromParts({
+      tex: originalTex,
+      delimiter,
+      raw,
+      displayMode: node.dataset.displayMode === "true",
+    });
+    return serializeMathToken(token, tex, Boolean(raw) && tex === originalTex);
   },
 });
 
@@ -1491,7 +1537,34 @@ turndown.addRule("blockMath", {
   filter: (node) => node instanceof HTMLElement && node.dataset.type === "block-math",
   replacement: (content, node) => {
     const tex = node instanceof HTMLElement ? node.dataset.tex || node.textContent || content || "" : content;
-    return `\n\n$$\n${tex}\n$$\n\n`;
+    if (!(node instanceof HTMLElement)) return `\n\n$$\n${tex}\n$$\n\n`;
+    const delimiter = (node.dataset.mathDelimiter || "display-dollar") as MathDelimiter;
+    const raw = node.dataset.mathRaw || "";
+    const originalTex = node.dataset.originalTex ?? tex;
+    const token = mathTokenFromParts({ tex: originalTex, delimiter, raw, displayMode: true });
+    return `\n\n${serializeMathToken(token, tex, Boolean(raw) && tex === originalTex)}\n\n`;
+  },
+});
+
+turndown.addRule("inlineCodeExact", {
+  filter: (node) => node instanceof HTMLElement && node.nodeName === "CODE" && node.parentElement?.nodeName !== "PRE",
+  replacement: (content, node) => {
+    if (!(node instanceof HTMLElement)) return `\`${content}\``;
+    const raw = node.dataset.codeRaw || "";
+    const originalText = node.dataset.codeOriginal ?? content;
+    if (raw && content === originalText) return raw;
+    const longestRun = Math.max(0, ...(content.match(/`+/g) || []).map((run) => run.length));
+    const preferred = Number.parseInt(node.dataset.codeDelimiterLength || "1", 10) || 1;
+    const delimiter = "`".repeat(Math.max(preferred, longestRun + 1));
+    const padded = /^`|`$|^ .* $/.test(content) ? ` ${content} ` : content;
+    return `${delimiter}${padded}${delimiter}`;
+  },
+});
+
+turndown.addRule("escapedDollar", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.type === "escaped-dollar",
+  replacement: (_content, node) => {
+    return node instanceof HTMLElement ? node.dataset.raw || "\\$" : "\\$";
   },
 });
 
@@ -1910,6 +1983,7 @@ const editor = useEditor({
       codeBlock: false,
       horizontalRule: false,
       strike: false,
+      code: false,
       link: false,
     }),
     LightMarkCodeBlock.configure({
@@ -1929,6 +2003,7 @@ const editor = useEditor({
     LightMarkTableCell,
     MarkdownHeading,
     InlineMath,
+    EscapedDollarNode,
     InlineHtmlNode,
     RawHtmlNode,
     BlockMath,
@@ -1943,6 +2018,7 @@ const editor = useEditor({
     TableOfContentsNode,
     HtmlBlockNode,
     FootnotesNode,
+    LightMarkInlineCode,
     TyporaInlineCode,
     TyporaHorizontalRule,
     FrontMatterInput,
@@ -3946,6 +4022,13 @@ function editorHtmlToMarkdown(html: string) {
   const document = new DOMParser().parseFromString(html, "text/html");
   const footnoteSources: string[] = [];
   const frontMatterSources: string[] = [];
+  const htmlBlockSources: string[] = [];
+
+  document.querySelectorAll<HTMLElement>('[data-type="html-block"]').forEach((node) => {
+    const token = `@@LIGHTMARK_TURNDOWN_HTML_BLOCK_${htmlBlockSources.length}@@`;
+    htmlBlockSources.push(decodeHtmlEntities(node.getAttribute("data-html") || ""));
+    node.replaceWith(document.createTextNode(token));
+  });
 
   document.querySelectorAll<HTMLElement>('section[data-type="front-matter"]').forEach((node) => {
     const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${frontMatterSources.length}@@`;
@@ -3972,6 +4055,10 @@ function editorHtmlToMarkdown(html: string) {
   frontMatterSources.forEach((source, index) => {
     const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${index}@@`;
     markdown = markdown.split(token).join(`---\n${source.replace(/^\n+|\n+$/g, "")}\n---\n\n`);
+  });
+  htmlBlockSources.forEach((source, index) => {
+    const token = `@@LIGHTMARK_TURNDOWN_HTML_BLOCK_${index}@@`;
+    markdown = markdown.split(token).join(source.replace(/^\n+|\n+$/g, ""));
   });
   return normalizeLeadingImageWhitespace(markdown);
 }

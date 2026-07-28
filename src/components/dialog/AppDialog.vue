@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { dialogStore, resolveDialog } from "../../stores/dialogStore";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
+const backdrop = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
 const primaryButton = ref<HTMLButtonElement | null>(null);
 const active = computed(() => dialogStore.active);
+const isOpen = computed(() => Boolean(dialogStore.active));
+useOverlayFocus({ backdrop, panel, initialFocus: primaryButton, close: () => closeWith(), active: isOpen });
 
 watch(
   () => dialogStore.active,
@@ -33,12 +38,12 @@ function buttonClass(variant = "secondary") {
     <Transition name="dialog-fade">
       <div
         v-if="active"
+        ref="backdrop"
         class="dialog-backdrop"
         @click.self="closeWith()"
-        @keydown.esc.prevent.stop="closeWith()"
         @keydown.enter.prevent.stop="active.defaultId && closeWith(active.defaultId)"
       >
-        <section class="dialog-panel" role="dialog" aria-modal="true" :aria-label="active.title" tabindex="-1">
+        <section ref="panel" class="dialog-panel" role="dialog" aria-modal="true" :aria-label="active.title" tabindex="-1">
           <header class="dialog-header">
             <div class="min-w-0">
               <h2>{{ active.title }}</h2>

@@ -1,45 +1,34 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
-import katex from "katex";
 import {
   createLatexSuggestController,
   getContentEditableCaret,
   setContentEditableCaret,
   type LatexSuggestController,
+  type LatexSuggestion,
 } from "./LatexSuggest";
+import {
+  evaluateMathTokens,
+  mathTokenFromParts,
+  parseInlineMathText,
+  type MathEvaluationEntry,
+  type MathDelimiter,
+  type MarkdownMathToken,
+} from "../utils/mathMarkdown";
 
 type MathAttrs = {
   tex: string;
   editing?: boolean;
+  delimiter?: MathDelimiter;
+  raw?: string;
+  originalTex?: string;
+  displayMode?: boolean;
 };
 
-type InlineMathMatch = {
-  from: number;
-  to: number;
-  tex: string;
-};
-
-function findInlineMathMatch(text: string, isAllowedRange: (from: number, to: number) => boolean = () => true): InlineMathMatch | null {
-  const displayPair = /(^|[^$\\])\$\$([^$\n]+?)\$\$(?!\$)/g;
-  const singlePair = /(^|[^$\\])\$([^$\n]+?)\$(?!\$)/g;
-  const candidates: InlineMathMatch[] = [];
-
-  for (const pattern of [displayPair, singlePair]) {
-    pattern.lastIndex = 0;
-    let match = pattern.exec(text);
-    while (match) {
-      const prefixLength = match[1].length;
-      const from = match.index + prefixLength;
-      const to = match.index + match[0].length;
-      const tex = match[2].trim();
-      if (tex && isAllowedRange(from, to) && !isWholeTextBlockMathDelimiter(text, from, to)) {
-        candidates.push({ from, to, tex });
-      }
-      match = pattern.exec(text);
-    }
-  }
-
-  return candidates.sort((left, right) => left.from - right.from)[0] || null;
+function findInlineMathMatch(text: string, isAllowedRange: (from: number, to: number) => boolean = () => true) {
+  return parseInlineMathText(text)
+    .find((token) => isAllowedRange(token.from, token.to) && !isWholeTextBlockMathDelimiter(text, token.from, token.to))
+    ?? null;
 }
 
 function isWholeTextBlockMathDelimiter(text: string, from: number, to: number) {
@@ -60,6 +49,10 @@ export const InlineMath = Node.create({
   addAttributes() {
     return {
       tex: { default: "" },
+      delimiter: { default: "inline-dollar" },
+      raw: { default: "" },
+      originalTex: { default: "" },
+      displayMode: { default: false },
       editing: {
         default: false,
         rendered: false,
@@ -73,7 +66,14 @@ export const InlineMath = Node.create({
         tag: 'span[data-type="inline-math"]',
         getAttrs: (element) => {
           if (!(element instanceof HTMLElement)) return false;
-          return { tex: element.dataset.tex || element.textContent || "" };
+          const tex = element.dataset.tex || element.textContent || "";
+          return {
+            tex,
+            delimiter: element.dataset.mathDelimiter || "inline-dollar",
+            raw: element.dataset.mathRaw || "",
+            originalTex: element.dataset.originalTex ?? tex,
+            displayMode: element.dataset.displayMode === "true",
+          };
         },
       },
     ];
@@ -86,6 +86,10 @@ export const InlineMath = Node.create({
       mergeAttributes(HTMLAttributes, {
         "data-type": "inline-math",
         "data-tex": tex,
+        "data-original-tex": HTMLAttributes.originalTex ?? tex,
+        "data-math-raw": HTMLAttributes.raw || "",
+        "data-math-delimiter": HTMLAttributes.delimiter || "inline-dollar",
+        "data-display-mode": String(Boolean(HTMLAttributes.displayMode)),
       }),
       tex,
     ];
@@ -110,12 +114,19 @@ export const InlineMath = Node.create({
             const match = findInlineMathMatch(text, (from, to) => !rangeOverlapsCodeMark(codeRanges, from, to));
             if (!match) return true;
 
-            const tex = match.tex.trim();
-            if (!tex) return true;
+            const tex = match.tex;
+            if (!tex.trim()) return true;
 
             const from = pos + 1 + match.from;
             const to = pos + 1 + match.to;
-            tr = tr.replaceWith(from, to, this.type.create({ tex, editing: true }));
+            tr = tr.replaceWith(from, to, this.type.create({
+              tex,
+              editing: true,
+              delimiter: match.delimiter,
+              raw: match.raw,
+              originalTex: tex,
+              displayMode: match.displayMode,
+            }));
             tr = tr.setSelection(NodeSelection.create(tr.doc, from));
             converted = true;
             return false;
@@ -156,6 +167,10 @@ export const BlockMath = Node.create({
   addAttributes() {
     return {
       tex: { default: "" },
+      delimiter: { default: "display-dollar" },
+      raw: { default: "" },
+      originalTex: { default: "" },
+      displayMode: { default: true },
       editing: {
         default: false,
         rendered: false,
@@ -169,7 +184,14 @@ export const BlockMath = Node.create({
         tag: 'div[data-type="block-math"]',
         getAttrs: (element) => {
           if (!(element instanceof HTMLElement)) return false;
-          return { tex: element.dataset.tex || element.textContent || "" };
+          const tex = element.dataset.tex || element.textContent || "";
+          return {
+            tex,
+            delimiter: element.dataset.mathDelimiter || "display-dollar",
+            raw: element.dataset.mathRaw || "",
+            originalTex: element.dataset.originalTex ?? tex,
+            displayMode: true,
+          };
         },
       },
     ];
@@ -182,6 +204,10 @@ export const BlockMath = Node.create({
       mergeAttributes(HTMLAttributes, {
         "data-type": "block-math",
         "data-tex": tex,
+        "data-original-tex": HTMLAttributes.originalTex ?? tex,
+        "data-math-raw": HTMLAttributes.raw || "",
+        "data-math-delimiter": HTMLAttributes.delimiter || "display-dollar",
+        "data-display-mode": "true",
       }),
       tex,
     ];
@@ -204,7 +230,15 @@ export const BlockMath = Node.create({
             event.preventDefault();
             const from = $from.before();
             const to = $from.after();
-            const node = state.schema.nodes.blockMath.create({ tex: "", editing: true });
+            const delimiter: MathDelimiter = text.trim() === "\\[" ? "display-bracket" : "display-dollar";
+            const node = state.schema.nodes.blockMath.create({
+              tex: "",
+              editing: true,
+              delimiter,
+              raw: "",
+              originalTex: "",
+              displayMode: true,
+            });
             const tr = state.tr.replaceWith(from, to, node);
             view.dispatch(tr.scrollIntoView());
             requestAnimationFrame(() => {
@@ -224,12 +258,96 @@ export const BlockMath = Node.create({
 
 type NodeViewPosition = (() => number | undefined) | boolean;
 
+type EditorMathEvaluation = {
+  entriesByPos: Map<number, MathEvaluationEntry>;
+};
+
+const editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
+
+function evaluateEditorMath(editor: any): EditorMathEvaluation {
+  const doc = editor.view.state.doc as object;
+  const cached = editorMathEvaluationCache.get(doc);
+  if (cached) return cached;
+
+  const tokens: MarkdownMathToken[] = [];
+  editor.view.state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name !== "inlineMath" && node.type.name !== "blockMath") return true;
+    tokens.push(positionMathToken(
+      mathTokenFromParts({
+        tex: node.attrs.tex || "",
+        delimiter: node.attrs.delimiter,
+        raw: node.attrs.raw,
+        displayMode: node.type.name === "blockMath" || Boolean(node.attrs.displayMode),
+      }),
+      pos,
+      node.nodeSize,
+    ));
+    return false;
+  });
+  const evaluated = evaluateMathTokens(tokens);
+  const value = {
+    entriesByPos: new Map(evaluated.entries.map((entry) => [entry.token.from, entry])),
+  };
+  editorMathEvaluationCache.set(doc, value);
+  return value;
+}
+
+function evaluateEditorMathAt(
+  editor: any,
+  getPos: NodeViewPosition,
+  tex?: string,
+  delimiter?: MathDelimiter,
+  displayMode?: boolean,
+) {
+  if (typeof getPos !== "function") return null;
+  const targetPos = getPos();
+  if (typeof targetPos !== "number") return null;
+  if (tex === undefined) return evaluateEditorMath(editor).entriesByPos.get(targetPos) ?? null;
+
+  const tokens: MarkdownMathToken[] = [];
+  editor.view.state.doc.descendants((node: any, pos: number) => {
+    if (pos > targetPos) return false;
+    if (node.type.name !== "inlineMath" && node.type.name !== "blockMath") return true;
+    const isTarget = pos === targetPos;
+    tokens.push(positionMathToken(
+      mathTokenFromParts({
+        tex: isTarget ? tex : node.attrs.tex || "",
+        delimiter: isTarget ? delimiter : node.attrs.delimiter,
+        raw: isTarget ? "" : node.attrs.raw,
+        displayMode: isTarget
+          ? displayMode
+          : node.type.name === "blockMath" || Boolean(node.attrs.displayMode),
+      }),
+      pos,
+      node.nodeSize,
+    ));
+    return !isTarget;
+  });
+  return evaluateMathTokens(tokens).entries.at(-1) ?? null;
+}
+
+function positionMathToken(token: MarkdownMathToken, pos: number, nodeSize: number): MarkdownMathToken {
+  const contentOffset = token.contentFrom - token.from;
+  const contentLength = token.contentTo - token.contentFrom;
+  return {
+    ...token,
+    from: pos,
+    to: pos + nodeSize,
+    contentFrom: pos + contentOffset,
+    contentTo: pos + contentOffset + contentLength,
+  };
+}
+
 function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosition) {
   const dom = document.createElement("span");
   dom.className = "math-node math-node-inline";
   dom.contentEditable = "false";
 
   let tex = attrs.tex || "";
+  let delimiter = attrs.delimiter || "inline-dollar";
+  let raw = attrs.raw || "";
+  let originalTex = attrs.originalTex ?? tex;
+  let displayMode = Boolean(attrs.displayMode);
   let editing = Boolean(attrs.editing);
   let suggest: LatexSuggestController | null = null;
 
@@ -237,12 +355,21 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     if (typeof getPos !== "function") return;
     const pos = getPos();
     if (typeof pos !== "number") return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { tex, editing, ...next }));
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, {
+      tex,
+      delimiter,
+      raw,
+      originalTex,
+      displayMode,
+      editing,
+      ...next,
+    }));
   };
 
   const exitToDocument = (side: "before" | "after") => {
     editing = false;
-    updateAttrs({ tex, editing: false });
+    raw = tex === originalTex ? raw : "";
+    updateAttrs({ tex, raw, editing: false });
     renderDisplay();
     setInlineSelection(editor, getPos, side);
   };
@@ -254,7 +381,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     dom.className = "math-node math-node-inline";
     const rendered = document.createElement("span");
     rendered.className = "math-render math-render-inline";
-    renderKatex(rendered, tex, false);
+    renderKatex(rendered, tex, displayMode, tex, {
+      delimiter,
+      raw,
+      evaluation: evaluateEditorMathAt(editor, getPos),
+    });
     dom.appendChild(rendered);
   };
 
@@ -279,7 +410,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
 
     const refresh = () => {
       tex = source.textContent || "";
-      renderKatex(body, tex, false, "公式预览");
+      renderKatex(body, tex, displayMode, "公式预览", {
+        delimiter,
+        raw: "",
+        evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode),
+      });
       suggest?.sync();
     };
 
@@ -295,6 +430,9 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       setCaret: (position) => setContentEditableCaret(source, position),
       focus: () => focusEditableAtEnd(source),
       onChange: refresh,
+      getAdditionalSuggestions: () => documentMacroSuggestions(
+        evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode)?.availableMacroNames ?? [],
+      ),
     });
 
     source.addEventListener("input", refresh);
@@ -323,13 +461,19 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     source.addEventListener("blur", () => {
       window.setTimeout(() => suggest?.close(), 120);
       editing = false;
-      updateAttrs({ tex, editing: false });
+      raw = tex === originalTex ? raw : "";
+      updateAttrs({ tex, raw, editing: false });
       renderDisplay();
     });
 
     dom.append(source, preview);
-    renderKatex(body, tex, false, "公式预览");
-    requestAnimationFrame(() => focusEditableAtEnd(source));
+    const evaluation = evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode);
+    renderKatex(body, tex, displayMode, "公式预览", { delimiter, raw: "", evaluation });
+    const diagnostic = evaluation?.diagnostic ?? null;
+    requestAnimationFrame(() => {
+      source.focus();
+      setContentEditableCaret(source, diagnostic?.texOffset ?? tex.length);
+    });
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -341,6 +485,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   });
 
   editing ? renderEditor() : renderDisplay();
+  const refreshFromDocument = ({ transaction }: { transaction: { docChanged?: boolean } }) => {
+    if (!transaction.docChanged || editing) return;
+    window.queueMicrotask(renderDisplay);
+  };
+  editor.on?.("transaction", refreshFromDocument);
 
   return {
     dom,
@@ -348,6 +497,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       if (nextNode.type.name !== "inlineMath") return false;
       const nextEditing = Boolean(nextNode.attrs.editing);
       tex = nextNode.attrs.tex || "";
+      delimiter = nextNode.attrs.delimiter || "inline-dollar";
+      raw = nextNode.attrs.raw || "";
+      originalTex = nextNode.attrs.originalTex ?? tex;
+      displayMode = Boolean(nextNode.attrs.displayMode);
       if (editing && nextEditing && dom.querySelector(".math-inline-source-editor")) return true;
       editing = nextEditing;
       editing ? renderEditor() : renderDisplay();
@@ -365,6 +518,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       updateAttrs({ editing: false });
       renderDisplay();
     },
+    destroy() {
+      suggest?.destroy();
+      editor.off?.("transaction", refreshFromDocument);
+    },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest")),
   };
@@ -376,6 +533,9 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   dom.contentEditable = "false";
 
   let tex = attrs.tex || "";
+  let delimiter = attrs.delimiter || "display-dollar";
+  let raw = attrs.raw || "";
+  let originalTex = attrs.originalTex ?? tex;
   let editing = attrs.editing || !tex;
   let suggest: LatexSuggestController | null = null;
 
@@ -383,19 +543,29 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     if (typeof getPos !== "function") return;
     const pos = getPos();
     if (typeof pos !== "number") return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { tex, editing, ...next }));
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, {
+      tex,
+      delimiter,
+      raw,
+      originalTex,
+      displayMode: true,
+      editing,
+      ...next,
+    }));
   };
 
   const exitToNextParagraph = () => {
     editing = false;
-    updateAttrs({ tex, editing: false });
+    raw = tex === originalTex ? raw : "";
+    updateAttrs({ tex, raw, editing: false });
     if (tex.trim()) renderDisplay();
     setBlockSelectionAfter(editor, getPos);
   };
 
   const exitToPreviousParagraph = () => {
     editing = false;
-    updateAttrs({ tex, editing: false });
+    raw = tex === originalTex ? raw : "";
+    updateAttrs({ tex, raw, editing: false });
     if (tex.trim()) renderDisplay();
     setBlockSelectionBefore(editor, getPos);
   };
@@ -407,7 +577,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     dom.className = "math-node math-node-block";
     const rendered = document.createElement("div");
     rendered.className = "math-render math-render-block";
-    renderKatex(rendered, tex, true);
+    renderKatex(rendered, tex, true, tex, {
+      delimiter,
+      raw,
+      evaluation: evaluateEditorMathAt(editor, getPos),
+    });
     dom.appendChild(rendered);
   };
 
@@ -433,8 +607,12 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     const refresh = () => {
       tex = textarea.value;
       textarea.rows = Math.max(2, tex.split(/\r?\n/).length);
-      renderKatex(body, tex, true, "公式预览");
-      updateAttrs({ tex, editing: true });
+      renderKatex(body, tex, true, "公式预览", {
+        delimiter,
+        raw: "",
+        evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, true),
+      });
+      updateAttrs({ tex, raw: "", editing: true });
       suggest?.sync();
     };
 
@@ -450,6 +628,9 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       setCaret: (position) => textarea.setSelectionRange(position, position),
       focus: () => textarea.focus(),
       onChange: refresh,
+      getAdditionalSuggestions: () => documentMacroSuggestions(
+        evaluateEditorMathAt(editor, getPos, tex, delimiter, true)?.availableMacroNames ?? [],
+      ),
     });
 
     textarea.addEventListener("input", refresh);
@@ -478,13 +659,20 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     textarea.addEventListener("blur", () => {
       window.setTimeout(() => suggest?.close(), 120);
       editing = false;
-      updateAttrs({ tex, editing: false });
+      raw = tex === originalTex ? raw : "";
+      updateAttrs({ tex, raw, editing: false });
       if (tex.trim()) renderDisplay();
     });
 
     dom.append(textarea, preview);
-    renderKatex(body, tex, true, "公式预览");
-    requestAnimationFrame(() => textarea.focus());
+    const evaluation = evaluateEditorMathAt(editor, getPos, tex, delimiter, true);
+    renderKatex(body, tex, true, "公式预览", { delimiter, raw: "", evaluation });
+    const diagnostic = evaluation?.diagnostic ?? null;
+    requestAnimationFrame(() => {
+      textarea.focus();
+      const offset = diagnostic?.texOffset ?? tex.length;
+      textarea.setSelectionRange(offset, offset);
+    });
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -496,6 +684,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   });
 
   editing ? renderEditor() : renderDisplay();
+  const refreshFromDocument = ({ transaction }: { transaction: { docChanged?: boolean } }) => {
+    if (!transaction.docChanged || editing) return;
+    window.queueMicrotask(renderDisplay);
+  };
+  editor.on?.("transaction", refreshFromDocument);
 
   return {
     dom,
@@ -503,6 +696,9 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       if (nextNode.type.name !== "blockMath") return false;
       const nextEditing = Boolean(nextNode.attrs.editing) || !nextNode.attrs.tex;
       tex = nextNode.attrs.tex || "";
+      delimiter = nextNode.attrs.delimiter || "display-dollar";
+      raw = nextNode.attrs.raw || "";
+      originalTex = nextNode.attrs.originalTex ?? tex;
       if (editing && nextEditing && dom.querySelector(".math-block-editor")) return true;
       editing = nextEditing;
       editing ? renderEditor() : renderDisplay();
@@ -519,6 +715,10 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       editing = false;
       updateAttrs({ editing: false });
       renderDisplay();
+    },
+    destroy() {
+      suggest?.destroy();
+      editor.off?.("transaction", refreshFromDocument);
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest")),
@@ -539,25 +739,73 @@ function deleteMathNode(editor: any, getPos: NodeViewPosition) {
   editor.view.focus();
 }
 
-function renderKatex(target: HTMLElement, tex: string, displayMode: boolean, emptyText = tex) {
+function renderKatex(
+  target: HTMLElement,
+  tex: string,
+  displayMode: boolean,
+  emptyText = tex,
+  source: {
+    delimiter?: MathDelimiter;
+    raw?: string;
+    evaluation?: MathEvaluationEntry | null;
+  } = {},
+) {
   target.innerHTML = "";
+  target.classList.remove("math-render-error");
+  target.classList.remove("math-macro-definition");
+  target.removeAttribute("title");
   if (!tex.trim()) {
     target.textContent = emptyText;
     target.classList.add("math-live-preview-empty");
-    return;
+    return null;
   }
   target.classList.remove("math-live-preview-empty");
 
-  try {
-    katex.render(tex, target, {
-      displayMode,
-      throwOnError: false,
-      strict: false,
-    });
-  } catch {
-    target.textContent = tex;
-    target.classList.add("math-render-error");
+  const token = mathTokenFromParts({
+    tex,
+    delimiter: source.delimiter,
+    raw: source.raw,
+    displayMode,
+  });
+  const evaluation = source.evaluation ?? evaluateMathTokens([token]).entries[0];
+  const rendered = evaluation.result;
+  if (rendered.ok) {
+    if (evaluation.definitionOnly) {
+      target.classList.add("math-macro-definition");
+      const label = document.createElement("span");
+      label.className = "math-macro-definition-label";
+      label.textContent = "宏定义";
+      const names = document.createElement("code");
+      names.className = "math-macro-definition-names";
+      names.textContent = evaluation.definedMacroNames.join("、");
+      target.append(label, names);
+      return null;
+    }
+    target.innerHTML = rendered.html;
+    return null;
   }
+  target.classList.add("math-render-error");
+  target.title = rendered.error.message;
+  const label = document.createElement("span");
+  label.className = "math-render-error-label";
+  label.textContent = "公式错误 · 点击编辑";
+  const detail = document.createElement("span");
+  detail.className = "math-render-error-detail";
+  detail.textContent = rendered.error.message;
+  const code = document.createElement("code");
+  code.className = "math-render-error-source";
+  code.textContent = tex;
+  target.append(label, detail, code);
+  return rendered.error;
+}
+
+function documentMacroSuggestions(names: string[]): LatexSuggestion[] {
+  return names.map((name) => ({
+    command: name,
+    label: "当前文档定义",
+    template: name,
+    category: "文档宏",
+  }));
 }
 
 function setInlineSelection(editor: any, getPos: NodeViewPosition, side: "before" | "after") {
