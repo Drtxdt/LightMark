@@ -2236,7 +2236,12 @@ const editor = useEditor({
   onUpdate({ editor }) {
     if (suppressWysiwygUpdate) return;
     getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
-    setPaneContent(props.paneId, editorHtmlToMarkdown(editor.getHTML()), true);
+    const previousMarkdown = getPaneContent(props.paneId);
+    setPaneContent(
+      props.paneId,
+      preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(editor.getHTML()), previousMarkdown),
+      true,
+    );
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
@@ -2931,6 +2936,7 @@ onMounted(() => {
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.addEventListener("lightmark:jump-math", handleJumpMath as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.addEventListener("resize", handleEditorShellScroll);
@@ -2944,6 +2950,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.removeEventListener("lightmark:jump-math", handleJumpMath as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.removeEventListener("resize", handleEditorShellScroll);
@@ -4018,6 +4025,11 @@ function normalizeFootnoteSource(value: string) {
   return value.replace(/\r\n?/g, "\n").trim();
 }
 
+function preserveMarkdownTerminalNewlines(markdown: string, previousMarkdown: string) {
+  const terminalNewlines = previousMarkdown.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? "";
+  return `${markdown.replace(/(?:\r\n|\r|\n)+$/g, "")}${terminalNewlines}`;
+}
+
 function editorHtmlToMarkdown(html: string) {
   const document = new DOMParser().parseFromString(html, "text/html");
   const footnoteSources: string[] = [];
@@ -4459,6 +4471,20 @@ function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string; line
     });
   }
   activeEditor.view.focus();
+}
+
+function handleJumpMath(event: CustomEvent<{ targetId?: string; paneId?: EditorPaneId }>) {
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  const targetId = event.detail?.targetId;
+  const activeEditor = editor.value;
+  if (!targetId || !activeEditor) return;
+  const target = activeEditor.view.dom.querySelector<HTMLElement>(`#${cssEscape(targetId)}`);
+  if (!target) return;
+  target.scrollIntoView({ block: "center", behavior: "smooth" });
+  target.classList.remove("math-equation-flash");
+  requestAnimationFrame(() => target.classList.add("math-equation-flash"));
+  window.setTimeout(() => target.classList.remove("math-equation-flash"), 1400);
 }
 
 function findHeadingByText(text: string) {

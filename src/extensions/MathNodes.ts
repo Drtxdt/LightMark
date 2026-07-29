@@ -15,6 +15,7 @@ import {
   type MathDelimiter,
   type MarkdownMathToken,
 } from "../utils/mathMarkdown";
+import { appStore, recordNavigationLocation } from "../stores/appStore";
 
 type MathAttrs = {
   tex: string;
@@ -260,6 +261,7 @@ type NodeViewPosition = (() => number | undefined) | boolean;
 
 type EditorMathEvaluation = {
   entriesByPos: Map<number, MathEvaluationEntry>;
+  numberingMode: typeof appStore.settings.markdown.mathNumbering;
 };
 
 const editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
@@ -267,7 +269,8 @@ const editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
 function evaluateEditorMath(editor: any): EditorMathEvaluation {
   const doc = editor.view.state.doc as object;
   const cached = editorMathEvaluationCache.get(doc);
-  if (cached) return cached;
+  const numberingMode = appStore.settings.markdown.mathNumbering;
+  if (cached?.numberingMode === numberingMode) return cached;
 
   const tokens: MarkdownMathToken[] = [];
   editor.view.state.doc.descendants((node: any, pos: number) => {
@@ -284,9 +287,10 @@ function evaluateEditorMath(editor: any): EditorMathEvaluation {
     ));
     return false;
   });
-  const evaluated = evaluateMathTokens(tokens);
+  const evaluated = evaluateMathTokens(tokens, { numberingMode });
   const value = {
     entriesByPos: new Map(evaluated.entries.map((entry) => [entry.token.from, entry])),
+    numberingMode,
   };
   editorMathEvaluationCache.set(doc, value);
   return value;
@@ -323,7 +327,9 @@ function evaluateEditorMathAt(
     ));
     return !isTarget;
   });
-  return evaluateMathTokens(tokens).entries.at(-1) ?? null;
+  return evaluateMathTokens(tokens, {
+    numberingMode: appStore.settings.markdown.mathNumbering,
+  }).entries.at(-1) ?? null;
 }
 
 function positionMathToken(token: MarkdownMathToken, pos: number, nodeSize: number): MarkdownMathToken {
@@ -478,6 +484,19 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
 
   dom.addEventListener("mousedown", (event) => {
     if (editing) return;
+    const reference = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a.math-ref-link");
+    if (reference) {
+      event.preventDefault();
+      event.stopPropagation();
+      recordNavigationLocation();
+      window.dispatchEvent(new CustomEvent("lightmark:jump-math", {
+        detail: {
+          targetId: reference.hash.slice(1),
+          paneId: appStore.splitLayout.activePaneId,
+        },
+      }));
+      return;
+    }
     event.preventDefault();
     editing = true;
     updateAttrs({ editing: true });
@@ -490,6 +509,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     window.queueMicrotask(renderDisplay);
   };
   editor.on?.("transaction", refreshFromDocument);
+  const refreshFromMathSettings = () => {
+    if (!editing) renderDisplay();
+  };
+  window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
 
   return {
     dom,
@@ -521,6 +544,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     destroy() {
       suggest?.destroy();
       editor.off?.("transaction", refreshFromDocument);
+      window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest")),
@@ -677,6 +701,19 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
 
   dom.addEventListener("mousedown", (event) => {
     if (editing) return;
+    const reference = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a.math-ref-link");
+    if (reference) {
+      event.preventDefault();
+      event.stopPropagation();
+      recordNavigationLocation();
+      window.dispatchEvent(new CustomEvent("lightmark:jump-math", {
+        detail: {
+          targetId: reference.hash.slice(1),
+          paneId: appStore.splitLayout.activePaneId,
+        },
+      }));
+      return;
+    }
     event.preventDefault();
     editing = true;
     updateAttrs({ editing: true });
@@ -689,6 +726,10 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     window.queueMicrotask(renderDisplay);
   };
   editor.on?.("transaction", refreshFromDocument);
+  const refreshFromMathSettings = () => {
+    if (!editing) renderDisplay();
+  };
+  window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
 
   return {
     dom,
@@ -719,6 +760,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     destroy() {
       suggest?.destroy();
       editor.off?.("transaction", refreshFromDocument);
+      window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest")),
@@ -754,6 +796,8 @@ function renderKatex(
   target.classList.remove("math-render-error");
   target.classList.remove("math-macro-definition");
   target.removeAttribute("title");
+  target.removeAttribute("id");
+  target.removeAttribute("data-equation-labels");
   if (!tex.trim()) {
     target.textContent = emptyText;
     target.classList.add("math-live-preview-empty");
@@ -782,6 +826,18 @@ function renderKatex(
       return null;
     }
     target.innerHTML = rendered.html;
+    if (evaluation.equationTarget) {
+      target.id = evaluation.equationTarget.id;
+      target.classList.add("math-equation-target");
+      target.dataset.equationLabels = evaluation.equationTarget.labels.join(" ");
+      target.setAttribute(
+        "aria-label",
+        `公式 ${evaluation.equationTarget.display}${evaluation.equationTarget.labels.length ? `，标签 ${evaluation.equationTarget.labels.join("、")}` : ""}`,
+      );
+    } else {
+      target.classList.remove("math-equation-target");
+      target.removeAttribute("aria-label");
+    }
     return null;
   }
   target.classList.add("math-render-error");

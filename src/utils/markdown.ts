@@ -24,6 +24,7 @@ import {
   parseInlineMathText,
   parseMarkdownMath,
 } from "./mathMarkdown";
+import type { MathNumberingMode } from "./mathMarkdown";
 
 const md = new MarkdownIt({
   html: true,
@@ -45,14 +46,17 @@ const editorMd = new MarkdownIt({
 });
 installLightMarkMarkdown(editorMd, { preserveLightMarkInternal: true });
 
-export function renderMarkdown(markdown: string) {
+export function renderMarkdown(
+  markdown: string,
+  options: { mathNumbering?: MathNumberingMode } = {},
+) {
   const placeholders: string[] = [];
   const stash = (html: string) => {
     const token = `@@LIGHTMARK_PLACEHOLDER_${placeholders.length}@@`;
     placeholders.push(html);
     return token;
   };
-  const enhanced = enhanceMarkdownForRender(markdown, stash);
+  const enhanced = enhanceMarkdownForRender(markdown, stash, options.mathNumbering);
   const withTables = renderMarkdownTables(enhanced, (source) => md.renderInline(source));
   return restorePlaceholders(md.render(withTables), placeholders);
 }
@@ -266,13 +270,17 @@ function restorePlaceholders(value: string, placeholders: string[]) {
   return next;
 }
 
-function enhanceMarkdownForRender(markdown: string, stash?: (html: string) => string) {
+function enhanceMarkdownForRender(
+  markdown: string,
+  stash?: (html: string) => string,
+  mathNumbering: MathNumberingMode = "none",
+) {
   let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
   next = convertFootnotes(next);
-  next = renderLatexMathForMarkdown(next, stash);
+  next = renderLatexMathForMarkdown(next, stash, mathNumbering);
   next = renderRawHtmlForPreview(next, stash);
   next = convertTaskItems(next);
   next = convertDefinitionLists(next);
@@ -593,14 +601,24 @@ function protectMathForEditor(markdown: string, stash: (html: string) => string)
   return next;
 }
 
-function renderLatexMathForMarkdown(markdown: string, stashRenderedHtml?: (html: string) => string) {
-  const evaluated = evaluateMarkdownMath(markdown);
+function renderLatexMathForMarkdown(
+  markdown: string,
+  stashRenderedHtml?: (html: string) => string,
+  mathNumbering: MathNumberingMode = "none",
+) {
+  const evaluated = evaluateMarkdownMath(markdown, { numberingMode: mathNumbering });
   let next = markdown;
   for (const entry of [...evaluated.entries].reverse()) {
     const { token, result: rendered } = entry;
     const isBlock = token.kind === "display" && token.delimiter !== "inline-double-dollar";
+    const renderedHtml = rendered.ok && entry.equationTarget
+      ? rendered.html.replace(
+          /class="katex-display"/,
+          `id="${entry.equationTarget.id}" class="katex-display math-equation-target"`,
+        )
+      : rendered.ok ? rendered.html : "";
     const html = rendered.ok
-      ? (entry.definitionOnly ? "" : rendered.html)
+      ? (entry.definitionOnly ? "" : renderedHtml)
       : `<${isBlock ? "div" : "span"} class="math-render-error" title="${escapeAttribute(rendered.error.message)}">${escapeHtml(token.raw)}</${isBlock ? "div" : "span"}>`;
     const replacement = stashRenderedHtml ? stashRenderedHtml(html) : html;
     next = `${next.slice(0, token.from)}${replacement}${next.slice(token.to)}`;

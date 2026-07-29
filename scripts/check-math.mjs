@@ -157,6 +157,80 @@ try {
   assert.match(pandocPrepared.latexHeader, /providecommand\{\\pu\}\[1\]\{\\ce\{#1\}\}/);
   assert.deepEqual(pandocPrepared.macroNames, ["\\RR"]);
 
+  const numbered = evaluateMarkdownMath([
+    "$\\ref{later}$",
+    "$$",
+    "x=1\\label{first}",
+    "$$",
+    "$$",
+    "y=2\\tag{A}\\label{later}",
+    "$$",
+    "$$",
+    "z=3\\label{third}",
+    "$$",
+  ].join("\n"), { numberingMode: "all-display" });
+  assert.deepEqual(numbered.equations.map((item) => item.display), ["1", "A", "3"]);
+  assert.equal(numbered.references[0].display, "A", "forward references resolve in the second pass");
+  assert.match(numbered.entries[0].result.html, /math-ref-link/);
+  assert.match(numbered.entries[1].result.html, /tag/);
+  assert.equal(numbered.labels.length, 3);
+
+  const numberingOff = evaluateMarkdownMath("$$\nx=1\\label{x}\n$$");
+  assert.equal(numberingOff.equations.length, 1);
+  assert.equal(numberingOff.equations[0].display, "");
+  assert.match(numberingOff.diagnostics[0].message, /没有编号/);
+
+  const ams = evaluateMarkdownMath([
+    "$$",
+    "x=1",
+    "$$",
+    "\\begin{equation}",
+    "y=2\\label{eq:y}",
+    "\\end{equation}",
+    "\\begin{align*}",
+    "z&=3",
+    "\\end{align*}",
+  ].join("\n"), { numberingMode: "ams-block" });
+  assert.deepEqual(ams.equations.map((item) => item.display), ["", "1", ""]);
+
+  const duplicate = evaluateMarkdownMath([
+    "$$",
+    "x=1\\tag{X}\\label{dup}",
+    "$$",
+    "$$",
+    "y=2\\tag{Y}\\label{dup}",
+    "$$",
+    "$\\ref{missing}$",
+  ].join("\n"));
+  assert.equal(duplicate.labels[1].duplicate, true);
+  assert.match(duplicate.diagnostics.map((item) => item.message).join("\n"), /重复/);
+  assert.match(duplicate.diagnostics.map((item) => item.message).join("\n"), /未找到/);
+
+  const semanticEdges = evaluateMarkdownMath([
+    "$\\label{inline}x$",
+    "$$",
+    "x=1\\tag{A}\\tag{B}\\label{}\\label{one}\\label{two}",
+    "$$",
+    "$\\ref{two}$",
+  ].join("\n"));
+  const semanticMessages = semanticEdges.diagnostics.map((item) => item.message).join("\n");
+  assert.match(semanticMessages, /只能用于块级公式/);
+  assert.match(semanticMessages, /只能包含一个/);
+  assert.match(semanticMessages, /不能为空/);
+  assert.equal(semanticEdges.references[0].display, "A");
+  assert.deepEqual(semanticEdges.equations[0].labels, ["one", "two"]);
+
+  const numberedPandoc = preparePandocMath("$$\nx=1\\label{x}\n$$\n$\\ref{x}$", {
+    numberingMode: "all-display",
+  });
+  assert.match(numberedPandoc.markdown, /\\tag\{1\}/);
+  assert.match(numberedPandoc.markdown, /\\label\{x\}/);
+  assert.match(numberedPandoc.markdown, /\\ref\{x\}/);
+  assert.throws(
+    () => preparePandocMath("$\\ref{missing}$", { numberingMode: "all-display" }),
+    /missing/,
+  );
+
   assert.equal(
     serializeMathToken(
       mathTokenFromParts({ tex: "x", delimiter: "inline-paren", raw: "\\(x\\)" }),

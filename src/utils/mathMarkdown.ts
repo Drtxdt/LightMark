@@ -32,6 +32,36 @@ export type MathDiagnostic = {
   token?: MarkdownMathToken;
 };
 
+export type MathNumberingMode = "none" | "ams-block" | "all-display";
+
+export type MathLabelDefinition = {
+  key: string;
+  from: number;
+  to: number;
+  tokenIndex: number;
+  duplicate: boolean;
+};
+
+export type MathReference = {
+  key: string;
+  from: number;
+  to: number;
+  tokenIndex: number;
+  targetId?: string;
+  display?: string;
+};
+
+export type MathEquationTarget = {
+  id: string;
+  tokenIndex: number;
+  line: number;
+  display: string;
+  labels: string[];
+  tex: string;
+  autoNumber?: number;
+  manualTag?: string;
+};
+
 export type MathRenderResult =
   | { ok: true; html: string }
   | { ok: false; error: MathDiagnostic };
@@ -51,6 +81,10 @@ export type MathEvaluationEntry = {
   definedMacroNames: string[];
   definitionOnly: boolean;
   usesMhchem: boolean;
+  labels: MathLabelDefinition[];
+  references: MathReference[];
+  equationTarget: MathEquationTarget | null;
+  preparedTex: string;
 };
 
 export type MathDocumentEvaluation = {
@@ -58,6 +92,9 @@ export type MathDocumentEvaluation = {
   diagnostics: MathDiagnostic[];
   macroNames: string[];
   usesMhchem: boolean;
+  labels: MathLabelDefinition[];
+  references: MathReference[];
+  equations: MathEquationTarget[];
 };
 
 export type PandocMathPreparation = {
@@ -69,6 +106,15 @@ export type PandocMathPreparation = {
 
 type Range = { from: number; to: number };
 type MathMacroMap = Record<string, unknown>;
+type MathEvaluationOptions = { numberingMode?: MathNumberingMode };
+type MathSemanticCommand = {
+  name: "label" | "tag" | "ref";
+  value: string;
+  from: number;
+  to: number;
+  contentFrom: number;
+  contentTo: number;
+};
 
 const MATH_ENVIRONMENTS = new Set([
   "equation",
@@ -105,9 +151,12 @@ export function parseInlineMathText(source: string) {
   return tokens.sort((left, right) => left.from - right.from);
 }
 
-export function evaluateMarkdownMath(source: string): MathDocumentEvaluation {
+export function evaluateMarkdownMath(
+  source: string,
+  options: MathEvaluationOptions = {},
+): MathDocumentEvaluation {
   const parsed = parseMarkdownMath(source);
-  const evaluated = evaluateMathTokens(parsed.tokens);
+  const evaluated = evaluateMathTokens(parsed.tokens, options);
   return {
     ...evaluated,
     diagnostics: [...parsed.diagnostics, ...evaluated.diagnostics]
@@ -115,33 +164,45 @@ export function evaluateMarkdownMath(source: string): MathDocumentEvaluation {
   };
 }
 
-export function evaluateMathTokens(tokens: MarkdownMathToken[]): MathDocumentEvaluation {
+export function evaluateMathTokens(
+  tokens: MarkdownMathToken[],
+  options: MathEvaluationOptions = {},
+): MathDocumentEvaluation {
+  const ordered = [...tokens].sort((left, right) => left.from - right.from);
+  const numberingMode = options.numberingMode ?? "none";
   let macros: MathMacroMap = {};
-  const entries: MathEvaluationEntry[] = [];
+  const preliminary: Array<{
+    token: MarkdownMathToken;
+    commands: MathSemanticCommand[];
+    macrosBefore: MathMacroMap;
+    result: MathRenderResult;
+    definitions: MathMacroDefinition[];
+    definitionOnly: boolean;
+    usesMhchem: boolean;
+  }> = [];
   const diagnostics: MathDiagnostic[] = [];
   let usesMhchem = false;
 
-  for (const token of [...tokens].sort((left, right) => left.from - right.from)) {
-    const availableMacroNames = sortedMacroNames(macros);
+  for (const token of ordered) {
+    const commands = extractMathSemanticCommands(token.tex);
     const definitions = extractMathMacroDefinitions(token.tex);
+    const macrosBefore = { ...macros };
     const workingMacros = { ...macros };
-    const result = renderMathWithMacros(token, workingMacros, true);
-    const diagnostic = result.ok ? null : result.error;
+    const validationTex = prepareSemanticTex(token.tex, commands, () => "\\text{??}", false);
+    const result = renderMathWithMacros({ ...token, tex: validationTex }, workingMacros, true);
     const tokenUsesMhchem = usesMhchemCommands(token.tex);
     usesMhchem ||= tokenUsesMhchem;
 
     if (result.ok) macros = workingMacros;
-    else diagnostics.push(result.error);
-
     const definedMacroNames = result.ok
       ? unique(definitions.map((definition) => definition.name))
       : [];
-    entries.push({
+    preliminary.push({
       token,
+      commands,
+      macrosBefore,
       result,
-      diagnostic,
-      availableMacroNames,
-      definedMacroNames,
+      definitions,
       definitionOnly: result.ok
         && definedMacroNames.length > 0
         && !hasVisibleKatexOutput(result.html),
@@ -149,11 +210,169 @@ export function evaluateMathTokens(tokens: MarkdownMathToken[]): MathDocumentEva
     });
   }
 
+  const labels: MathLabelDefinition[] = [];
+  const references: MathReference[] = [];
+  const equations: MathEquationTarget[] = [];
+  const labelTargets = new Map<string, MathEquationTarget>();
+  const seenLabels = new Set<string>();
+  let equationCounter = 0;
+
+  preliminary.forEach((item, tokenIndex) => {
+    const labelCommands = item.commands.filter((command) => command.name === "label");
+    const tagCommands = item.commands.filter((command) => command.name === "tag");
+    const referenceCommands = item.commands.filter((command) => command.name === "ref");
+    const isDisplay = item.token.displayMode;
+
+    if (!isDisplay) {
+      for (const command of [...labelCommands, ...tagCommands]) {
+        diagnostics.push(semanticDiagnostic(item.token, command, `\\${command.name} 只能用于块级公式`));
+      }
+    }
+    if (tagCommands.length > 1) {
+      for (const command of tagCommands.slice(1)) {
+        diagnostics.push(semanticDiagnostic(item.token, command, "一个公式只能包含一个 \\tag"));
+      }
+    }
+
+    const manualTag = isDisplay && tagCommands[0]?.value.trim()
+      ? tagCommands[0].value.trim()
+      : undefined;
+    const eligible = isDisplay
+      && !item.definitionOnly
+      && isAutoNumberEligible(item.token, numberingMode);
+    const autoNumber = eligible ? ++equationCounter : undefined;
+    const display = manualTag ?? (autoNumber === undefined ? "" : String(autoNumber));
+    const target = isDisplay && !item.definitionOnly
+      ? {
+          id: `lm-equation-${tokenIndex + 1}`,
+          tokenIndex,
+          line: item.token.line,
+          display,
+          labels: [] as string[],
+          tex: item.token.tex,
+          autoNumber,
+          manualTag,
+        }
+      : null;
+    if (target) equations.push(target);
+
+    for (const command of labelCommands) {
+      const key = command.value.trim();
+      if (!key) {
+        diagnostics.push(semanticDiagnostic(item.token, command, "公式标签不能为空"));
+        continue;
+      }
+      const absolute = semanticRange(item.token, command);
+      const duplicate = seenLabels.has(key);
+      seenLabels.add(key);
+      const definition: MathLabelDefinition = {
+        key,
+        ...absolute,
+        tokenIndex,
+        duplicate,
+      };
+      labels.push(definition);
+      if (!isDisplay) continue;
+      if (!target || !target.display) {
+        diagnostics.push(semanticDiagnostic(item.token, command, `标签 “${key}” 所在公式没有编号`));
+      }
+      if (duplicate) {
+        diagnostics.push(semanticDiagnostic(item.token, command, `公式标签 “${key}” 重复，引用将跳转到首次定义`));
+        continue;
+      }
+      if (target) {
+        target.labels.push(key);
+        labelTargets.set(key, target);
+      }
+    }
+
+    for (const command of referenceCommands) {
+      const key = command.value.trim();
+      const absolute = semanticRange(item.token, command);
+      references.push({ key, ...absolute, tokenIndex });
+      if (!key) diagnostics.push(semanticDiagnostic(item.token, command, "公式引用不能为空"));
+    }
+  });
+
+  const referencesByToken = new Map<number, MathReference[]>();
+  for (const reference of references) {
+    const target = labelTargets.get(reference.key);
+    if (target) {
+      reference.targetId = target.id;
+      reference.display = target.display || undefined;
+      if (!target.display) {
+        const token = preliminary[reference.tokenIndex].token;
+        const command = preliminary[reference.tokenIndex].commands.find(
+          (item) => item.name === "ref"
+            && token.contentFrom + item.from === reference.from,
+        );
+        if (command) diagnostics.push(semanticDiagnostic(
+          token,
+          command,
+          `公式标签 “${reference.key}” 所在公式没有编号`,
+        ));
+      }
+    } else if (reference.key) {
+      const token = preliminary[reference.tokenIndex].token;
+      const command = preliminary[reference.tokenIndex].commands.find(
+        (item) => item.name === "ref"
+          && token.contentFrom + item.from === reference.from,
+      );
+      if (command) diagnostics.push(semanticDiagnostic(token, command, `未找到公式标签 “${reference.key}”`));
+    }
+    const list = referencesByToken.get(reference.tokenIndex) ?? [];
+    list.push(reference);
+    referencesByToken.set(reference.tokenIndex, list);
+  }
+
+  const entries: MathEvaluationEntry[] = preliminary.map((item, tokenIndex) => {
+    const target = equations.find((equation) => equation.tokenIndex === tokenIndex) ?? null;
+    const tokenReferences = referencesByToken.get(tokenIndex) ?? [];
+    const preparedTex = prepareSemanticTex(
+      item.token.tex,
+      item.commands,
+      (command) => {
+        const reference = tokenReferences.find((candidate) =>
+          candidate.from === item.token.contentFrom + command.from
+        );
+        if (!reference?.targetId || !reference.display) return "\\text{??}";
+        return `\\href{#${reference.targetId}}{${reference.display}}`;
+      },
+      Boolean(target),
+      target?.display,
+    );
+    const result = renderMathWithMacros(
+      { ...item.token, tex: preparedTex },
+      { ...item.macrosBefore },
+      true,
+    );
+    if (!result.ok) diagnostics.push(result.error);
+    const definedMacroNames = item.result.ok
+      ? unique(item.definitions.map((definition) => definition.name))
+      : [];
+    return {
+      token: item.token,
+      result,
+      diagnostic: result.ok ? null : result.error,
+      availableMacroNames: sortedMacroNames(item.macrosBefore),
+      definedMacroNames,
+      definitionOnly: item.definitionOnly,
+      usesMhchem: item.usesMhchem,
+      labels: labels.filter((label) => label.tokenIndex === tokenIndex),
+      references: tokenReferences,
+      equationTarget: target,
+      preparedTex,
+    };
+  });
+
   return {
     entries,
-    diagnostics,
+    diagnostics: diagnostics.sort((left, right) => left.from - right.from),
     macroNames: sortedMacroNames(macros),
     usesMhchem,
+    labels,
+    references,
+    equations,
   };
 }
 
@@ -211,17 +430,21 @@ function renderMathWithMacros(
     };
   }
   try {
+    const html = katex.renderToString(token.tex, {
+      displayMode: token.displayMode,
+      throwOnError: true,
+      strict: false,
+      trust: (context) =>
+        context.command === "\\href"
+        && typeof context.url === "string"
+        && context.url.startsWith("#lm-equation-"),
+      maxExpand: 1000,
+      globalGroup,
+      macros: macros as katex.KatexOptions["macros"],
+    });
     return {
       ok: true,
-      html: katex.renderToString(token.tex, {
-        displayMode: token.displayMode,
-        throwOnError: true,
-        strict: false,
-        trust: false,
-        maxExpand: 1000,
-        globalGroup,
-        macros: macros as katex.KatexOptions["macros"],
-      }),
+      html: html.replace(/<a href="(#lm-equation-[^"]+)"/g, '<a class="math-ref-link" href="$1"'),
     };
   } catch (error) {
     const texOffset = mathErrorOffset(error);
@@ -269,16 +492,32 @@ export function extractMathMacroDefinitions(tex: string): MathMacroDefinition[] 
   return definitions.sort((left, right) => left.from - right.from);
 }
 
-export function preparePandocMath(markdown: string): PandocMathPreparation {
-  const evaluation = evaluateMarkdownMath(markdown);
+export function preparePandocMath(
+  markdown: string,
+  options: MathEvaluationOptions = {},
+): PandocMathPreparation {
+  const evaluation = evaluateMarkdownMath(markdown, options);
+  const unresolved = evaluation.references.filter(
+    (reference) => !reference.targetId || !reference.display,
+  );
+  if (unresolved.length > 0) {
+    throw new Error(`公式引用无法解析：${unique(unresolved.map((item) => item.key || "(空标签)")).join("、")}`);
+  }
   let next = markdown;
   for (const entry of [...evaluation.entries].reverse()) {
-    if (!entry.result.ok || entry.definedMacroNames.length === 0) continue;
     const token = entry.token;
     const relativeContentFrom = token.contentFrom - token.from;
-    const raw = token.delimiter === "environment"
-      ? injectEnvironmentGlobalDefinitions(token.raw)
-      : `${token.raw.slice(0, relativeContentFrom)}\\globaldefs=1 ${token.raw.slice(relativeContentFrom)}`;
+    let tex = token.tex;
+    if (entry.equationTarget && !entry.equationTarget.manualTag) {
+      tex = `${tex}\\tag{${entry.equationTarget.display}}`;
+    }
+    if (entry.definedMacroNames.length > 0) {
+      tex = token.delimiter === "environment"
+        ? injectEnvironmentGlobalDefinitions(tex)
+        : `\\globaldefs=1 ${tex}`;
+    }
+    if (tex === token.tex) continue;
+    const raw = `${token.raw.slice(0, relativeContentFrom)}${tex}${token.raw.slice(relativeContentFrom + token.tex.length)}`;
     next = `${next.slice(0, token.from)}${raw}${next.slice(token.to)}`;
   }
   return {
@@ -293,6 +532,88 @@ export function preparePandocMath(markdown: string): PandocMathPreparation {
       : "",
     usesMhchem: evaluation.usesMhchem,
     macroNames: evaluation.macroNames,
+  };
+}
+
+export function extractMathSemanticCommands(tex: string): MathSemanticCommand[] {
+  const commands: MathSemanticCommand[] = [];
+  for (let index = 0; index < tex.length; index += 1) {
+    if (tex[index] !== "\\" || isEscaped(tex, index)) continue;
+    const match = tex.slice(index).match(/^\\(label|tag|ref)\s*\{/);
+    if (!match) continue;
+    const open = index + match[0].lastIndexOf("{");
+    let depth = 1;
+    let close = open + 1;
+    for (; close < tex.length; close += 1) {
+      if (isEscaped(tex, close)) continue;
+      if (tex[close] === "{") depth += 1;
+      else if (tex[close] === "}") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    if (depth !== 0) continue;
+    commands.push({
+      name: match[1] as MathSemanticCommand["name"],
+      value: tex.slice(open + 1, close),
+      from: index,
+      to: close + 1,
+      contentFrom: open + 1,
+      contentTo: close,
+    });
+    index = close;
+  }
+  return commands;
+}
+
+function prepareSemanticTex(
+  tex: string,
+  commands: MathSemanticCommand[],
+  renderReference: (command: MathSemanticCommand) => string,
+  includeTag: boolean,
+  display?: string,
+) {
+  let next = "";
+  let cursor = 0;
+  for (const command of commands) {
+    next += tex.slice(cursor, command.from);
+    if (command.name === "ref") next += renderReference(command);
+    cursor = command.to;
+  }
+  next += tex.slice(cursor);
+  if (includeTag && display) next += `\\tag{${display}}`;
+  return next;
+}
+
+function isAutoNumberEligible(token: MarkdownMathToken, mode: MathNumberingMode) {
+  if (mode === "none") return false;
+  if (mode === "all-display") return token.displayMode;
+  if (token.delimiter !== "environment") return false;
+  const environment = token.tex.match(/^\s*\\begin\{([^}]+)\}/)?.[1] ?? "";
+  return environment === "equation"
+    || environment === "align"
+    || environment === "gather"
+    || environment === "multline";
+}
+
+function semanticRange(token: MarkdownMathToken, command: MathSemanticCommand) {
+  return {
+    from: token.contentFrom + command.from,
+    to: token.contentFrom + command.to,
+  };
+}
+
+function semanticDiagnostic(
+  token: MarkdownMathToken,
+  command: MathSemanticCommand,
+  message: string,
+): MathDiagnostic {
+  return {
+    ...semanticRange(token, command),
+    message,
+    severity: "error",
+    texOffset: command.from,
+    token,
   };
 }
 

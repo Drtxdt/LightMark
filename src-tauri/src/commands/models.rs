@@ -157,6 +157,24 @@ mod session_tests {
         assert!(session.workspace_path.is_none());
         assert!(session.split_layout.is_none());
     }
+
+    #[test]
+    fn math_numbering_defaults_and_roundtrips() {
+        let legacy: AppConfig = serde_json::from_value(json!({
+            "recentFiles": [],
+            "settings": { "markdown": {} }
+        }))
+        .expect("legacy settings should deserialize");
+        assert_eq!(legacy.settings.markdown.math_numbering, "none");
+
+        let configured: AppConfig = serde_json::from_value(json!({
+            "recentFiles": [],
+            "settings": { "markdown": { "mathNumbering": "all-display" } }
+        }))
+        .expect("numbering settings should deserialize");
+        let serialized = serde_json::to_value(configured).expect("settings should serialize");
+        assert_eq!(serialized["settings"]["markdown"]["mathNumbering"], "all-display");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +249,8 @@ pub struct MarkdownSettings {
     pub block_html: bool,
     #[serde(default = "default_true")]
     pub math: bool,
+    #[serde(default = "default_math_numbering")]
+    pub math_numbering: String,
     #[serde(default = "default_true")]
     pub mermaid: bool,
     #[serde(default = "default_true")]
@@ -540,6 +560,7 @@ impl Default for MarkdownSettings {
             inline_html: true,
             block_html: true,
             math: true,
+            math_numbering: default_math_numbering(),
             mermaid: true,
             footnotes: true,
             toc: true,
@@ -638,6 +659,10 @@ fn default_spellcheck_language() -> String {
 
 fn default_editor_mode() -> String {
     "wysiwyg".to_string()
+}
+
+fn default_math_numbering() -> String {
+    "none".to_string()
 }
 
 fn default_image_insert_behavior() -> String {

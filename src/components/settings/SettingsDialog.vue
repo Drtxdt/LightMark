@@ -229,6 +229,17 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 <input v-model="localSettings.editor.showWordCount" type="checkbox" @change="persist" />
               </label>
             </div>
+            <div class="settings-group">
+              <h4>数学公式</h4>
+              <label class="settings-row">
+                <span><b>块级公式自动编号</b><small>默认关闭；手写 \tag 始终优先，AMS 模式按公式块而非 align 行编号。</small></span>
+                <select v-model="localSettings.markdown.mathNumbering" class="select" @change="persist">
+                  <option value="none">不自动编号</option>
+                  <option value="ams-block">AMS 公式块</option>
+                  <option value="all-display">所有块级公式</option>
+                </select>
+              </label>
+            </div>
           </div>
 
           <div v-else-if="activeSection === 'image'" class="settings-stack">

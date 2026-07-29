@@ -160,6 +160,7 @@ export interface MarkdownSettings {
   inlineHtml: boolean;
   blockHtml: boolean;
   math: boolean;
+  mathNumbering: "none" | "ams-block" | "all-display";
   mermaid: boolean;
   footnotes: boolean;
   toc: boolean;

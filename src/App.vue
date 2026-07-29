@@ -7,6 +7,7 @@ import AppLayout from "./components/layout/AppLayout.vue";
 import CommandPalette from "./components/command/CommandPalette.vue";
 import GoToLinePalette from "./components/command/GoToLinePalette.vue";
 import HeadingJumpPalette from "./components/command/HeadingJumpPalette.vue";
+import FormulaJumpPalette from "./components/command/FormulaJumpPalette.vue";
 import QuickOpenPalette from "./components/command/QuickOpenPalette.vue";
 import AppDialog from "./components/dialog/AppDialog.vue";
 import SettingsDialog from "./components/settings/SettingsDialog.vue";
@@ -247,6 +248,7 @@ function handleGlobalImageDrop(event: DragEvent) {
   <CommandPalette v-if="appStore.commandPaletteOpen" />
   <QuickOpenPalette v-if="appStore.quickOpenOpen" />
   <HeadingJumpPalette v-if="appStore.headingJumpOpen" />
+  <FormulaJumpPalette v-if="appStore.formulaJumpOpen" />
   <GoToLinePalette v-if="appStore.goToLineOpen" />
   <SettingsDialog v-if="appStore.settingsOpen" />
   <WordCountPanel v-if="appStore.wordCountOpen" />

@@ -20,6 +20,11 @@ assert.match(wysiwyg, /wysiwygFormatHistory\.undo\.push/);
 assert.match(wysiwyg, /before:\s*event\.detail\.source/);
 assert.match(wysiwyg, /setMeta\("addToHistory", false\)/);
 assert.match(wysiwyg, /const markdown = paneContent\.value;/);
+assert.match(
+  wysiwyg,
+  /preserveMarkdownTerminalNewlines\(editorHtmlToMarkdown\(editor\.getHTML\(\)\), previousMarkdown\)/,
+  "WYSIWYG updates must preserve the source document's terminal newlines",
+);
 assert.doesNotMatch(
   wysiwyg.match(/function handleModeCursorCapture[\s\S]*?\n}/)?.[0] ?? "",
   /setPaneContent/,

@@ -877,6 +877,15 @@ sub {
   overflow-x: auto;
 }
 
+.math-render-block > .katex-display,
+.math-render-block > .katex-display > .katex {
+  width: 100%;
+}
+
+.math-render-block > .katex-display > .katex {
+  min-width: max-content;
+}
+
 .math-node-inline {
   display: inline;
   border-radius: 4px;
@@ -1002,6 +1011,114 @@ sub {
 .math-macro-definition-names {
   color: var(--lm-accent);
   font-size: 0.78rem;
+}
+
+.math-ref-link {
+  color: var(--lm-accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--lm-accent) 48%, transparent);
+  text-underline-offset: 0.18em;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.math-ref-link:hover {
+  color: var(--lm-accent);
+  text-decoration-color: currentColor;
+}
+
+.math-ref-link:focus-visible {
+  outline: 2px solid var(--lm-focus);
+  outline-offset: 3px;
+}
+
+.math-equation-target {
+  scroll-margin-block: 5rem;
+  border-radius: var(--lm-radius-sm);
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.math-equation-flash {
+  background: color-mix(in srgb, var(--lm-accent) 13%, transparent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--lm-accent) 9%, transparent);
+}
+
+.cm-math-ref {
+  color: var(--lm-cm-accent-dark);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  cursor: text;
+}
+
+.formula-jump-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.8rem;
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 0;
+  border-radius: var(--lm-radius-sm);
+  background: transparent;
+  color: var(--lm-ink);
+  text-align: left;
+}
+
+.formula-jump-item:hover,
+.formula-jump-item.active {
+  background: var(--lm-surface-soft);
+}
+
+.formula-jump-number {
+  min-width: 3.4rem;
+  color: var(--lm-accent);
+  font-family: var(--lm-editor-code-font-family);
+  font-size: 0.74rem;
+  text-align: center;
+}
+
+.formula-jump-copy {
+  min-width: 0;
+}
+
+.formula-jump-copy b,
+.formula-jump-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.formula-jump-copy b {
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.formula-jump-copy small,
+.formula-jump-line {
+  color: var(--lm-ink-muted);
+  font-size: 0.74rem;
+}
+
+.formula-jump-copy small {
+  margin-top: 0.18rem;
+  font-family: var(--lm-editor-code-font-family);
+}
+
+.formula-jump-copy .formula-jump-error {
+  color: #9b4c38;
+  font-family: var(--lm-ui-font-family);
+}
+
+.dark .formula-jump-copy .formula-jump-error {
+  color: #d58a72;
+}
+
+.formula-jump-line {
+  padding: 0.18rem 0.38rem;
+  border: 1px solid var(--lm-border);
+  border-radius: 999px;
 }
 
 .math-node-block-editing {

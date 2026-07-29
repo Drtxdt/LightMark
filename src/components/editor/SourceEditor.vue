@@ -14,6 +14,7 @@ import {
   getPaneEditorMode,
   getPanePendingModeCursor,
   getPaneTab,
+  recordNavigationLocation,
   setPaneContent,
   setPanePendingModeCursor,
   updatePanePosition,
@@ -274,6 +275,20 @@ function extensions() {
         return true;
       },
       mousedown(event, currentView) {
+        const referenceTarget = event.target instanceof HTMLElement
+          ? event.target.closest<HTMLElement>(".cm-math-ref")
+          : null;
+        if (referenceTarget && (event.ctrlKey || event.metaKey)) {
+          const line = Number.parseInt(referenceTarget.dataset.mathTargetLine || "", 10);
+          if (Number.isFinite(line)) {
+            event.preventDefault();
+            recordNavigationLocation();
+            handleJumpLine(new CustomEvent("lightmark:jump-line", {
+              detail: { line, paneId: props.paneId },
+            }));
+            return true;
+          }
+        }
         const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>(".cm-math-error") : null;
         const offset = Number.parseInt(target?.dataset.mathErrorOffset || "", 10);
         if (!target || !Number.isFinite(offset)) return false;
@@ -310,8 +325,10 @@ function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
     mathDiagnosticTimer = null;
     if (currentView !== view || paneDocumentMode.value !== "normal") return;
     const source = currentView.state.doc.toString();
-    const diagnostics = evaluateMarkdownMath(source).diagnostics;
-    const ranges = diagnostics
+    const evaluation = evaluateMarkdownMath(source, {
+      numberingMode: appStore.settings.markdown.mathNumbering,
+    });
+    const ranges = evaluation.diagnostics
       .map((diagnostic) => {
         const from = Math.max(0, Math.min(diagnostic.from, currentView.state.doc.length));
         const to = Math.max(from + 1, Math.min(diagnostic.to, currentView.state.doc.length));
@@ -326,6 +343,19 @@ function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
         }).range(from, to);
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
+    for (const reference of evaluation.references) {
+      if (!reference.targetId) continue;
+      const target = evaluation.equations.find((equation) => equation.id === reference.targetId);
+      if (!target) continue;
+      ranges.push(Decoration.mark({
+        class: "cm-math-ref",
+        attributes: {
+          title: `Ctrl+点击跳转到公式 ${target.display}`,
+          "aria-label": `公式引用 ${reference.key}，Ctrl+点击跳转`,
+          "data-math-target-line": String(target.line),
+        },
+      }).range(reference.from, reference.to));
+    }
     currentView.dispatch({
       effects: setMathDiagnosticDecorations.of(Decoration.set(ranges, true)),
     });
@@ -483,6 +513,7 @@ onMounted(() => {
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
+  window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
 });
 
 watch(
@@ -509,6 +540,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
+  window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   view?.destroy();
   view = null;
 });
@@ -642,6 +674,10 @@ function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: Ed
 function handleJumpHeading(event: CustomEvent<{ line?: number; paneId?: EditorPaneId }>) {
   if (typeof event.detail?.line !== "number") return;
   handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail }));
+}
+
+function handleMathSettingsChanged() {
+  if (view) scheduleMathDiagnostics(view, 0);
 }
 
 function updateWikiCompletion(currentView: EditorView) {

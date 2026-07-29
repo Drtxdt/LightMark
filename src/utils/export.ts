@@ -15,6 +15,7 @@ import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
 import { resolveMarkdownImageSource } from "./imageAssets";
 import { preparePandocMath } from "./mathMarkdown";
+import type { MathNumberingMode } from "./mathMarkdown";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -60,6 +61,7 @@ export async function runDocumentExport(target: ExportTarget) {
       currentPath: appStore.currentFilePath,
       markdown: appStore.currentContent,
       settings: appStore.settings.export,
+      mathNumbering: appStore.settings.markdown.mathNumbering,
     });
     completeExportStatus(result.path);
     appStore.statusMessage = `已导出：${result.path}`;
@@ -75,11 +77,12 @@ export async function exportCurrentDocument(input: {
   currentPath: string;
   markdown: string;
   settings: ExportSettings;
+  mathNumbering?: MathNumberingMode;
 }) {
   if (!input.currentPath) throw new Error("请先打开 Markdown 文件再导出。");
 
   const theme = exportTheme(input.settings);
-  const body = await renderExportBody(input.markdown, theme);
+  const body = await renderExportBody(input.markdown, theme, input.mathNumbering);
   const extraStyles = await getExportExtraStyles();
   const styledHtml = await inlineExportResources(buildExportHtml(currentFileName.value, body, {
     includeStyles: shouldIncludeExportStyles(input.target, input.settings),
@@ -92,7 +95,7 @@ export async function exportCurrentDocument(input: {
   );
   const raster = input.target === "png" ? await measureExportHtml(styledHtml) : null;
   const pandocMath = input.target === "pdfPandoc" || input.target === "latex"
-    ? preparePandocMath(input.markdown)
+    ? preparePandocMath(input.markdown, { numberingMode: input.mathNumbering })
     : null;
 
   const request: ExportRequest = {
@@ -124,8 +127,15 @@ function shouldIncludeExportStyles(target: ExportTargetId, settings: ExportSetti
   return true;
 }
 
-async function renderExportBody(markdown: string, theme: "light" | "dark") {
-  const withMermaid = await renderMermaidForExport(renderMarkdown(markdown), theme);
+async function renderExportBody(
+  markdown: string,
+  theme: "light" | "dark",
+  mathNumbering: MathNumberingMode = "none",
+) {
+  const withMermaid = await renderMermaidForExport(
+    renderMarkdown(markdown, { mathNumbering }),
+    theme,
+  );
   return normalizeKatexForExport(withMermaid);
 }
 
@@ -204,6 +214,23 @@ const exportCssFixups = `
   overflow-x: auto;
   overflow-y: hidden;
   break-inside: avoid;
+}
+.markdown-preview .katex-display-export > .katex {
+  width: 100%;
+  min-width: max-content;
+}
+.markdown-preview .math-equation-target {
+  scroll-margin-block: 4rem;
+}
+.markdown-preview .math-ref-link {
+  color: var(--lm-accent, #9a6a35);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+.markdown-preview .math-ref-link:focus-visible {
+  outline: 2px solid var(--lm-accent, #9a6a35);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 `;
 

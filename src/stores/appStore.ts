@@ -80,6 +80,9 @@ export const appStore = reactive({
   headingJumpOpen: false,
   headingJumpQuery: "",
   headingJumpActiveIndex: 0,
+  formulaJumpOpen: false,
+  formulaJumpQuery: "",
+  formulaJumpActiveIndex: 0,
   goToLineOpen: false,
   navigationBackStack: [] as NavigationLocation[],
   navigationForwardStack: [] as NavigationLocation[],
@@ -581,11 +584,27 @@ export function closeCommandPalette() {
   appStore.commandPaletteOpen = false;
 }
 
-function closeTransientPalettes(except?: "quickOpen" | "headingJump" | "goToLine" | "commandPalette") {
+export function openFormulaJump() {
+  if (appStore.documentMode === "large") {
+    appStore.statusMessage = "大文件模式暂不支持公式索引与导航";
+    return;
+  }
+  closeTransientPalettes();
+  appStore.formulaJumpQuery = "";
+  appStore.formulaJumpActiveIndex = 0;
+  appStore.formulaJumpOpen = true;
+}
+
+export function closeFormulaJump() {
+  appStore.formulaJumpOpen = false;
+}
+
+function closeTransientPalettes(except?: "quickOpen" | "headingJump" | "goToLine" | "commandPalette" | "formulaJump") {
   if (except !== "quickOpen") appStore.quickOpenOpen = false;
   if (except !== "headingJump") appStore.headingJumpOpen = false;
   if (except !== "goToLine") appStore.goToLineOpen = false;
   if (except !== "commandPalette") appStore.commandPaletteOpen = false;
+  if (except !== "formulaJump") appStore.formulaJumpOpen = false;
   window.dispatchEvent(new CustomEvent("lightmark:close-transient-editor-ui"));
 }
 
@@ -1287,10 +1306,14 @@ function normalizeTheme(theme: ThemeMode | undefined) {
 }
 
 export async function updateSettings(settings: AppSettings) {
+  const previousMathNumbering = appStore.settings.markdown.mathNumbering;
   appStore.settings = normalizeSettings({ recentFiles: appStore.recentFiles, settings });
   appStore.theme = appStore.settings.appearance.theme;
   applyTheme();
   await persistConfig();
+  if (previousMathNumbering !== appStore.settings.markdown.mathNumbering) {
+    window.dispatchEvent(new CustomEvent("lightmark:math-settings-changed"));
+  }
 }
 
 export async function resetSettings() {
@@ -1361,6 +1384,7 @@ export function defaultSettings(): AppSettings {
       inlineHtml: true,
       blockHtml: true,
       math: true,
+      mathNumbering: "none",
       mermaid: true,
       footnotes: true,
       toc: true,
@@ -1445,7 +1469,14 @@ function normalizeSettings(config: AppConfig) {
       ),
     },
     editor: { ...defaults.editor, ...source.editor },
-    markdown: { ...defaults.markdown, ...source.markdown },
+    markdown: {
+      ...defaults.markdown,
+      ...source.markdown,
+      mathNumbering:
+        source.markdown?.mathNumbering === "ams-block" || source.markdown?.mathNumbering === "all-display"
+          ? source.markdown.mathNumbering
+          : "none",
+    },
     image: { ...defaults.image, ...source.image },
     appearance: {
       ...defaults.appearance,
