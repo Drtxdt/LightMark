@@ -276,6 +276,7 @@ try {
   assert.match(mathNodeSource, /availableMacroNames/);
   assert.match(mathNodeSource, /installEditingTools/);
   assert.match(mathNodeSource, /math-tools-block-editing/);
+  assert.match(mathNodeSource, /math-tools-inline-editing/);
   assert.match(mathNodeSource, /--math-block-editor-bottom/);
   assert.match(suggestSource, /getAdditionalSuggestions/);
   assert.match(suggestSource, /\\\\ce/);

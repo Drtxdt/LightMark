@@ -396,10 +396,6 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
-    appendMathTools(dom, rendered, { tex, delimiter, raw, displayMode }, () => {
-      editorMathEvaluationCache.delete(editor.view.state.doc);
-      renderDisplay();
-    });
   };
 
   const renderEditor = () => {
@@ -421,6 +417,20 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     body.className = "math-live-preview-body";
     preview.append(label, body);
 
+    const installEditingTools = () => {
+      dom.querySelector(":scope > .math-tools-inline-editing")?.remove();
+      appendMathTools(dom, body, { tex, delimiter, raw: "", displayMode }, () => {
+        editorMathEvaluationCache.delete(editor.view.state.doc);
+        window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
+        renderKatex(body, tex, displayMode, "公式预览", {
+          delimiter,
+          raw: "",
+          evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode),
+        });
+        installEditingTools();
+      }, "math-tools-inline-editing");
+    };
+
     const refresh = () => {
       tex = source.textContent || "";
       renderKatex(body, tex, displayMode, "公式预览", {
@@ -428,6 +438,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
         raw: "",
         evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode),
       });
+      installEditingTools();
       suggest?.sync();
     };
 
@@ -473,15 +484,19 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     });
     source.addEventListener("blur", () => {
       window.setTimeout(() => suggest?.close(), 120);
-      editing = false;
-      raw = tex === originalTex ? raw : "";
-      updateAttrs({ tex, raw, editing: false });
-      renderDisplay();
+      window.setTimeout(() => {
+        if (!source.isConnected || document.activeElement === source || dom.contains(document.activeElement)) return;
+        editing = false;
+        raw = tex === originalTex ? raw : "";
+        updateAttrs({ tex, raw, editing: false });
+        renderDisplay();
+      }, 0);
     });
 
     dom.append(source, preview);
     const evaluation = evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode);
     renderKatex(body, tex, displayMode, "公式预览", { delimiter, raw: "", evaluation });
+    installEditingTools();
     const diagnostic = evaluation?.diagnostic ?? null;
     requestAnimationFrame(() => {
       source.focus();

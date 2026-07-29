@@ -915,9 +915,11 @@ sub {
 }
 
 .math-node-inline-editing {
-  display: inline-block;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
   position: relative;
-  vertical-align: baseline;
+  vertical-align: bottom;
 }
 
 .math-node-block-editing {
@@ -1034,6 +1036,18 @@ sub {
   order: -1;
   align-self: flex-end;
   margin-bottom: 0.35rem;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.math-node.math-node-inline-editing > .math-tools.math-tools-inline-editing,
+.math-node.math-node-inline-editing:hover > .math-tools.math-tools-inline-editing,
+.math-node.math-node-inline-editing:focus-within > .math-tools.math-tools-inline-editing {
+  position: static;
+  order: -1;
+  align-self: flex-end;
+  margin-bottom: 0.25rem;
   opacity: 1;
   pointer-events: auto;
   transform: none;
