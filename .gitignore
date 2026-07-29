@@ -39,6 +39,7 @@ coverage/
 # Tauri / Rust
 /target/
 /src-tauri/target/
+/src-tauri/binaries/
 **/target/
 
 # Tauri bundles and installers

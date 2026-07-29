@@ -37,6 +37,7 @@ LightMark 当前已经支持或基本支持以下能力，因此本文不再重�
 - 数学公式专项第一阶段：编辑器、预览与原生导出共享 Typora/Pandoc 行内边界规则，货币、转义、代码、Front Matter 和原始 HTML 不再误判；KaTeX 错误可在 WYSIWYG 与源码模式就地查看和定位，转义美元、可变反引号代码及 HTML 保护区在编辑其他公式后仍可无损往返。
 - 数学公式专项第二阶段：`\def` / `\newcommand` 等宏按文档顺序和标签/分栏隔离生效，纯定义块可见可编辑；KaTeX mhchem、动态宏补全、原生导出及 Pandoc PDF/LaTeX 链路同步接通。
 - 数学公式专项第三阶段：文档级公式索引支持 `\label` / `\tag` / `\ref`、前向与后向引用、三种块级编号策略、WYSIWYG/源码点击导航及“前往公式”浮层；原生与 Pandoc 导出保持编号和引用一致。
+- 数学工具与正式 CLI：公式节点支持复制原始 Markdown、KaTeX HTML、MathML 和主动刷新；导出菜单按文档特性展示兼容、降级或阻断状态；`lightmark-cli` 提供 check / formats / export、结构化 JSON、固定退出码和全部桌面导出格式。
 
 ## 调研来源
 
@@ -123,10 +124,10 @@ LightMark 已经具备基础数学公式能力：行内/块级公式、KaTeX 渲
 | ✓ | mhchem 化学公式 | KaTeX mhchem 默认启用，支持 `\ce{H2O}`、反应式、同位素、嵌套数学和 `\pu{}`，并覆盖原生导出及 Pandoc PDF/LaTeX |
 | ✓ | 公式标签与引用 | 支持平衡解析 `\label{}`、`\tag{}`、`\ref{}`、前向/后向引用、重复和缺失诊断，并在编辑区、预览与导出中一致 |
 | ✓ | 公式自动编号 | 支持关闭编号、AMS 公式块、所有块级公式三种策略；手写 tag 覆盖显示值但保持后续计数稳定 |
-| | 数学工具菜单 | 提供“刷新全部公式”“复制公式源码/HTML/SVG/MathML”等命令 |
+| ✓ | 数学工具菜单 | 公式悬停/聚焦工具条可复制原始 Markdown、KaTeX HTML 和 MathML，并可刷新文档全部公式；错误公式禁用不可用的复制目标 |
 | | 换行兼容选项 | Typora 提供 “Apply Line Break at \\”；LightMark 可选择自动包裹 `\displaylines{}` 或给出修复提示 |
 | ✓ | 数学错误诊断 | WYSIWYG 就地显示可读错误并点击编辑；源码模式使用波浪线、悬停详情和点击定位，导出安全降级为带提示的原始源码 |
-| | 导出兼容矩阵 | 明确 PDF/HTML/PNG/Pandoc 各格式对公式编号、引用、宏、mhchem 的支持范围 |
+| ✓ | 导出兼容矩阵 | 原生 HTML/PDF/PNG 与 Pandoc PDF/LaTeX 完整支持当前数学链；Office/EPUB 与文本格式按实测显示降级，缺失引用在导出前阻断 |
 
 ---
 
@@ -245,7 +246,7 @@ LightMark 已经具备基础数学公式能力：行内/块级公式、KaTeX 渲
 | | 快捷键自定义 | 支持冲突检测、导入导出、按命令搜索 |
 | | 插件 API 增强 | 暴露编辑器命令、文档事件、渲染钩子和安全沙箱 |
 | | 插件市场 | Obsidian 的强项；LightMark 可先做本地插件目录 |
-| | CLI / URL Scheme | Bear 有 CLI、Shortcuts、x-callback-url；LightMark 可支持 `lightmark open/export/search` |
+| ◐ | CLI / URL Scheme | 已提供正式 `lightmark-cli check/formats/export` 和全部导出格式；打开、搜索及 URL Scheme 仍待实现 |
 
 ---
 
@@ -360,13 +361,13 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 
 ## 下一步建议
 
-快速打开文件 `Ctrl+P`、前进/后退导航、文件可靠性后续 MVP、原生 watcher / 标题跳转 / 搜索跳转入栈、Wiki Links / Backlinks、WYSIWYG Wiki Links 补全与 aliases、光标与滚动位置恢复、应用内左右分屏独立编辑、Typora 式输入规则第一阶段、Markdown 保守格式化、状态栏章节面包屑，以及数学公式专项第一、二、三阶段已经完成。下一步优先级调整为 **数学工具菜单与导出兼容矩阵**。
+快速打开文件 `Ctrl+P`、前进/后退导航、文件可靠性后续 MVP、原生 watcher / 标题跳转 / 搜索跳转入栈、Wiki Links / Backlinks、WYSIWYG Wiki Links 补全与 aliases、光标与滚动位置恢复、应用内左右分屏独立编辑、Typora 式输入规则第一阶段、Markdown 保守格式化、状态栏章节面包屑，以及数学公式专项第一、二、三阶段、数学工具菜单、导出兼容矩阵和正式 CLI 已经完成。下一步优先级调整为 **标签索引、Unlinked Mentions 与 aliases 全局搜索**。
 
 原因：
 
-1. 公式解析、宏、mhchem、标签、编号、引用和导航已经形成一条共享求值链，下一步可以在稳定索引上提供刷新、复制和导出预检工具。
-2. 原生 HTML/PDF/PNG 与 Pandoc PDF/LaTeX 已完成一致性验证，但 DOCX、ODT、RTF、EPUB 等格式仍需要逐项标明公式编号、引用、宏和 mhchem 的真实支持范围。
-3. 数学工具菜单应优先提供“前往公式”“刷新全部公式”“复制源码/HTML/MathML”和导出兼容提示，不引入新的 Markdown 方言。
+1. Wiki 文件名、Front Matter aliases、补全、跳转和反链已经共享工作区索引，适合继续扩展为标签与未链接提及索引。
+2. 标签索引能直接改善长知识库的聚合浏览；Unlinked Mentions 可把“正文中已经提到但尚未链接”的内容转成可执行建议。
+3. aliases 全局搜索应复用现有确定性冲突排序，避免为搜索再维护一套文件名与别名算法。
 
 刚完成的章节面包屑包括：统一的结构感知标题提取、光标行号到祖先链解析、分屏活动栏同步、大文件视口同步、可点击导航，以及状态消息和窄窗口下的优先级收纳。标题解析会排除 Front Matter、代码围栏、数学块和原始 HTML。
 
@@ -435,4 +436,25 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 
 第三阶段原生可视化验收覆盖浅色/深色、默认窗口与 900×600、WYSIWYG/源码跳转、语义波浪线、公式搜索、分屏隔离，以及 HTML、原生 PDF、PNG、Pandoc PDF 和 LaTeX 实际产物。验收中修复了 KaTeX tag 在块级容器中与公式重叠，以及 WYSIWYG 真实编辑后丢失文档末尾换行导致误标脏的问题；源 Markdown 的标签、引用、分隔符和末尾换行在模式往返中保持不变。
 
-下一阶段只做 **数学工具菜单与导出兼容矩阵**；legacy 行内模式、physics、换行兼容、逐行 AMS 编号和 `\eqref` 继续独立后置。
+已完成的 **数学工具菜单、导出兼容矩阵与正式 CLI**：
+
+| ✓ | 任务 | 说明 |
+|---|------|------|
+| ✓ | 公式节点工具条 | 悬停、聚焦或键盘选中时显示；复制保留原始分隔符和换行，HTML/MathML 来自当前 KaTeX 求值结果，刷新不改写 Markdown |
+| ✓ | 导出预检 | 检测基础公式、宏、mhchem、编号、标签、引用、导航和诊断；GUI 展示兼容状态，阻断问题列出具体行号 |
+| ✓ | 正式 CLI | `lightmark-cli export/check/formats` 支持显式输出、覆盖保护、主题、编号模式、配置路径和 JSON；退出码固定为 0/2/3/4/5 |
+| ✓ | 共享渲染链 | CLI 通过隐藏 LightMark WebView 调用桌面端同一套 KaTeX、Mermaid、图片内联、Pandoc 准备和 Rust 导出器 |
+| ✓ | 全格式实测 | 17 个公开格式均成功生成；原生 HTML/PDF/PNG、Pandoc PDF/LaTeX 为完整数学支持，Office/EPUB 和文本格式按实际产物保留降级提示 |
+
+CLI 示例：
+
+```powershell
+lightmark-cli check article.md --format pdf --json
+lightmark-cli export article.md --format html
+lightmark-cli export article.md --format pdf-pandoc -o article.pdf --force --math-numbering all-display
+lightmark-cli formats --json
+```
+
+实际验收中修复了 CLI 隐藏 WebView 对 Windows `\\?\` 路径、本地 SVG 自包含读取的兼容问题，并将所有隐藏任务限制在 180 秒内，超时会终止子进程并清理请求、响应和中间资源。900×600 深色可视化复测还修正了导出菜单状态胶囊被压成竖排的问题。
+
+下一阶段只做 **标签索引、Unlinked Mentions 与 aliases 全局搜索**；legacy 行内模式、physics、换行兼容、逐行 AMS 编号、`\eqref`、CLI 打开/搜索和 URL Scheme 继续独立后置。

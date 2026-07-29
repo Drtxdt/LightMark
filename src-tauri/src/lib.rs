@@ -5,6 +5,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            commands::cli::get_headless_export_request,
+            commands::cli::trace_headless_frontend,
+            commands::cli::complete_headless_export,
             commands::file::open_file_dialog,
             commands::file::open_folder_dialog,
             commands::file::save_markdown_file_dialog,
@@ -32,6 +35,7 @@ pub fn run() {
             commands::draft::list_drafts,
             commands::draft::get_file_snapshot,
             commands::export::export_document,
+            commands::export::read_export_resource,
             commands::export::save_export_bytes,
             commands::export::detect_pandoc,
             commands::config::read_app_config,

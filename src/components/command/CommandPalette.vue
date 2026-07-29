@@ -29,6 +29,13 @@ const coreCommands = [
   { name: "快速打开文件", handler: () => openQuickOpen() },
   { name: "前往指定标题", handler: () => openHeadingJump() },
   { name: "前往公式", handler: () => openFormulaJump() },
+  {
+    name: "刷新当前文档全部公式",
+    handler: () => {
+      window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
+      appStore.statusMessage = "已刷新当前文档全部公式";
+    },
+  },
   { name: "前往指定行", handler: () => openGoToLine() },
   { name: "打开文件", handler: () => openFile() },
   { name: "打开文件夹", handler: () => openWorkspace() },

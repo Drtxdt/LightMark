@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && node scripts/prepare-cli-sidecar.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -31,6 +31,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "resources": ["../THIRD_PARTY_NOTICES.md"]
+    "resources": ["../THIRD_PARTY_NOTICES.md"],
+    "externalBin": ["binaries/lightmark-cli"]
   }
 }

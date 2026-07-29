@@ -116,11 +116,15 @@ async function saveImageAsset(file: File) {
   });
 }
 
-export function resolveMarkdownImageSource(source: string) {
+export function resolveMarkdownImageSource(source: string, markdownPath = appStore.currentFilePath) {
   if (isExternalImageSource(source)) return source;
-  const decodedSource = decodeMarkdownPath(source);
-  const absolute = isAbsolutePath(decodedSource) ? decodedSource : joinPath(parentPath(appStore.currentFilePath), decodedSource);
+  const absolute = resolveMarkdownImagePath(source, markdownPath);
   return isTauri() ? convertFileSrc(absolute) : absolute;
+}
+
+export function resolveMarkdownImagePath(source: string, markdownPath = appStore.currentFilePath) {
+  const decodedSource = decodeMarkdownPath(source);
+  return isAbsolutePath(decodedSource) ? decodedSource : joinPath(parentPath(markdownPath), decodedSource);
 }
 
 function isExternalImageSource(source: string) {

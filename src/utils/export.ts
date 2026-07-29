@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import mermaid from "mermaid";
 import katexCss from "katex/dist/katex.min.css?raw";
@@ -13,9 +13,11 @@ import type {
 import { appStore, completeExportStatus, currentFileName, failExportStatus, startExportStatus } from "../stores/appStore";
 import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
-import { resolveMarkdownImageSource } from "./imageAssets";
+import { resolveMarkdownImagePath, resolveMarkdownImageSource } from "./imageAssets";
 import { preparePandocMath } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
+import { analyzeMathExportCompatibility } from "./mathExportCompatibility";
+import { alertDialog, confirmDialog } from "../stores/dialogStore";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -56,6 +58,35 @@ export async function runDocumentExport(target: ExportTarget) {
 
   startExportStatus(target.id, target.label);
   try {
+    const preflight = analyzeMathExportCompatibility(
+      appStore.currentContent,
+      target.id,
+      appStore.settings.markdown.mathNumbering,
+    );
+    const blocking = preflight.issues.filter((issue) => issue.blocking);
+    if (blocking.length > 0) {
+      await alertDialog({
+        title: "导出前需要修复公式",
+        message: `${target.label} 无法在公式引用未解析时可靠导出。`,
+        details: blocking.map((issue) => issue.message),
+      });
+      throw new Error(blocking.map((issue) => issue.message).join("\n"));
+    }
+    const degradations = preflight.issues.filter((issue) =>
+      !issue.blocking && issue.feature !== "dependency" && issue.capability !== "full"
+    );
+    if (degradations.length > 0) {
+      const confirmed = await confirmDialog({
+        title: "此格式可能降低公式能力",
+        message: `${target.label} 可以继续导出，但部分公式能力可能降级。`,
+        details: degradations.map((issue) => issue.message),
+        confirmLabel: "仍然导出",
+      });
+      if (!confirmed) {
+        failExportStatus("已取消导出。");
+        return null;
+      }
+    }
     const result = await exportCurrentDocument({
       target: target.id,
       currentPath: appStore.currentFilePath,
@@ -78,20 +109,24 @@ export async function exportCurrentDocument(input: {
   markdown: string;
   settings: ExportSettings;
   mathNumbering?: MathNumberingMode;
+  outputPath?: string;
+  overwrite?: boolean;
 }) {
   if (!input.currentPath) throw new Error("请先打开 Markdown 文件再导出。");
 
+  const title = fileNameFromPath(input.currentPath);
   const theme = exportTheme(input.settings);
   const body = await renderExportBody(input.markdown, theme, input.mathNumbering);
   const extraStyles = await getExportExtraStyles();
-  const styledHtml = await inlineExportResources(buildExportHtml(currentFileName.value, body, {
+  const styledHtml = await inlineExportResources(buildExportHtml(title, body, {
     includeStyles: shouldIncludeExportStyles(input.target, input.settings),
     theme,
     currentPath: input.currentPath,
     extraStyles,
-  }));
+  }), input.currentPath);
   const plainHtml = await inlineExportResources(
-    buildExportHtml(currentFileName.value, body, { includeStyles: false, theme, currentPath: input.currentPath }),
+    buildExportHtml(title, body, { includeStyles: false, theme, currentPath: input.currentPath }),
+    input.currentPath,
   );
   const raster = input.target === "png" ? await measureExportHtml(styledHtml) : null;
   const pandocMath = input.target === "pdfPandoc" || input.target === "latex"
@@ -101,7 +136,7 @@ export async function exportCurrentDocument(input: {
   const request: ExportRequest = {
     target: input.target,
     currentPath: input.currentPath,
-    title: currentFileName.value,
+    title,
     markdown: input.markdown,
     html: styledHtml,
     plainHtml,
@@ -109,11 +144,17 @@ export async function exportCurrentDocument(input: {
     pandocLatexHeader: pandocMath?.latexHeader,
     rasterWidth: raster?.width,
     rasterHeight: raster?.height,
+    outputPath: input.outputPath,
+    overwrite: input.overwrite,
     settings: input.settings,
   };
   const result = await invoke<ExportResult>("export_document", { request });
   await handleAfterExport(result.path, input.settings);
   return result;
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).pop()?.replace(/\.(?:md|markdown)$/i, "") || currentFileName.value;
 }
 
 function exportTheme(settings: ExportSettings) {
@@ -279,14 +320,28 @@ function stripKatexNonWoffFallbacks(css: string) {
   return css.replace(/,url\(fonts\/[^)]+?\.(?:woff|ttf)\) format\("(?:woff|truetype)"\)/g, "");
 }
 
-async function inlineExportResources(html: string) {
+async function inlineExportResources(html: string, currentPath: string) {
   const parser = new DOMParser();
   const documentHtml = parser.parseFromString(html, "text/html");
   const images = Array.from(documentHtml.querySelectorAll<HTMLImageElement>("img[src]"));
   for (const image of images) {
     const source = image.getAttribute("src") || "";
     if (!source || /^(?:data:|blob:|#)/i.test(source)) continue;
-    const resolved = resolveMarkdownImageSource(source);
+    if (!/^https?:/i.test(source) && isTauri()) {
+      const path = resolveMarkdownImagePath(source, currentPath);
+      try {
+        const bytes = await invoke<number[]>("read_export_resource", { path });
+        image.setAttribute(
+          "src",
+          `data:${mimeForImageSource(source)};base64,${arrayBufferToBase64(Uint8Array.from(bytes).buffer)}`,
+        );
+        image.removeAttribute("srcset");
+        continue;
+      } catch (error) {
+        throw new Error(`无法内嵌导出资源：${source}\n${String(error)}`);
+      }
+    }
+    const resolved = resolveMarkdownImageSource(source, currentPath);
     let response: Response;
     try {
       response = await fetch(resolved);

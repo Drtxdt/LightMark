@@ -1,5 +1,7 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
+import { createVNode, render, type Component } from "vue";
+import { CodeXml, Copy, RefreshCw, Sigma } from "@lucide/vue";
 import {
   createLatexSuggestController,
   getContentEditableCaret,
@@ -11,6 +13,7 @@ import {
   evaluateMathTokens,
   mathTokenFromParts,
   parseInlineMathText,
+  serializeMathToken,
   type MathEvaluationEntry,
   type MathDelimiter,
   type MarkdownMathToken,
@@ -393,6 +396,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
+    appendMathTools(dom, rendered, { tex, delimiter, raw, displayMode }, () => {
+      editorMathEvaluationCache.delete(editor.view.state.doc);
+      renderDisplay();
+    });
   };
 
   const renderEditor = () => {
@@ -513,6 +520,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     if (!editing) renderDisplay();
   };
   window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
+  const refreshFromMathTools = () => {
+    editorMathEvaluationCache.delete(editor.view.state.doc);
+    if (!editing) renderDisplay();
+  };
+  window.addEventListener("lightmark:refresh-math", refreshFromMathTools);
 
   return {
     dom,
@@ -545,9 +557,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       suggest?.destroy();
       editor.off?.("transaction", refreshFromDocument);
       window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
+      window.removeEventListener("lightmark:refresh-math", refreshFromMathTools);
     },
     ignoreMutation: () => true,
-    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest")),
+    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest,.math-tools")),
   };
 }
 
@@ -607,6 +620,10 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
+    appendMathTools(dom, rendered, { tex, delimiter, raw, displayMode: true }, () => {
+      editorMathEvaluationCache.delete(editor.view.state.doc);
+      renderDisplay();
+    });
   };
 
   const renderEditor = () => {
@@ -730,6 +747,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     if (!editing) renderDisplay();
   };
   window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
+  const refreshFromMathTools = () => {
+    editorMathEvaluationCache.delete(editor.view.state.doc);
+    if (!editing) renderDisplay();
+  };
+  window.addEventListener("lightmark:refresh-math", refreshFromMathTools);
 
   return {
     dom,
@@ -761,10 +783,115 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       suggest?.destroy();
       editor.off?.("transaction", refreshFromDocument);
       window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
+      window.removeEventListener("lightmark:refresh-math", refreshFromMathTools);
     },
     ignoreMutation: () => true,
-    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest")),
+    stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest,.math-tools")),
   };
+}
+
+function appendMathTools(
+  host: HTMLElement,
+  rendered: HTMLElement,
+  source: { tex: string; delimiter: MathDelimiter; raw: string; displayMode: boolean },
+  refresh: () => void,
+) {
+  const tools = document.createElement("span");
+  tools.className = "math-tools";
+  tools.setAttribute("role", "toolbar");
+  tools.setAttribute("aria-label", "公式工具");
+
+  const valid = !rendered.classList.contains("math-render-error");
+  const sourceText = serializeMathToken(
+    { tex: source.tex, delimiter: source.delimiter, raw: source.raw },
+    source.tex,
+    Boolean(source.raw),
+  );
+  const actions = [
+    {
+      label: "复制公式源码",
+      icon: Copy,
+      disabled: false,
+      run: () => copyMathText(sourceText, "已复制公式源码"),
+    },
+    {
+      label: valid ? "复制 KaTeX HTML" : "公式有错误，无法复制 HTML",
+      icon: CodeXml,
+      disabled: !valid,
+      run: () => copyMathText(rendered.innerHTML, "已复制公式 HTML"),
+    },
+    {
+      label: valid ? "复制 MathML" : "公式有错误，无法复制 MathML",
+      icon: Sigma,
+      disabled: !valid,
+      run: () => {
+        const math = rendered.querySelector<HTMLElement>(".katex-mathml math");
+        return copyMathText(math?.outerHTML ?? "", "已复制公式 MathML");
+      },
+    },
+    {
+      label: "刷新当前文档全部公式",
+      icon: RefreshCw,
+      disabled: false,
+      run: () => {
+        refresh();
+        appStore.statusMessage = "已刷新当前文档全部公式";
+      },
+    },
+  ];
+
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "math-tool-button";
+    const iconHost = document.createElement("span");
+    iconHost.className = "math-tool-icon";
+    iconHost.setAttribute("aria-hidden", "true");
+    render(createVNode(action.icon as Component, {
+      size: 15,
+      strokeWidth: 1.75,
+      "aria-hidden": "true",
+      focusable: "false",
+    }), iconHost);
+    button.appendChild(iconHost);
+    button.title = action.label;
+    button.setAttribute("aria-label", action.label);
+    button.disabled = action.disabled;
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void action.run();
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      (event.currentTarget as HTMLButtonElement).blur();
+      host.focus();
+    });
+    tools.appendChild(button);
+  }
+  host.appendChild(tools);
+}
+
+async function copyMathText(text: string, message: string) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  appStore.statusMessage = message;
 }
 
 function deleteMathNode(editor: any, getPos: NodeViewPosition) {

@@ -236,6 +236,8 @@ export interface ExportRequest {
   pandocLatexHeader?: string;
   rasterWidth?: number;
   rasterHeight?: number;
+  outputPath?: string;
+  overwrite?: boolean;
   settings: ExportSettings;
 }
 

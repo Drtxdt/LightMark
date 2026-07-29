@@ -12,6 +12,16 @@ use image::{GenericImage, GenericImageView, RgbaImage};
 
 use super::models::ExportSettings;
 
+#[tauri::command]
+pub fn read_export_resource(path: String) -> Result<Vec<u8>, String> {
+    let normalized = path.strip_prefix(r"\\?\").unwrap_or(&path).replace('/', "\\");
+    let source = PathBuf::from(normalized);
+    if !source.is_file() {
+        return Err(format!("导出资源不存在：{}", source.display()));
+    }
+    fs::read(&source).map_err(|err| format!("无法读取导出资源 {}：{err}", source.display()))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
@@ -29,6 +39,10 @@ pub struct ExportRequest {
     pub raster_width: Option<u32>,
     #[serde(default)]
     pub raster_height: Option<u32>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
     pub settings: ExportSettings,
 }
 
@@ -69,6 +83,8 @@ fn export_document_blocking(request: ExportRequest) -> Result<ExportResult, Stri
             "html",
             request.html.unwrap_or_default(),
             &request.settings,
+            request.output_path.as_deref(),
+            request.overwrite,
         ),
         "htmlPlain" => export_text(
             &request.current_path,
@@ -76,6 +92,8 @@ fn export_document_blocking(request: ExportRequest) -> Result<ExportResult, Stri
             "html",
             request.plain_html.or(request.html).unwrap_or_default(),
             &request.settings,
+            request.output_path.as_deref(),
+            request.overwrite,
         ),
         "pdf" => export_html_pdf(request),
         "png" => export_html_png(request),
@@ -102,9 +120,7 @@ fn export_html_png(request: ExportRequest) -> Result<ExportResult, String> {
     if pixels > MAX_PIXELS {
         return Err(format!("PNG 长图共 {pixels} 像素，超过一亿像素安全上限。请缩短文档或改用 PDF。"));
     }
-    let Some(target_path) = choose_export_path(&request.current_path, &request.target, "png", &request.settings) else {
-        return Err("Export cancelled".to_string());
-    };
+    let target_path = resolve_export_path(&request, "png")?;
     let profile_path = make_temp_dir("lightmark-edge-profile")?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
@@ -245,10 +261,17 @@ fn export_text(
     extension: &str,
     content: String,
     settings: &ExportSettings,
+    output_path: Option<&str>,
+    overwrite: bool,
 ) -> Result<ExportResult, String> {
-    let Some(path) = choose_export_path(current_path, target, extension, settings) else {
-        return Err("Export cancelled".to_string());
-    };
+    let path = resolve_export_path_parts(
+        current_path,
+        target,
+        extension,
+        settings,
+        output_path,
+        overwrite,
+    )?;
     fs::write(&path, content).map_err(|err| format!("Failed to export {}: {err}", path.display()))?;
     Ok(ExportResult {
         path: path.to_string_lossy().to_string(),
@@ -269,9 +292,7 @@ fn export_html_pdf(request: ExportRequest) -> Result<ExportResult, String> {
     let Some(browser) = resolve_pdf_browser() else {
         return Err("未找到 Microsoft Edge、Chrome 或 Chromium，无法生成所见即所得 PDF。可以改用 PDF (Pandoc/LaTeX) 导出。".to_string());
     };
-    let Some(target_path) = choose_export_path(&request.current_path, &request.target, "pdf", &request.settings) else {
-        return Err("Export cancelled".to_string());
-    };
+    let target_path = resolve_export_path(&request, "pdf")?;
     let temp_path = write_temp_html(html)?;
     let temp_pdf_path = make_temp_file_path("lightmark-export", "pdf")?;
     let profile_path = make_temp_dir("lightmark-edge-profile")?;
@@ -318,9 +339,7 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         return Err("未找到 Pandoc。请确认内置 Pandoc 已随应用打包，或在设置中配置 Pandoc 路径。".to_string());
     };
     let spec = pandoc_spec(&request)?;
-    let Some(target_path) = choose_export_path(&request.current_path, &request.target, &spec.extension, &request.settings) else {
-        return Err("Export cancelled".to_string());
-    };
+    let target_path = resolve_export_path(&request, &spec.extension)?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
         .map(Path::to_path_buf)
@@ -509,6 +528,45 @@ fn choose_export_path(
     }
 
     dialog.save_file()
+}
+
+fn resolve_export_path(request: &ExportRequest, extension: &str) -> Result<PathBuf, String> {
+    resolve_export_path_parts(
+        &request.current_path,
+        &request.target,
+        extension,
+        &request.settings,
+        request.output_path.as_deref(),
+        request.overwrite,
+    )
+}
+
+fn resolve_export_path_parts(
+    current_path: &str,
+    target: &str,
+    extension: &str,
+    settings: &ExportSettings,
+    output_path: Option<&str>,
+    overwrite: bool,
+) -> Result<PathBuf, String> {
+    let Some(explicit) = output_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return choose_export_path(current_path, target, extension, settings)
+            .ok_or_else(|| "Export cancelled".to_string());
+    };
+    let path = PathBuf::from(explicit);
+    if path.is_dir() {
+        return Err(format!("导出路径指向目录：{}", path.display()));
+    }
+    if path.exists() && !overwrite {
+        return Err(format!("导出文件已存在；使用 --force 才能覆盖：{}", path.display()));
+    }
+    let parent = path.parent().filter(|value| !value.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        if !parent.is_dir() {
+            return Err(format!("导出目录不存在：{}", parent.display()));
+        }
+    }
+    Ok(path)
 }
 
 fn export_filter_name(target: &str) -> &'static str {

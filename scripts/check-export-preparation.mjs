@@ -6,6 +6,8 @@ const markdown = await readFile(new URL("../src/utils/markdown.ts", import.meta.
 const rust = await readFile(new URL("../src-tauri/src/commands/export.rs", import.meta.url), "utf8");
 
 assert.match(frontend, /inlineExportResources\(buildExportHtml/, "styled HTML must inline resources");
+assert.match(frontend, /read_export_resource/, "local export resources must be read by the desktop backend");
+assert.match(frontend, /resolveMarkdownImagePath\(source,\s*currentPath\)/, "CLI images must resolve from the input document");
 assert.match(frontend, /removeAttribute\("srcset"\)/, "inlined images must not keep external srcset references");
 assert.match(frontend, /rasterWidth: raster\?\.width/, "PNG dimensions must be sent to the desktop exporter");
 assert.match(frontend, /pandocMarkdown: pandocMath\?\.markdown/, "Pandoc math preparation must be sent separately");
@@ -20,5 +22,8 @@ assert.doesNotMatch(rust, /scrollTo\(0,\{offset\}\)/, "PNG tiles must not depend
 assert.match(rust, /--include-in-header/, "Pandoc PDF/LaTeX must receive the generated math header");
 assert.match(rust, /mhchem\.sty/, "missing mhchem packages must produce an actionable error");
 assert.match(rust, /remove_file\(path\)/, "temporary Pandoc headers must be cleaned");
+assert.match(rust, /read_export_resource/, "the desktop backend must expose binary export resource reads");
+assert.match(rust, /output_path/, "the desktop exporter must accept explicit CLI output paths");
+assert.match(rust, /overwrite/, "explicit CLI exports must enforce overwrite policy");
 
 console.log("Export preparation checks passed.");

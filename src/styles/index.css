@@ -888,6 +888,7 @@ sub {
 
 .math-node-inline {
   display: inline;
+  position: relative;
   border-radius: 4px;
   padding: 0 0.08rem;
   white-space: nowrap;
@@ -975,7 +976,87 @@ sub {
 
 .math-node-block {
   display: block;
+  position: relative;
   margin: 1.2rem 0;
+}
+
+.math-tools {
+  position: absolute;
+  right: 0.35rem;
+  top: -0.45rem;
+  z-index: 12;
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--lm-border-strong);
+  border-radius: var(--lm-radius-sm);
+  background: color-mix(in srgb, var(--lm-surface-raised) 96%, transparent);
+  padding: 3px;
+  box-shadow: var(--lm-shadow-sm);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-65%);
+  transition: opacity var(--lm-duration-fast) ease, transform var(--lm-duration-fast) ease;
+}
+
+.math-node-inline .math-tools {
+  left: 50%;
+  right: auto;
+  top: -0.3rem;
+  transform: translate(-50%, -80%);
+  white-space: nowrap;
+}
+
+.math-node:hover > .math-tools,
+.math-node:focus-within > .math-tools,
+.math-node.ProseMirror-selectednode > .math-tools,
+.math-tools:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-75%);
+}
+
+.math-node-inline:hover > .math-tools,
+.math-node-inline:focus-within > .math-tools,
+.math-node-inline.ProseMirror-selectednode > .math-tools,
+.math-node-inline .math-tools:focus-within {
+  transform: translate(-50%, -90%);
+}
+
+.math-tool-button {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 4px 6px;
+  color: var(--lm-ink-soft);
+  font: 600 10px/1.2 var(--lm-ui-font-family);
+  cursor: pointer;
+}
+
+.math-tool-icon,
+.math-tool-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.math-tool-button:hover:not(:disabled) {
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
+}
+
+.math-tool-button:focus-visible {
+  outline: 2px solid var(--lm-focus);
+  outline-offset: 1px;
+}
+
+.math-tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+@media (max-width: 940px) {
+  .math-tools { right: 0; }
+  .math-tool-button { padding-inline: 5px; }
 }
 
 .math-node-block:hover {

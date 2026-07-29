@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { currentFileName } from "../../stores/appStore";
 import {
   appStore,
@@ -18,6 +18,7 @@ import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import UiIcon from "../ui/UiIcon.vue";
 import { openFindPanel } from "../../stores/findReplaceStore";
 import { exportTargets, runDocumentExport } from "../../utils/export";
+import { analyzeMathExportCompatibility, mathExportStatusLabel } from "../../utils/mathExportCompatibility";
 import type { EditorMode, ThemeMode } from "../../types";
 
 type EditorCommand =
@@ -36,6 +37,14 @@ type EditorCommand =
 const exportMenuOpen = ref(false);
 const primaryExportTargets = exportTargets.filter((target) => ["pdf", "html", "docx", "png"].includes(target.id));
 const secondaryExportTargets = exportTargets.filter((target) => !primaryExportTargets.includes(target));
+const exportCompatibility = computed(() => new Map(exportTargets.map((target) => {
+  const result = analyzeMathExportCompatibility(
+    appStore.currentContent,
+    target.id,
+    appStore.settings.markdown.mathNumbering,
+  );
+  return [target.id, result] as const;
+})));
 
 async function run(action: () => Promise<unknown> | unknown) {
   try {
@@ -173,7 +182,12 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
             @click="run(() => runExport(target))"
           >
             <span>{{ target.label }}</span>
-            <small>.{{ target.extension }}</small>
+            <span class="lm-export-menu-meta">
+              <em :class="`is-${exportCompatibility.get(target.id)?.status}`">
+                {{ mathExportStatusLabel(exportCompatibility.get(target.id)?.status ?? "full") }}
+              </em>
+              <small>.{{ target.extension }}</small>
+            </span>
           </button>
           <div class="lm-export-menu-separator"></div>
           <button
@@ -184,7 +198,12 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
             @click="run(() => runExport(target))"
           >
             <span>{{ target.label }}</span>
-            <small>.{{ target.extension }}</small>
+            <span class="lm-export-menu-meta">
+              <em :class="`is-${exportCompatibility.get(target.id)?.status}`">
+                {{ mathExportStatusLabel(exportCompatibility.get(target.id)?.status ?? "full") }}
+              </em>
+              <small>.{{ target.extension }}</small>
+            </span>
           </button>
         </div>
       </div>
@@ -318,7 +337,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   top: calc(100% + 8px);
   z-index: 60;
   display: grid;
-  width: 230px;
+  width: 260px;
   max-height: min(68vh, 440px);
   overflow: auto;
   border: 1px solid rgb(219 213 202 / 88%);
@@ -358,6 +377,24 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   color: #8a8276;
   font: 12px/1 "JetBrains Mono", ui-monospace, monospace;
 }
+.lm-export-menu-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.lm-export-menu-meta em {
+  border-radius: 999px;
+  background: var(--lm-surface-soft);
+  padding: 3px 6px;
+  color: var(--lm-ink-muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1;
+}
+.lm-export-menu-meta em.is-degraded { background: var(--lm-accent-soft); color: var(--lm-accent-strong); }
+.lm-export-menu-meta em.is-blocked { background: color-mix(in srgb, var(--lm-danger) 13%, transparent); color: var(--lm-danger); }
 
 .lm-export-menu-separator {
   height: 1px;
