@@ -28,6 +28,13 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => appStore.wikiBacklinks.length,
+  (count) => {
+    if (count === 0 && activePane.value === "backlinks") activePane.value = "files";
+  },
+);
+
 async function selectFile(path: string) {
   await openFile(path);
 }
@@ -120,6 +127,7 @@ function outlineIndent(level: number) {
           <span>大纲</span>
         </button>
         <button
+          v-if="appStore.wikiBacklinks.length > 0"
           class="sidebar-switch flex-1 px-2 py-1 text-sm"
           :class="{ active: activePane === 'backlinks' }"
           @click="activePane = 'backlinks'"

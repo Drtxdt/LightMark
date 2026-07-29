@@ -325,6 +325,8 @@ pub struct ExportSettings {
     #[serde(default = "default_true")]
     pub html_include_styles: bool,
     #[serde(default)]
+    pub include_yaml_front_matter: bool,
+    #[serde(default)]
     pub allow_yaml_override: bool,
     #[serde(default)]
     pub open_file_after_export: bool,
@@ -611,6 +613,7 @@ impl Default for ExportSettings {
             custom_folder: String::new(),
             html_theme: default_html_theme(),
             html_include_styles: true,
+            include_yaml_front_matter: false,
             allow_yaml_override: false,
             open_file_after_export: false,
             open_folder_after_export: false,

@@ -337,6 +337,10 @@ function cloneSettings(settings: AppSettings): AppSettings {
                   <option value="revealFolder">在文件管理器中定位</option>
                 </select>
               </label>
+              <label class="settings-row">
+                <span><b>导出 YAML Front Matter</b><small>默认不导出；开启后将文档开头的 YAML 作为可见正文包含在所有导出格式中。</small></span>
+                <input v-model="localSettings.export.includeYamlFrontMatter" type="checkbox" @change="persist" />
+              </label>
             </div>
             <div class="settings-group">
               <h4>HTML / PNG</h4>

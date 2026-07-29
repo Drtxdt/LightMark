@@ -18,6 +18,7 @@ import { preparePandocMath } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
 import { analyzeMathExportCompatibility } from "./mathExportCompatibility";
 import { alertDialog, confirmDialog } from "../stores/dialogStore";
+import { markdownForNativeExport, markdownForPandocExport } from "./frontMatter";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -116,7 +117,9 @@ export async function exportCurrentDocument(input: {
 
   const title = fileNameFromPath(input.currentPath);
   const theme = exportTheme(input.settings);
-  const body = await renderExportBody(input.markdown, theme, input.mathNumbering);
+  const nativeMarkdown = markdownForNativeExport(input.markdown, input.settings.includeYamlFrontMatter);
+  const pandocMarkdown = markdownForPandocExport(input.markdown, input.settings.includeYamlFrontMatter);
+  const body = await renderExportBody(nativeMarkdown, theme, input.mathNumbering);
   const extraStyles = await getExportExtraStyles();
   const styledHtml = await inlineExportResources(buildExportHtml(title, body, {
     includeStyles: shouldIncludeExportStyles(input.target, input.settings),
@@ -130,14 +133,14 @@ export async function exportCurrentDocument(input: {
   );
   const raster = input.target === "png" ? await measureExportHtml(styledHtml) : null;
   const pandocMath = input.target === "pdfPandoc" || input.target === "latex"
-    ? preparePandocMath(input.markdown, { numberingMode: input.mathNumbering })
+    ? preparePandocMath(pandocMarkdown, { numberingMode: input.mathNumbering })
     : null;
 
   const request: ExportRequest = {
     target: input.target,
     currentPath: input.currentPath,
     title,
-    markdown: input.markdown,
+    markdown: pandocMarkdown,
     html: styledHtml,
     plainHtml,
     pandocMarkdown: pandocMath?.markdown,

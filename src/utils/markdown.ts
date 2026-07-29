@@ -26,6 +26,8 @@ import {
 } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
 
+const LEADING_FRONT_MATTER_PATTERN = /^(?:\uFEFF)?---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[^\S\r\n]*(?=\r?\n|$)/;
+
 const md = new MarkdownIt({
   html: true,
   linkify: true,
@@ -125,9 +127,9 @@ export function buildExportHtml(
     th { background: var(--lm-table-header-bg); font-weight: 650; }
     tr:nth-child(2n) { background: var(--lm-table-stripe-bg); }
     mark { border-radius: 3px; background: var(--lm-mark-bg); color: inherit; padding: 0.05em 0.16em; }
-    .front-matter-node { margin: 1em 0; border-radius: 8px; border: 1px solid var(--lm-border); background: var(--lm-front-matter-bg); color: var(--lm-muted); }
-    .front-matter-node pre { margin: 0; border: 0; background: transparent; }
-    .front-matter-fence { padding: 6px 12px; font-family: var(--lm-editor-code-font-family); font-size: 12px; color: var(--lm-muted); }
+    .front-matter-node { margin: 1em 0; border-radius: 4px; border: 1px solid color-mix(in srgb, var(--lm-border) 62%, transparent); background: color-mix(in srgb, var(--lm-front-matter-bg) 46%, transparent); color: var(--lm-muted); box-shadow: none; }
+    .front-matter-node pre { margin: 0; border: 0; background: transparent; color: inherit; }
+    .front-matter-fence { padding: 5px 12px; font-family: var(--lm-editor-code-font-family); font-size: 11px; color: color-mix(in srgb, var(--lm-muted) 72%, transparent); }
     .markdown-alert { margin: 16px 0; padding: 8px 16px; border-left: 4px solid #8c959f; border-radius: 0 6px 6px 0; background: var(--lm-alert-bg); page-break-inside: avoid; }
     .markdown-alert::before { display: block; margin: 0 0 8px; font-weight: 700; line-height: 1.4; }
     .markdown-alert-title { display: none; }
@@ -198,7 +200,7 @@ function markSpecialBlocksForEditor(markdown: string) {
     return token;
   };
 
-  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = markdown.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   });
 
@@ -275,7 +277,7 @@ function enhanceMarkdownForRender(
   stash?: (html: string) => string,
   mathNumbering: MathNumberingMode = "none",
 ) {
-  let next = markdown.replace(/^---\s*\n([\s\S]*?)\n---\s*(?=\n|$)/, (_match, yaml) => {
+  let next = markdown.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);

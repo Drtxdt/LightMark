@@ -95,6 +95,7 @@ export const appStore = reactive({
   wordCountOpen: false,
   wikiBacklinksOpen: false,
   wikiBacklinks: [] as BacklinkItem[],
+  wikiBacklinksForPath: "",
   wikiBacklinksBusy: false,
   wikiBacklinksError: "",
   wikiIndex: createWikiWorkspaceIndex([]) as WikiWorkspaceIndex,
@@ -114,6 +115,7 @@ let externalFileCheckInFlight = false;
 let externalFileWatcherRunning = false;
 let externalFileWatcherAvailable = true;
 let backlinkRefreshTimer = 0;
+let backlinkRefreshGeneration = 0;
 let wikiIndexRefreshTimer = 0;
 let wikiIndexGeneration = 0;
 let wikiIndexHydrationPromise: Promise<void> | null = null;
@@ -502,35 +504,45 @@ export async function createWikiLinkTarget(target: WikiLinkTarget) {
 }
 
 export async function refreshBacklinks() {
+  const generation = ++backlinkRefreshGeneration;
   if (!appStore.currentWorkspace || !appStore.currentFilePath) {
     appStore.wikiBacklinks = [];
+    appStore.wikiBacklinksForPath = "";
     appStore.wikiBacklinksError = "";
+    appStore.wikiBacklinksBusy = false;
     return;
+  }
+  const targetPath = appStore.currentFilePath;
+  if (!isSamePath(appStore.wikiBacklinksForPath, targetPath)) {
+    appStore.wikiBacklinks = [];
+    appStore.wikiBacklinksForPath = targetPath;
   }
   syncActiveTabFromProjection();
   appStore.wikiBacklinksBusy = true;
   appStore.wikiBacklinksError = "";
   try {
-    const files = flattenMarkdownFiles(appStore.fileTree).filter((path) => !isSamePath(path, appStore.currentFilePath));
+    const files = flattenMarkdownFiles(appStore.fileTree).filter((path) => !isSamePath(path, targetPath));
     const backlinks: BacklinkItem[] = [];
     for (const path of files) {
       const content = await contentForBacklinkScan(path);
       if (!content) continue;
-      backlinks.push(...backlinksForPath(appStore.currentFilePath, content, path, appStore.wikiIndex));
+      backlinks.push(...backlinksForPath(targetPath, content, path, appStore.wikiIndex));
     }
+    if (generation !== backlinkRefreshGeneration || !isSamePath(appStore.currentFilePath, targetPath)) return;
     appStore.wikiBacklinks = backlinks.sort((left, right) => {
       return left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN") || left.line - right.line;
     });
   } catch (error) {
+    if (generation !== backlinkRefreshGeneration) return;
     appStore.wikiBacklinks = [];
     appStore.wikiBacklinksError = String(error);
   } finally {
-    appStore.wikiBacklinksBusy = false;
+    if (generation === backlinkRefreshGeneration) appStore.wikiBacklinksBusy = false;
   }
 }
 
 function scheduleBacklinksRefresh() {
-  if (!appStore.wikiBacklinksOpen || !appStore.currentWorkspace || typeof window === "undefined") return;
+  if (!appStore.currentWorkspace || !appStore.currentFilePath || typeof window === "undefined") return;
   if (backlinkRefreshTimer) window.clearTimeout(backlinkRefreshTimer);
   backlinkRefreshTimer = window.setTimeout(() => {
     backlinkRefreshTimer = 0;
@@ -1420,6 +1432,7 @@ export function defaultSettings(): AppSettings {
       customFolder: "",
       htmlTheme: "current",
       htmlIncludeStyles: true,
+      includeYamlFrontMatter: false,
       allowYamlOverride: false,
       openFileAfterExport: false,
       openFolderAfterExport: false,

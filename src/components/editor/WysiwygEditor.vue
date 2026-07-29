@@ -4161,7 +4161,7 @@ function plainMarkdownLength(markdown: string) {
 
 function markdownToPlainText(markdown: string) {
   return markdown
-    .replace(/^---\s*\n[\s\S]*?\n---\s*(?=\n|$)/, "")
+    .replace(/^(?:\uFEFF)?---[^\S\r\n]*\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[^\S\r\n]*(?=\r?\n|$)/, "")
     .replace(/```[\w#+.-]*\n([\s\S]*?)\n```/g, "$1")
     .replace(/\$\$\s*\n?([\s\S]*?)\n?\s*\$\$/g, "$1")
     .replace(/^> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/gim, "")

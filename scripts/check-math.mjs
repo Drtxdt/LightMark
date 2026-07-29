@@ -274,6 +274,9 @@ try {
   const rustExportSource = fs.readFileSync(path.resolve("src-tauri/src/commands/export.rs"), "utf8");
   assert.match(mathNodeSource, /math-macro-definition/);
   assert.match(mathNodeSource, /availableMacroNames/);
+  assert.match(mathNodeSource, /installEditingTools/);
+  assert.match(mathNodeSource, /math-tools-block-editing/);
+  assert.match(mathNodeSource, /--math-block-editor-bottom/);
   assert.match(suggestSource, /getAdditionalSuggestions/);
   assert.match(suggestSource, /\\\\ce/);
   assert.match(exportSource, /preparePandocMath/);

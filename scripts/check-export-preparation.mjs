@@ -6,6 +6,8 @@ const markdown = await readFile(new URL("../src/utils/markdown.ts", import.meta.
 const rust = await readFile(new URL("../src-tauri/src/commands/export.rs", import.meta.url), "utf8");
 
 assert.match(frontend, /inlineExportResources\(buildExportHtml/, "styled HTML must inline resources");
+assert.match(frontend, /markdownForNativeExport/, "native exports must honor YAML visibility");
+assert.match(frontend, /markdownForPandocExport/, "Pandoc exports must make opted-in YAML visible");
 assert.match(frontend, /read_export_resource/, "local export resources must be read by the desktop backend");
 assert.match(frontend, /resolveMarkdownImagePath\(source,\s*currentPath\)/, "CLI images must resolve from the input document");
 assert.match(frontend, /removeAttribute\("srcset"\)/, "inlined images must not keep external srcset references");

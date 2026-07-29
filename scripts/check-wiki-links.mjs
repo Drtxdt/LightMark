@@ -107,10 +107,24 @@ try {
   assert.deepEqual(backlinks.map((item) => ({ sourceName: item.sourceName, line: item.line, preview: item.preview })), [
     { sourceName: "Source.md", line: 0, preview: "Links to [[Project Alpha]]." },
   ]);
+  assert.equal(
+    backlinksForPath("C:/vault/Project Alpha.md", "The final backlink was removed.", "C:/vault/Source.md").length,
+    0,
+  );
   const aliasBacklinks = backlinksForPath("C:/vault/Project Alpha.md", "Links to [[项目甲#设计]] and `[[项目甲]]`.", "C:/vault/Source.md", index);
   assert.deepEqual(aliasBacklinks.map((item) => ({ page: item.target.page, heading: item.target.heading })), [
     { page: "项目甲", heading: "设计" },
   ]);
+
+  const storeSource = fs.readFileSync(path.resolve("src/stores/appStore.ts"), "utf8");
+  const sidebarSource = fs.readFileSync(path.resolve("src/components/layout/Sidebar.vue"), "utf8");
+  assert.doesNotMatch(
+    storeSource,
+    /function scheduleBacklinksRefresh\(\)\s*\{\s*if \(!appStore\.wikiBacklinksOpen/,
+    "backlink detection must continue while the panel is hidden",
+  );
+  assert.match(sidebarSource, /v-if="appStore\.wikiBacklinks\.length > 0"/);
+  assert.match(sidebarSource, /count === 0 && activePane\.value === "backlinks"/);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

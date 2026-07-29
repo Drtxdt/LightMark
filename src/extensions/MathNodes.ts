@@ -620,10 +620,6 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
-    appendMathTools(dom, rendered, { tex, delimiter, raw, displayMode: true }, () => {
-      editorMathEvaluationCache.delete(editor.view.state.doc);
-      renderDisplay();
-    });
   };
 
   const renderEditor = () => {
@@ -645,6 +641,26 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     body.className = "math-live-preview-body math-live-preview-body-block";
     preview.append(label, body);
 
+    const syncOverlayPosition = () => {
+      window.requestAnimationFrame(() => {
+        dom.style.setProperty("--math-block-editor-bottom", `${textarea.offsetTop + textarea.offsetHeight + 4}px`);
+      });
+    };
+
+    const installEditingTools = () => {
+      dom.querySelector(":scope > .math-tools-block-editing")?.remove();
+      appendMathTools(dom, body, { tex, delimiter, raw: "", displayMode: true }, () => {
+        editorMathEvaluationCache.delete(editor.view.state.doc);
+        window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
+        renderKatex(body, tex, true, "公式预览", {
+          delimiter,
+          raw: "",
+          evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, true),
+        });
+        installEditingTools();
+      }, "math-tools-block-editing");
+    };
+
     const refresh = () => {
       tex = textarea.value;
       textarea.rows = Math.max(2, tex.split(/\r?\n/).length);
@@ -653,8 +669,10 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
         raw: "",
         evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, true),
       });
+      installEditingTools();
       updateAttrs({ tex, raw: "", editing: true });
       suggest?.sync();
+      syncOverlayPosition();
     };
 
     suggest = createLatexSuggestController({
@@ -699,15 +717,20 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     });
     textarea.addEventListener("blur", () => {
       window.setTimeout(() => suggest?.close(), 120);
-      editing = false;
-      raw = tex === originalTex ? raw : "";
-      updateAttrs({ tex, raw, editing: false });
-      if (tex.trim()) renderDisplay();
+      window.setTimeout(() => {
+        if (!textarea.isConnected || document.activeElement === textarea || dom.contains(document.activeElement)) return;
+        editing = false;
+        raw = tex === originalTex ? raw : "";
+        updateAttrs({ tex, raw, editing: false });
+        if (tex.trim()) renderDisplay();
+      }, 0);
     });
 
     dom.append(textarea, preview);
     const evaluation = evaluateEditorMathAt(editor, getPos, tex, delimiter, true);
     renderKatex(body, tex, true, "公式预览", { delimiter, raw: "", evaluation });
+    installEditingTools();
+    syncOverlayPosition();
     const diagnostic = evaluation?.diagnostic ?? null;
     requestAnimationFrame(() => {
       textarea.focus();
@@ -795,9 +818,10 @@ function appendMathTools(
   rendered: HTMLElement,
   source: { tex: string; delimiter: MathDelimiter; raw: string; displayMode: boolean },
   refresh: () => void,
+  extraClass = "",
 ) {
   const tools = document.createElement("span");
-  tools.className = "math-tools";
+  tools.className = `math-tools${extraClass ? ` ${extraClass}` : ""}`;
   tools.setAttribute("role", "toolbar");
   tools.setAttribute("aria-label", "公式工具");
 
@@ -882,6 +906,10 @@ async function copyMathText(text: string, message: string) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const selection = previousFocus instanceof HTMLTextAreaElement || previousFocus instanceof HTMLInputElement
+      ? { start: previousFocus.selectionStart, end: previousFocus.selectionEnd }
+      : null;
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.style.position = "fixed";
@@ -890,6 +918,10 @@ async function copyMathText(text: string, message: string) {
     textarea.select();
     document.execCommand("copy");
     textarea.remove();
+    previousFocus?.focus({ preventScroll: true });
+    if (selection && (previousFocus instanceof HTMLTextAreaElement || previousFocus instanceof HTMLInputElement)) {
+      previousFocus.setSelectionRange(selection.start, selection.end);
+    }
   }
   appStore.statusMessage = message;
 }

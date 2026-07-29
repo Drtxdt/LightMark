@@ -199,6 +199,7 @@ export interface ExportSettings {
   customFolder: string;
   htmlTheme: "current" | "light" | "dark";
   htmlIncludeStyles: boolean;
+  includeYamlFrontMatter: boolean;
   allowYamlOverride: boolean;
   openFileAfterExport: boolean;
   openFolderAfterExport: boolean;
