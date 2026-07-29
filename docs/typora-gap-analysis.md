@@ -23,6 +23,7 @@ LightMark 当前已经支持或基本支持以下能力，因此本文不再重�
 - 原生文件 watcher、`Ctrl+Shift+O` 标题跳转弹窗、标题/搜索跳转入导航栈。
 - Wiki Links / Backlinks MVP：`[[page]]` 渲染、点击跳转/创建、源码模式轻量补全、反链面板。
 - WYSIWYG Wiki Links 补全与别名：所见即所得 `[[` 候选、Front Matter `alias` / `aliases`、统一索引、跳转与反链匹配；候选支持别名和相对路径区分重名文档。
+- 工作区知识索引：递归监听 Markdown 文件，统一维护 Wiki Links、aliases、正文/YAML tags 与可搜索片段；“知识”侧栏集中提供反链、未链接提及和标签浏览，`Ctrl+P` 支持 aliases/tags 元数据搜索。
 - Typora 式输入规则第一阶段：源码/WYSIWYG 自动配对与选区包裹、列表续行与退出、有序编号、上下文相关的 Tab / Shift+Tab。
 - 输入规则回归修复：反引号不再自动补右侧，连续三个反引号可稳定生成围栏；代码块选区按 Tab / Shift+Tab 会逐行缩进/反缩进，不再覆盖选中文字。
 - Markdown 保守格式化第一阶段：结构保护、列表缩进、空行、表格与 Front Matter 边界规范化；提供行级 diff、取消/应用、双编辑器单次事务和光标映射。
@@ -189,11 +190,11 @@ LightMark 已经具备基础数学公式能力：行内/块级公式、KaTeX 渲
 | ✓ | 任务 | 说明 |
 |---|------|------|
 | ✓ | Wiki Links `[[page]]` | 支持渲染、源码/WYSIWYG 补全、aliases 匹配、点击跳转或创建文件 |
-| ✓ | Backlinks 面板 | 侧栏显示哪些文档引用当前文档，并提供来源行预览 |
-| | Unlinked Mentions | 未显式链接但提到当前标题/别名的文本建议转链接 |
-| | 标签索引 | 支持 `#tag`、Front Matter tags、嵌套标签聚合 |
+| ✓ | Backlinks 面板 | “知识”侧栏显示哪些文档引用当前文档，并提供来源行预览 |
+| ✓ | Unlinked Mentions | 按文件名/aliases 找出受保护区外的未链接提及，可定位并安全转为 Wiki Link |
+| ✓ | 标签索引 | 支持正文 Unicode `#tag`、Front Matter `tag` / `tags`、嵌套标签和文档聚合 |
 | | 标签重命名 | 批量修改标签引用，避免知识库碎片化 |
-| ✓ | 别名 aliases | Front Matter aliases 用于 Wiki Links 搜索、补全和反链匹配；全局搜索接入后续增强 |
+| ✓ | 别名 aliases | Front Matter aliases 用于 Wiki Links 搜索、补全、反链匹配和 `Ctrl+P` 全局元数据搜索 |
 
 ### 5.2 图谱与局部网络
 
@@ -334,11 +335,10 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 ### P1
 
 4. 数学公式打磨：行内解析规则、宏、mhchem、physics、编号、引用、错误诊断。
-5. 标签索引、Unlinked Mentions 与 aliases 全局搜索。
-6. Focus Mode / Typewriter Mode / 无干扰模式。
-7. 图片尺寸、对齐、Caption、附件管理。
-8. 大纲跟随滚动、折叠、标题折叠。
-9. 富文本/CSV 智能粘贴。
+5. Focus Mode / Typewriter Mode / 无干扰模式。
+6. 图片尺寸、对齐、Caption、附件管理。
+7. 大纲跟随滚动、折叠、标题折叠。
+8. 富文本/CSV 智能粘贴。
 
 ### P2
 
@@ -361,13 +361,13 @@ LightMark 的机会不是复制 Notion 云端数据库，而是用普通 Markdow
 
 ## 下一步建议
 
-快速打开文件 `Ctrl+P`、前进/后退导航、文件可靠性后续 MVP、原生 watcher / 标题跳转 / 搜索跳转入栈、Wiki Links / Backlinks、WYSIWYG Wiki Links 补全与 aliases、光标与滚动位置恢复、应用内左右分屏独立编辑、Typora 式输入规则第一阶段、Markdown 保守格式化、状态栏章节面包屑，以及数学公式专项第一、二、三阶段、数学工具菜单、导出兼容矩阵和正式 CLI 已经完成。下一步优先级调整为 **标签索引、Unlinked Mentions 与 aliases 全局搜索**。
+快速打开文件 `Ctrl+P`、前进/后退导航、文件可靠性后续 MVP、原生 watcher / 标题跳转 / 搜索跳转入栈、Wiki Links / Backlinks、WYSIWYG Wiki Links 补全与 aliases、标签索引、Unlinked Mentions、aliases/tags 全局搜索、光标与滚动位置恢复、应用内左右分屏独立编辑、Typora 式输入规则第一阶段、Markdown 保守格式化、状态栏章节面包屑，以及数学公式专项第一、二、三阶段、数学工具菜单、导出兼容矩阵和正式 CLI 已经完成。下一步优先级调整为 **Focus Mode / Typewriter Mode / 无干扰模式**。
 
 原因：
 
-1. Wiki 文件名、Front Matter aliases、补全、跳转和反链已经共享工作区索引，适合继续扩展为标签与未链接提及索引。
-2. 标签索引能直接改善长知识库的聚合浏览；Unlinked Mentions 可把“正文中已经提到但尚未链接”的内容转成可执行建议。
-3. aliases 全局搜索应复用现有确定性冲突排序，避免为搜索再维护一套文件名与别名算法。
+1. 知识索引、导航和搜索主链已经闭环，下一阶段可以从信息组织切换到高频写作体验。
+2. Focus Mode 与 Typewriter Mode 对长文编辑的改善明显，且能复用现有光标、滚动和分屏上下文。
+3. 无干扰模式可与两种专注能力共用设置、命令和窗口状态，适合在同一阶段完成并统一测试。
 
 刚完成的章节面包屑包括：统一的结构感知标题提取、光标行号到祖先链解析、分屏活动栏同步、大文件视口同步、可点击导航，以及状态消息和窄窗口下的优先级收纳。标题解析会排除 Front Matter、代码围栏、数学块和原始 HTML。
 
@@ -457,4 +457,15 @@ lightmark-cli formats --json
 
 实际验收中修复了 CLI 隐藏 WebView 对 Windows `\\?\` 路径、本地 SVG 自包含读取的兼容问题，并将所有隐藏任务限制在 180 秒内，超时会终止子进程并清理请求、响应和中间资源。900×600 深色可视化复测还修正了导出菜单状态胶囊被压成竖排的问题。
 
-下一阶段只做 **标签索引、Unlinked Mentions 与 aliases 全局搜索**；legacy 行内模式、physics、换行兼容、逐行 AMS 编号、`\eqref`、CLI 打开/搜索和 URL Scheme 继续独立后置。
+已完成的 **标签索引、Unlinked Mentions 与 aliases 全局搜索**：
+
+| ✓ | 任务 | 说明 |
+|---|------|------|
+| ✓ | 统一知识索引 | Markdown 单次解析生成 aliases、tags、Wiki Links 和带原始偏移的搜索片段；未保存标签内容优先于磁盘 |
+| ✓ | 增量更新 | 递归工作区 watcher 覆盖创建、修改、删除和重命名，防抖合并事件并用 generation 隔离工作区切换竞态 |
+| ✓ | 知识侧栏 | “文件 / 大纲 / 知识”常驻入口；知识面板提供反链、未链接提及和全局标签页签、计数、空态、错误与刷新 |
+| ✓ | 未链接提及 | 按文件名和 aliases 最长优先匹配，排除短词、已有链接和结构保护区；支持定位、过期校验、单次撤销转链和大文件只定位 |
+| ✓ | 标签兼容 | 支持 YAML 字符串/数组、正文 Unicode 标签、嵌套标签、大小写聚合，并排除 Front Matter 正文、代码、公式、HTML、转义和 URL |
+| ✓ | `Ctrl+P` 元数据搜索 | 固定文件名、alias、tag、路径优先级，`#tag` 查询优先标签，并显示别名或标签命中原因 |
+
+下一阶段只做 **Focus Mode / Typewriter Mode / 无干扰模式**；标签重命名、正文全文搜索、legacy 行内模式、physics、换行兼容、逐行 AMS 编号、`\eqref`、CLI 打开/搜索和 URL Scheme 继续独立后置。

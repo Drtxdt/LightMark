@@ -13,10 +13,12 @@ use tauri::{AppHandle, Emitter};
 use super::models::{
     DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent, LargeFileSession, LargeFindMatch,
     LargeFindOptions, LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
+    WorkspaceWatchEvent,
 };
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 const FILE_WATCH_EVENT: &str = "lightmark-file-watch-event";
+const WORKSPACE_WATCH_EVENT: &str = "lightmark-workspace-watch-event";
 
 #[derive(Debug, Clone)]
 struct SessionState {
@@ -29,6 +31,7 @@ struct SessionState {
 
 static LARGE_SESSIONS: OnceLock<Mutex<HashMap<String, SessionState>>> = OnceLock::new();
 static FILE_WATCHERS: OnceLock<Mutex<HashMap<String, FileWatcherEntry>>> = OnceLock::new();
+static WORKSPACE_WATCHER: OnceLock<Mutex<Option<FileWatcherEntry>>> = OnceLock::new();
 
 struct FileWatcherEntry {
     _watcher: RecommendedWatcher,
@@ -40,6 +43,10 @@ fn sessions() -> &'static Mutex<HashMap<String, SessionState>> {
 
 fn file_watchers() -> &'static Mutex<HashMap<String, FileWatcherEntry>> {
     FILE_WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn workspace_watcher() -> &'static Mutex<Option<FileWatcherEntry>> {
+    WORKSPACE_WATCHER.get_or_init(|| Mutex::new(None))
 }
 
 #[tauri::command]
@@ -595,6 +602,53 @@ pub fn unwatch_all_markdown_files() -> Result<(), String> {
         .lock()
         .map_err(|_| "File watcher lock was poisoned.".to_string())?
         .clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn watch_markdown_workspace(app: AppHandle, path: String) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_dir() {
+        return Err(format!("Workspace folder does not exist: {}", path_buf.display()));
+    }
+
+    let app_handle = app.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            let paths = event
+                .paths
+                .into_iter()
+                .filter(|event_path| is_markdown_file(event_path))
+                .map(path_to_string)
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return;
+            }
+            let _ = app_handle.emit(WORKSPACE_WATCH_EVENT, WorkspaceWatchEvent { paths });
+        },
+        Config::default(),
+    )
+    .map_err(|err| format!("Failed to create workspace watcher for {}: {err}", path_buf.display()))?;
+    watcher
+        .watch(&path_buf, RecursiveMode::Recursive)
+        .map_err(|err| format!("Failed to watch workspace {}: {err}", path_buf.display()))?;
+
+    let mut guard = workspace_watcher()
+        .lock()
+        .map_err(|_| "Workspace watcher lock was poisoned.".to_string())?;
+    *guard = Some(FileWatcherEntry { _watcher: watcher });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unwatch_markdown_workspace() -> Result<(), String> {
+    let mut guard = workspace_watcher()
+        .lock()
+        .map_err(|_| "Workspace watcher lock was poisoned.".to_string())?;
+    *guard = None;
     Ok(())
 }
 

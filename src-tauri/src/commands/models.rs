@@ -475,6 +475,12 @@ pub struct FileWatchEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceWatchEvent {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LargeFindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,

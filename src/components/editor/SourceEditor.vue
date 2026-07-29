@@ -512,6 +512,7 @@ onMounted(() => {
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.addEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
 });
@@ -539,6 +540,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
+  window.removeEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   view?.destroy();
@@ -674,6 +676,22 @@ function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: Ed
 function handleJumpHeading(event: CustomEvent<{ line?: number; paneId?: EditorPaneId }>) {
   if (typeof event.detail?.line !== "number") return;
   handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail }));
+}
+
+function handleKnowledgeOccurrence(event: CustomEvent<{ paneId?: EditorPaneId; line?: number; from?: number; to?: number }>) {
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  if (typeof event.detail?.from !== "number") {
+    handleJumpLine(new CustomEvent("lightmark:jump-line", { detail: event.detail }));
+    return;
+  }
+  const anchor = clampOffset(event.detail.from, view.state.doc.length);
+  const head = clampOffset(event.detail.to ?? event.detail.from, view.state.doc.length);
+  view.dispatch({
+    selection: { anchor, head },
+    effects: EditorView.scrollIntoView(anchor, { y: "center" }),
+  });
+  view.focus();
 }
 
 function handleMathSettingsChanged() {

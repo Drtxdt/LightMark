@@ -59,6 +59,8 @@ async function selectCandidate(candidate: QuickOpenCandidate, otherPane = false)
 }
 
 function sourceLabel(candidate: QuickOpenCandidate) {
+  if (candidate.matchedAlias) return `别名：${candidate.matchedAlias}`;
+  if (candidate.matchedTag) return `#${candidate.matchedTag}`;
   return candidate.source === "workspace" ? "工作区" : "最近";
 }
 </script>

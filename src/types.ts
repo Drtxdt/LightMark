@@ -61,6 +61,9 @@ export interface QuickOpenCandidate {
   path: string;
   source: "workspace" | "recent";
   score: number;
+  matchedAlias?: string;
+  matchedTag?: string;
+  matchKind?: "name" | "alias" | "tag" | "path";
 }
 
 export interface AppConfig {

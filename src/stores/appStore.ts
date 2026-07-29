@@ -48,13 +48,20 @@ import {
   splitLayoutForPaneActivation,
 } from "../utils/splitLayout";
 import {
-  backlinksForPath,
+  backlinksFromIndex,
   createWikiWorkspaceIndex,
   flattenMarkdownFiles,
+  knowledgeTags,
+  prepareUnlinkedMentionConversion,
+  removeWikiIndexEntry,
   resolveWikiLink,
+  scoreKnowledgeQuickOpenEntry,
+  unlinkedMentionsForPath,
   updateWikiIndexEntry,
   wikiPageFileName,
   type BacklinkItem,
+  type UnlinkedMentionItem,
+  type WikiDocumentEntry,
   type WikiLinkTarget,
   type WikiWorkspaceIndex,
 } from "../utils/wikiLinks";
@@ -100,6 +107,9 @@ export const appStore = reactive({
   wikiBacklinksError: "",
   wikiIndex: createWikiWorkspaceIndex([]) as WikiWorkspaceIndex,
   wikiIndexBusy: false,
+  wikiIndexError: "",
+  wikiUnlinkedMentions: [] as UnlinkedMentionItem[],
+  wikiMentionsForPath: "",
   pendingModeCursor: null as PendingModeCursor | null,
   pendingEditorPosition: null as EditorPositionSnapshot | null,
   exportStatus: {
@@ -119,6 +129,9 @@ let backlinkRefreshGeneration = 0;
 let wikiIndexRefreshTimer = 0;
 let wikiIndexGeneration = 0;
 let wikiIndexHydrationPromise: Promise<void> | null = null;
+let workspaceKnowledgeRefreshTimer = 0;
+const pendingWikiIndexUpdates = new Map<string, { path: string; content: string }>();
+const workspaceKnowledgePendingPaths = new Set<string>();
 const watchedFilePaths = new Map<string, string>();
 
 export const currentFileName = computed(() => {
@@ -130,7 +143,7 @@ export const currentFileName = computed(() => {
 
 export const quickOpenCandidates = computed(() => {
   const query = appStore.quickOpenQuery.trim();
-  const workspaceFiles = flattenFileNodes(appStore.fileTree).map((node) => candidateFromPath(node.path, "workspace"));
+  const workspaceFiles = appStore.wikiIndex.entries.map((entry) => candidateFromWikiEntry(entry));
   const recentFiles = appStore.recentFiles.map((path) => candidateFromPath(path, "recent"));
   const workspaceMatches = filterQuickOpenCandidates(workspaceFiles, query);
   if (appStore.currentWorkspace && workspaceFiles.length > 0 && workspaceMatches.length > 0) {
@@ -139,6 +152,8 @@ export const quickOpenCandidates = computed(() => {
   const recentMatches = filterQuickOpenCandidates(recentFiles, query);
   return recentMatches.length > 0 || query ? recentMatches : recentFiles;
 });
+
+export const workspaceKnowledgeTags = computed(() => knowledgeTags(appStore.wikiIndex));
 
 export function setContent(content: string, dirty = true) {
   setPaneContent(appStore.splitLayout.activePaneId, content, dirty);
@@ -202,7 +217,7 @@ export function setPaneContent(paneId: EditorPaneId, content: string, dirty = tr
     appStore.isDirty = dirty;
     appStore.documentMode = target.documentMode;
   }
-  scheduleBacklinksRefresh();
+  scheduleKnowledgeRefresh();
   scheduleWikiIndexEntryRefresh(target.path, content);
 }
 
@@ -318,12 +333,14 @@ export async function refreshFileTree() {
   if (!appStore.currentWorkspace) {
     appStore.fileTree = [];
     appStore.wikiIndex = createWikiWorkspaceIndex([]);
+    appStore.wikiIndexError = "";
     return;
   }
   appStore.fileTree = await invoke<FileNode[]>("list_markdown_files", {
     folder: appStore.currentWorkspace,
   });
   appStore.wikiIndex = createWikiWorkspaceIndex(appStore.fileTree, appStore.currentWorkspace);
+  appStore.wikiIndexError = "";
   const hydration = hydrateWikiWorkspaceIndex();
   wikiIndexHydrationPromise = hydration;
   void hydration.finally(() => {
@@ -335,6 +352,7 @@ async function hydrateWikiWorkspaceIndex() {
   const generation = ++wikiIndexGeneration;
   const index = appStore.wikiIndex;
   appStore.wikiIndexBusy = true;
+  appStore.wikiIndexError = "";
   try {
     const entries = [...index.entries];
     for (let offset = 0; offset < entries.length; offset += 12) {
@@ -344,7 +362,9 @@ async function hydrateWikiWorkspaceIndex() {
       for (const [path, content] of contents) updateWikiIndexEntry(index, path, content);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
-    scheduleBacklinksRefresh();
+    scheduleKnowledgeRefresh();
+  } catch (error) {
+    if (generation === wikiIndexGeneration) appStore.wikiIndexError = String(error);
   } finally {
     if (generation === wikiIndexGeneration) appStore.wikiIndexBusy = false;
   }
@@ -358,21 +378,100 @@ async function contentForWikiIndex(path: string) {
 
 function scheduleWikiIndexEntryRefresh(path: string, content: string) {
   if (!path || typeof window === "undefined") return;
+  pendingWikiIndexUpdates.set(normalizePathKey(path), { path, content });
   if (wikiIndexRefreshTimer) window.clearTimeout(wikiIndexRefreshTimer);
   wikiIndexRefreshTimer = window.setTimeout(() => {
     wikiIndexRefreshTimer = 0;
-    updateWikiIndexEntry(appStore.wikiIndex, path, content);
-    scheduleBacklinksRefresh();
+    const updates = [...pendingWikiIndexUpdates.values()];
+    pendingWikiIndexUpdates.clear();
+    for (const update of updates) {
+      updateWikiIndexEntry(appStore.wikiIndex, update.path, update.content);
+    }
+    scheduleKnowledgeRefresh();
   }, 250);
 }
 
 export async function openWorkspace(folder?: string) {
   const selected = folder ?? (await invoke<string | null>("open_folder_dialog"));
   if (!selected) return;
+  await stopWorkspaceKnowledgeWatch();
   appStore.currentWorkspace = selected;
   await refreshFileTree();
-  void refreshBacklinks();
+  await syncWorkspaceKnowledgeWatch();
+  void refreshKnowledge();
   await persistConfig();
+}
+
+export async function refreshKnowledgeIndex() {
+  await refreshFileTree();
+  void refreshKnowledge();
+}
+
+export async function syncWorkspaceKnowledgeWatch() {
+  await invoke("unwatch_markdown_workspace").catch(() => {});
+  if (!appStore.currentWorkspace) return;
+  await invoke("watch_markdown_workspace", { path: appStore.currentWorkspace }).catch((error) => {
+    appStore.wikiIndexError = `工作区监听不可用：${error}`;
+  });
+}
+
+export async function stopWorkspaceKnowledgeWatch() {
+  if (workspaceKnowledgeRefreshTimer && typeof window !== "undefined") {
+    window.clearTimeout(workspaceKnowledgeRefreshTimer);
+    workspaceKnowledgeRefreshTimer = 0;
+  }
+  workspaceKnowledgePendingPaths.clear();
+  await invoke("unwatch_markdown_workspace").catch(() => {});
+}
+
+export function scheduleWorkspaceKnowledgeRefresh(paths: string[] = []) {
+  if (!appStore.currentWorkspace || typeof window === "undefined") return;
+  for (const path of paths) {
+    if (isMarkdownFilePath(path)) workspaceKnowledgePendingPaths.add(path);
+  }
+  if (workspaceKnowledgeRefreshTimer) window.clearTimeout(workspaceKnowledgeRefreshTimer);
+  const expectedWorkspace = appStore.currentWorkspace;
+  workspaceKnowledgeRefreshTimer = window.setTimeout(() => {
+    workspaceKnowledgeRefreshTimer = 0;
+    const pendingPaths = [...workspaceKnowledgePendingPaths];
+    workspaceKnowledgePendingPaths.clear();
+    void refreshChangedKnowledgePaths(pendingPaths, expectedWorkspace);
+  }, 250);
+}
+
+async function refreshChangedKnowledgePaths(paths: string[], expectedWorkspace: string) {
+  if (!isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
+  const generation = wikiIndexGeneration;
+  const index = appStore.wikiIndex;
+  appStore.wikiIndexBusy = true;
+  appStore.wikiIndexError = "";
+  try {
+    const nextTree = await invoke<FileNode[]>("list_markdown_files", { folder: expectedWorkspace });
+    if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex || !isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
+    appStore.fileTree = nextTree;
+    const nextPaths = flattenMarkdownFiles(nextTree);
+    const nextKeys = new Set(nextPaths.map(normalizePathKey));
+    for (const entry of [...index.entries]) {
+      if (!nextKeys.has(normalizePathKey(entry.path))) removeWikiIndexEntry(index, entry.path);
+    }
+    const changedKeys = new Set(paths.filter(isMarkdownFilePath).map(normalizePathKey));
+    const targets = nextPaths.filter((path) => {
+      const existing = index.entries.find((entry) => isSamePath(entry.path, path));
+      return !existing?.indexed || changedKeys.size === 0 || changedKeys.has(normalizePathKey(path));
+    });
+    for (let offset = 0; offset < targets.length; offset += 12) {
+      const batch = targets.slice(offset, offset + 12);
+      const contents = await Promise.all(batch.map(async (path) => [path, await contentForWikiIndex(path)] as const));
+      if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex) return;
+      contents.forEach(([path, content]) => updateWikiIndexEntry(index, path, content));
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    }
+    scheduleKnowledgeRefresh();
+  } catch (error) {
+    if (generation === wikiIndexGeneration) appStore.wikiIndexError = String(error);
+  } finally {
+    if (generation === wikiIndexGeneration) appStore.wikiIndexBusy = false;
+  }
 }
 
 export async function openFile(path?: string, options: { recordNavigation?: boolean; paneId?: EditorPaneId } = {}) {
@@ -443,6 +542,73 @@ export async function navigateToFilePath(path: string) {
   await openFile(path, { recordNavigation: false });
 }
 
+export async function navigateToKnowledgeOccurrence(item: UnlinkedMentionItem | BacklinkItem) {
+  const from = "from" in item ? item.from : undefined;
+  const to = "to" in item ? item.to : undefined;
+  recordNavigationLocation();
+  await openFile(item.sourcePath, { recordNavigation: false });
+  dispatchKnowledgeOccurrence(item.sourcePath, item.line, from, to);
+}
+
+export async function convertUnlinkedMention(item: UnlinkedMentionItem) {
+  recordNavigationLocation();
+  await openFile(item.sourcePath, { recordNavigation: false });
+  const paneId = appStore.splitLayout.activePaneId;
+  const tab = getPaneTab(paneId);
+  if (!tab || tab.kind !== "normal" || tab.documentMode === "large") {
+    appStore.statusMessage = "大文件模式仅支持定位未链接提及。";
+    dispatchKnowledgeOccurrence(item.sourcePath, item.line, item.from, item.to);
+    return false;
+  }
+  const conversion = prepareUnlinkedMentionConversion(tab.content, item);
+  if (conversion.status === "stale") {
+    appStore.statusMessage = "该提及位置已经变化，知识索引已刷新，请重新选择。";
+    scheduleWikiIndexEntryRefresh(tab.path, tab.content);
+    return false;
+  }
+  const next = conversion.text;
+  const lineCount = tab.content.split(/\r?\n/).length;
+  const detail = {
+    paneId,
+    source: tab.content,
+    result: {
+      text: next,
+      changed: true,
+      stats: {
+        changedLines: 1,
+        trailingWhitespaceRemoved: 0,
+        blankLinesRemoved: 0,
+        listIndentationFixed: 0,
+        tablesFormatted: 0,
+      },
+      lineMap: Array.from({ length: lineCount }, (_, index) => index),
+    } satisfies MarkdownFormatResult,
+    handled: false,
+  };
+  window.dispatchEvent(new CustomEvent("lightmark:apply-markdown-format", { detail }));
+  if (!detail.handled) setPaneContent(paneId, next, true);
+  scheduleWikiIndexEntryRefresh(tab.path, next);
+  appStore.statusMessage = `已将“${item.text}”转为 Wiki Link，尚未保存。`;
+  dispatchKnowledgeOccurrence(item.sourcePath, item.line, conversion.from, conversion.to);
+  return true;
+}
+
+function dispatchKnowledgeOccurrence(path: string, line: number, from?: number, to?: number) {
+  const detail = {
+    path,
+    paneId: appStore.splitLayout.activePaneId,
+    line,
+    from,
+    to,
+  };
+  for (const delay of [0, 60, 160]) {
+    window.setTimeout(() => {
+      if (!isSamePath(appStore.currentFilePath, path)) return;
+      window.dispatchEvent(new CustomEvent("lightmark:jump-knowledge-occurrence", { detail }));
+    }, delay);
+  }
+}
+
 export async function openFileInOtherPane(path?: string) {
   const sourcePaneId = appStore.splitLayout.activePaneId;
   if (!appStore.splitLayout.enabled) {
@@ -510,6 +676,8 @@ export async function refreshBacklinks() {
     appStore.wikiBacklinksForPath = "";
     appStore.wikiBacklinksError = "";
     appStore.wikiBacklinksBusy = false;
+    appStore.wikiUnlinkedMentions = [];
+    appStore.wikiMentionsForPath = "";
     return;
   }
   const targetPath = appStore.currentFilePath;
@@ -521,39 +689,36 @@ export async function refreshBacklinks() {
   appStore.wikiBacklinksBusy = true;
   appStore.wikiBacklinksError = "";
   try {
-    const files = flattenMarkdownFiles(appStore.fileTree).filter((path) => !isSamePath(path, targetPath));
-    const backlinks: BacklinkItem[] = [];
-    for (const path of files) {
-      const content = await contentForBacklinkScan(path);
-      if (!content) continue;
-      backlinks.push(...backlinksForPath(targetPath, content, path, appStore.wikiIndex));
-    }
+    if (appStore.wikiIndexBusy && wikiIndexHydrationPromise) await wikiIndexHydrationPromise;
+    const backlinks = backlinksFromIndex(targetPath, appStore.wikiIndex);
+    const mentions = unlinkedMentionsForPath(targetPath, appStore.wikiIndex);
     if (generation !== backlinkRefreshGeneration || !isSamePath(appStore.currentFilePath, targetPath)) return;
     appStore.wikiBacklinks = backlinks.sort((left, right) => {
       return left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN") || left.line - right.line;
     });
+    appStore.wikiUnlinkedMentions = mentions;
+    appStore.wikiMentionsForPath = targetPath;
   } catch (error) {
     if (generation !== backlinkRefreshGeneration) return;
     appStore.wikiBacklinks = [];
+    appStore.wikiUnlinkedMentions = [];
     appStore.wikiBacklinksError = String(error);
   } finally {
     if (generation === backlinkRefreshGeneration) appStore.wikiBacklinksBusy = false;
   }
 }
 
-function scheduleBacklinksRefresh() {
+export async function refreshKnowledge() {
+  await refreshBacklinks();
+}
+
+function scheduleKnowledgeRefresh() {
   if (!appStore.currentWorkspace || !appStore.currentFilePath || typeof window === "undefined") return;
   if (backlinkRefreshTimer) window.clearTimeout(backlinkRefreshTimer);
   backlinkRefreshTimer = window.setTimeout(() => {
     backlinkRefreshTimer = 0;
-    void refreshBacklinks();
+    void refreshKnowledge();
   }, 250);
-}
-
-async function contentForBacklinkScan(path: string) {
-  const tab = appStore.tabs.find((item) => item.path && isSamePath(item.path, path));
-  if (tab?.kind === "normal") return tab.content;
-  return await invoke<string>("read_text_file", { path }).catch(() => "");
 }
 
 export function openQuickOpen() {
@@ -1824,14 +1989,27 @@ function candidateFromPath(path: string, source: QuickOpenCandidate["source"]): 
   };
 }
 
+function candidateFromWikiEntry(entry: WikiDocumentEntry): QuickOpenCandidate {
+  return {
+    name: fileNameFromPath(entry.path),
+    path: entry.path,
+    source: "workspace",
+    score: 0,
+  };
+}
+
 function filterQuickOpenCandidates(candidates: QuickOpenCandidate[], query: string) {
   const normalizedQuery = normalizeQuickOpenText(query);
   const unique = uniqueCandidates(candidates);
   if (!normalizedQuery) return unique;
   return unique
-    .map((candidate) => ({ ...candidate, score: scoreQuickOpenCandidate(candidate, normalizedQuery) }))
+    .map((candidate) => scoreQuickOpenCandidate(candidate, normalizedQuery))
     .filter((candidate) => Number.isFinite(candidate.score))
-    .sort((left, right) => left.score - right.score || left.name.localeCompare(right.name, "zh-Hans-CN"));
+    .sort((left, right) => (
+      left.score - right.score
+      || pathDepth(left.path) - pathDepth(right.path)
+      || left.path.localeCompare(right.path, "zh-Hans-CN")
+    ));
 }
 
 function uniqueCandidates(candidates: QuickOpenCandidate[]) {
@@ -1847,12 +2025,22 @@ function uniqueCandidates(candidates: QuickOpenCandidate[]) {
 }
 
 function scoreQuickOpenCandidate(candidate: QuickOpenCandidate, query: string) {
-  const name = normalizeQuickOpenText(candidate.name);
+  const name = normalizeQuickOpenText(candidate.name.replace(/\.(md|markdown)$/i, ""));
   const path = normalizeQuickOpenText(candidate.path);
+  const entry = appStore.wikiIndex.entries.find((item) => isSamePath(item.path, candidate.path));
+  if (entry) {
+    const match = scoreKnowledgeQuickOpenEntry(entry, query);
+    return match ? { ...candidate, ...match } : { ...candidate, score: Number.POSITIVE_INFINITY };
+  }
+  if (name === query) return { ...candidate, score: 0, matchKind: "name" as const };
   const nameScore = subsequenceScore(name, query);
-  if (Number.isFinite(nameScore)) return nameScore;
+  if (Number.isFinite(nameScore)) return { ...candidate, score: 200 + nameScore, matchKind: "name" as const };
   const pathScore = subsequenceScore(path, query);
-  return Number.isFinite(pathScore) ? pathScore + 100 : Number.POSITIVE_INFINITY;
+  return {
+    ...candidate,
+    score: Number.isFinite(pathScore) ? 500 + pathScore : Number.POSITIVE_INFINITY,
+    matchKind: "path" as const,
+  };
 }
 
 function subsequenceScore(value: string, query: string) {
@@ -1872,6 +2060,14 @@ function subsequenceScore(value: string, query: string) {
 
 function normalizeQuickOpenText(value: string) {
   return value.replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function pathDepth(path: string) {
+  return path.replace(/\\/g, "/").split("/").length;
+}
+
+function isMarkdownFilePath(path: string) {
+  return /\.(md|markdown)$/i.test(path);
 }
 
 function conflictCopyPath(path: string) {

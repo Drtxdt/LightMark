@@ -27,6 +27,8 @@ pub fn run() {
             commands::file::watch_markdown_file,
             commands::file::unwatch_markdown_file,
             commands::file::unwatch_all_markdown_files,
+            commands::file::watch_markdown_workspace,
+            commands::file::unwatch_markdown_workspace,
             commands::file::find_similar_markdown_files,
             commands::file::create_markdown_file,
             commands::draft::write_draft,

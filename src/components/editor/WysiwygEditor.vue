@@ -2937,6 +2937,7 @@ onMounted(() => {
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.addEventListener("lightmark:jump-math", handleJumpMath as EventListener);
+  window.addEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.addEventListener("resize", handleEditorShellScroll);
@@ -2951,6 +2952,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
   window.removeEventListener("lightmark:jump-math", handleJumpMath as EventListener);
+  window.removeEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.removeEventListener("resize", handleEditorShellScroll);
@@ -4471,6 +4473,38 @@ function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string; line
     });
   }
   activeEditor.view.focus();
+}
+
+function handleKnowledgeOccurrence(event: CustomEvent<{ paneId?: EditorPaneId; line?: number; from?: number; to?: number }>) {
+  if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const markdown = paneContent.value;
+  const fromOffset = typeof event.detail?.from === "number"
+    ? event.detail.from
+    : markdownLineStartOffset(markdown, event.detail?.line ?? 0);
+  const toOffset = typeof event.detail?.to === "number" ? event.detail.to : fromOffset;
+  const from = markdownOffsetToDocPos(activeEditor.view.state, fromOffset, markdown);
+  const to = markdownOffsetToDocPos(activeEditor.view.state, toOffset, markdown);
+  activeEditor.view.dispatch(
+    activeEditor.view.state.tr
+      .setSelection(TextSelection.create(activeEditor.view.state.doc, clampDocPos(from, activeEditor.view.state.doc.content.size), clampDocPos(to, activeEditor.view.state.doc.content.size)))
+      .scrollIntoView(),
+  );
+  appStore.paneContextLines[props.paneId] = Math.max(0, event.detail?.line ?? 0);
+  activeEditor.view.focus();
+}
+
+function markdownLineStartOffset(markdown: string, line: number) {
+  let offset = 0;
+  const target = Math.max(0, Math.floor(line));
+  for (let index = 0; index < target; index += 1) {
+    const next = markdown.indexOf("\n", offset);
+    if (next < 0) return markdown.length;
+    offset = next + 1;
+  }
+  return offset;
 }
 
 function handleJumpMath(event: CustomEvent<{ targetId?: string; paneId?: EditorPaneId }>) {

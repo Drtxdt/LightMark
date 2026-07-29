@@ -33,6 +33,12 @@ try {
     parseFrontMatterAliases,
     updateWikiIndexEntry,
     wikiCompletionCandidates,
+    parseKnowledgeTags,
+    knowledgeTags,
+    backlinksFromIndex,
+    unlinkedMentionsForPath,
+    prepareUnlinkedMentionConversion,
+    scoreKnowledgeQuickOpenEntry,
   } = await import(pathToFileURL(tempPath).href);
 
   const sample = [
@@ -116,15 +122,103 @@ try {
     { page: "项目甲", heading: "设计" },
   ]);
 
+  const tagged = [
+    "---",
+    "tags: [project/alpha, 中文]",
+    "tag: writing",
+    "---",
+    "# Heading",
+    "正文 #Writing #nested/child #中文",
+    "\\#escaped https://example.test/#url",
+    "`#inline-code` and $x_#math$",
+    "```md",
+    "#fenced",
+    "```",
+    "<div>#html</div>",
+  ].join("\r\n");
+  assert.deepEqual(parseKnowledgeTags(tagged), ["project/alpha", "中文", "writing", "nested/child"]);
+
+  updateWikiIndexEntry(index, "C:/vault/Project Alpha.md", "---\naliases: [Alpha, 项目甲, A]\ntags: [project/alpha]\n---\n# Project Alpha");
+  updateWikiIndexEntry(index, "C:/vault/Nested/Other.md", [
+    "---",
+    "tags: [research, project/alpha]",
+    "---",
+    "Project Alpha and 项目甲 are plain mentions.",
+    "[[Project Alpha]] is linked.",
+    "`Project Alpha` and $Project Alpha$ are protected.",
+    "[Project Alpha](https://example.test) is a Markdown link.",
+    "<div>项目甲</div>",
+    "A is too short.",
+  ].join("\r\n"));
+  const groupedTags = knowledgeTags(index);
+  assert.equal(groupedTags.find((item) => item.normalizedName === "project/alpha").paths.length, 2);
+  const indexedBacklinks = backlinksFromIndex("C:/vault/Project Alpha.md", index);
+  assert.equal(indexedBacklinks.length, 1);
+  const mentions = unlinkedMentionsForPath("C:/vault/Project Alpha.md", index);
+  assert.deepEqual(mentions.map((item) => item.text), ["Project Alpha", "项目甲"]);
+  assert.ok(mentions.every((item) => item.sourcePath === "C:/vault/Nested/Other.md"));
+  assert.ok(mentions.every((item) => item.to > item.from));
+  const mentionSource = "Before Project Alpha after";
+  const conversion = prepareUnlinkedMentionConversion(mentionSource, {
+    from: 7,
+    to: 20,
+    text: "Project Alpha",
+  });
+  assert.deepEqual(conversion, {
+    status: "ok",
+    text: "Before [[Project Alpha]] after",
+    replacement: "[[Project Alpha]]",
+    from: 7,
+    to: 24,
+  });
+  assert.deepEqual(
+    prepareUnlinkedMentionConversion("Before changed after", { from: 7, to: 20, text: "Project Alpha" }),
+    { status: "stale" },
+  );
+
+  const targetEntry = index.entries.find((entry) => entry.path === "C:/vault/Project Alpha.md");
+  assert.equal(scoreKnowledgeQuickOpenEntry(targetEntry, "project alpha").score, 0);
+  assert.deepEqual(scoreKnowledgeQuickOpenEntry(targetEntry, "项目甲"), {
+    score: 100,
+    matchKind: "alias",
+    matchedAlias: "项目甲",
+  });
+  const metadataEntry = {
+    ...targetEntry,
+    name: "Document",
+    aliases: ["Alpha"],
+    tags: ["project/alpha"],
+    path: "C:/vault/Nested/Document.md",
+  };
+  assert.equal(scoreKnowledgeQuickOpenEntry(metadataEntry, "lph").matchKind, "alias");
+  assert.deepEqual(scoreKnowledgeQuickOpenEntry(metadataEntry, "#project").matchKind, "tag");
+  assert.equal(scoreKnowledgeQuickOpenEntry(metadataEntry, "nested").matchKind, "path");
+  assert.ok(
+    scoreKnowledgeQuickOpenEntry(metadataEntry, "#project").score
+      < scoreKnowledgeQuickOpenEntry(metadataEntry, "lph").score,
+  );
+
   const storeSource = fs.readFileSync(path.resolve("src/stores/appStore.ts"), "utf8");
   const sidebarSource = fs.readFileSync(path.resolve("src/components/layout/Sidebar.vue"), "utf8");
+  const quickOpenSource = fs.readFileSync(path.resolve("src/components/command/QuickOpenPalette.vue"), "utf8");
+  const watcherSource = fs.readFileSync(path.resolve("src-tauri/src/commands/file.rs"), "utf8");
   assert.doesNotMatch(
     storeSource,
     /function scheduleBacklinksRefresh\(\)\s*\{\s*if \(!appStore\.wikiBacklinksOpen/,
     "backlink detection must continue while the panel is hidden",
   );
-  assert.match(sidebarSource, /v-if="appStore\.wikiBacklinks\.length > 0"/);
-  assert.match(sidebarSource, /count === 0 && activePane\.value === "backlinks"/);
+  assert.match(sidebarSource, />知识</);
+  assert.match(sidebarSource, /workspaceKnowledgeTags/);
+  assert.match(sidebarSource, /convertUnlinkedMention/);
+  assert.match(storeSource, /backlinksFromIndex/);
+  assert.match(storeSource, /unlinkedMentionsForPath/);
+  assert.match(storeSource, /watch_markdown_workspace/);
+  assert.match(storeSource, /scoreKnowledgeQuickOpenEntry/);
+  assert.match(quickOpenSource, /别名：/);
+  assert.match(quickOpenSource, /matchedTag/);
+  assert.match(watcherSource, /watch_markdown_workspace/);
+  assert.match(watcherSource, /RecursiveMode::Recursive/);
+  assert.match(watcherSource, /lightmark-workspace-watch-event/);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

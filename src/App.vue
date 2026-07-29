@@ -30,9 +30,12 @@ import {
   openQuickOpen,
   saveAllDirtyTabs,
   saveCurrentFile,
+  scheduleWorkspaceKnowledgeRefresh,
   showSaveFailure,
   startExternalFileMonitor,
   stopExternalFileMonitor,
+  stopWorkspaceKnowledgeWatch,
+  syncWorkspaceKnowledgeWatch,
 } from "./stores/appStore";
 import { openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
@@ -53,6 +56,7 @@ let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
 let unlistenCloseRequested: (() => void) | null = null;
 let unlistenExternalFileWatch: (() => void) | null = null;
+let unlistenWorkspaceWatch: (() => void) | null = null;
 let unwatchWindowChrome = () => {};
 let unwatchDraftAutosave = () => {};
 let closingBypass = false;
@@ -65,6 +69,7 @@ onMounted(async () => {
   applyTheme();
   startDraftAutosave();
   startExternalFileMonitor();
+  await syncWorkspaceKnowledgeWatch();
   await recoverStartupDrafts();
   ensureDefaultTab();
   unwatchWindowChrome = watch(
@@ -114,6 +119,9 @@ onMounted(async () => {
   unlistenExternalFileWatch = await listen("lightmark-file-watch-event", () => {
     void checkOpenFileSnapshots();
   });
+  unlistenWorkspaceWatch = await listen<{ paths?: string[] }>("lightmark-workspace-watch-event", (event) => {
+    scheduleWorkspaceKnowledgeRefresh(event.payload?.paths ?? []);
+  });
   unlistenTauriImageDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type !== "drop") return;
     const paths = event.payload.paths || [];
@@ -143,6 +151,7 @@ onUnmounted(() => {
   unwatchDraftAutosave();
   stopDraftAutosave();
   stopExternalFileMonitor();
+  void stopWorkspaceKnowledgeWatch();
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);
@@ -150,6 +159,8 @@ onUnmounted(() => {
   unlistenCloseRequested = null;
   unlistenExternalFileWatch?.();
   unlistenExternalFileWatch = null;
+  unlistenWorkspaceWatch?.();
+  unlistenWorkspaceWatch = null;
   unlistenTauriImageDrop?.();
   unlistenTauriImageDrop = null;
 });
