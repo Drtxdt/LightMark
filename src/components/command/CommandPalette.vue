@@ -13,7 +13,10 @@ import {
   openWorkspace,
   saveCurrentFile,
   switchMode,
+  toggleDistractionFreeMode,
+  toggleFocusMode,
   toggleSplitLayout,
+  toggleTypewriterMode,
 } from "../../stores/appStore";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { pluginCommands } from "../../plugins/registry";
@@ -42,6 +45,9 @@ const coreCommands = [
   { name: "保存", handler: () => saveCurrentFile() },
   { name: "格式化当前 Markdown", handler: () => formatCurrentMarkdown() },
   { name: "切换左右分屏", handler: () => toggleSplitLayout() },
+  { name: "切换专注模式（F8）", handler: () => toggleFocusMode() },
+  { name: "切换打字机模式（F9）", handler: () => toggleTypewriterMode() },
+  { name: "切换无干扰模式（Ctrl+Shift+F11）", handler: () => toggleDistractionFreeMode() },
   { name: "在另一栏打开当前文件", handler: () => openFileInOtherPane(appStore.currentFilePath) },
   { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
   ...exportTargets.map((target) => ({

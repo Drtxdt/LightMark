@@ -37,6 +37,7 @@ import { mathTokenFromParts, serializeMathToken, type MathDelimiter } from "../.
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
+import { typewriterScrollDelta } from "../../utils/writingModes";
 import {
   parseWikiLinkHref,
   wikiCompletionCandidates as findWikiCompletionCandidates,
@@ -88,6 +89,7 @@ type EditorFindMatch = TextMatch & { docFrom: number; docTo: number };
 
 const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
 let suppressWysiwygUpdate = false;
+let wysiwygTypewriterFrame = 0;
 
 const contextMenu = ref({
   visible: false,
@@ -1300,6 +1302,72 @@ turndown.addRule("subscript", {
   replacement: (content) => `~${content}~`,
 });
 
+const WritingFocusDecorations = Extension.create({
+  name: "writingFocusDecorations",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey(`lightmarkWritingFocus-${props.paneId}`),
+        props: {
+          decorations(state) {
+            if (
+              !appStore.settings.editor.focusMode ||
+              props.paneId !== appStore.splitLayout.activePaneId ||
+              paneEditorMode.value !== "wysiwyg" ||
+              paneDocumentMode.value !== "normal"
+            ) {
+              return null;
+            }
+            const { $from } = state.selection;
+            const topPos = $from.depth > 0 ? $from.before(1) : 0;
+            const findMatches = findReplaceStore.open ? collectWysiwygFindMatches(state).items : [];
+            const containsFindMatch = (from: number, to: number) =>
+              findMatches.some((match) => match.docFrom < to && match.docTo > from);
+            let outerListItemPos: number | null = null;
+            for (let depth = 1; depth <= $from.depth; depth += 1) {
+              if ($from.node(depth).type.name === "listItem") {
+                outerListItemPos = $from.before(depth);
+                break;
+              }
+            }
+            const decorations: Decoration[] = [];
+            state.doc.forEach((node, offset) => {
+              if (
+                offset === topPos &&
+                outerListItemPos !== null &&
+                (node.type.name === "bulletList" || node.type.name === "orderedList")
+              ) {
+                node.forEach((item, itemOffset) => {
+                  const itemPos = offset + 1 + itemOffset;
+                  decorations.push(
+                    Decoration.node(itemPos, itemPos + item.nodeSize, {
+                      class:
+                        itemPos === outerListItemPos || containsFindMatch(itemPos, itemPos + item.nodeSize)
+                          ? "lm-focus-active"
+                          : "lm-focus-dimmed",
+                    }),
+                  );
+                });
+                return;
+              }
+              decorations.push(
+                Decoration.node(offset, offset + node.nodeSize, {
+                  class:
+                    offset === topPos || containsFindMatch(offset, offset + node.nodeSize)
+                      ? "lm-focus-active"
+                      : "lm-focus-dimmed",
+                }),
+              );
+            });
+            return DecorationSet.create(state.doc, decorations);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 const LightMarkInlineCode = Mark.create({
   name: "code",
   code: true,
@@ -2024,6 +2092,7 @@ const editor = useEditor({
     FrontMatterInput,
     FencedCodeBlockInput,
     FindReplaceDecorations,
+    WritingFocusDecorations,
     TyporaSourceMarkers,
   ],
   content: renderMarkdownForEditorWithAssets(paneContent.value),
@@ -2247,16 +2316,19 @@ const editor = useEditor({
     captureWysiwygPosition(editor.view);
     updateWysiwygWikiCompletion(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
+    scheduleWysiwygTypewriter(editor.view);
   },
   onSelectionUpdate({ editor }) {
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
     updateWysiwygWikiCompletion(editor.view);
+    scheduleWysiwygTypewriter(editor.view);
   },
   onFocus({ editor }) {
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
+    scheduleWysiwygTypewriter(editor.view);
   },
   onBlur() {
     window.setTimeout(() => {
@@ -2940,7 +3012,9 @@ onMounted(() => {
   window.addEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
+  window.addEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.addEventListener("resize", handleEditorShellScroll);
+  syncWysiwygWritingModes();
 });
 
 onBeforeUnmount(() => {
@@ -2955,7 +3029,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
+  window.removeEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.removeEventListener("resize", handleEditorShellScroll);
+  window.cancelAnimationFrame(wysiwygTypewriterFrame);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
 });
@@ -3118,6 +3194,49 @@ function restoreWysiwygPosition(position: any) {
     }
     if (shell) shell.scrollTop = scrollTopFromSnapshot(position, shell.scrollHeight, shell.clientHeight);
     view.focus();
+    window.requestAnimationFrame(() => scheduleWysiwygTypewriter(view));
+  });
+}
+
+function handleWysiwygWritingModesChanged() {
+  syncWysiwygWritingModes();
+  const view = editor.value?.view;
+  if (!view) return;
+  view.dispatch(view.state.tr.setMeta("lightmarkWritingModes", true));
+  scheduleWysiwygTypewriter(view);
+}
+
+function syncWysiwygWritingModes() {
+  editorShell.value?.classList.toggle(
+    "lm-typewriter-mode",
+    appStore.settings.editor.typewriterMode && paneDocumentMode.value === "normal",
+  );
+}
+
+function scheduleWysiwygTypewriter(view = editor.value?.view) {
+  window.cancelAnimationFrame(wysiwygTypewriterFrame);
+  wysiwygTypewriterFrame = window.requestAnimationFrame(() => {
+    wysiwygTypewriterFrame = window.requestAnimationFrame(() => {
+      const shell = editorShell.value;
+      if (
+        !view ||
+        !shell ||
+        !appStore.settings.editor.typewriterMode ||
+        props.paneId !== appStore.splitLayout.activePaneId ||
+        paneEditorMode.value !== "wysiwyg" ||
+        paneDocumentMode.value !== "normal"
+      ) {
+        return;
+      }
+      const caret = view.coordsAtPos(view.state.selection.head);
+      const viewport = shell.getBoundingClientRect();
+      const delta = typewriterScrollDelta(caret.top, caret.bottom, viewport.top, viewport.bottom);
+      if (Math.abs(delta) < 1) return;
+      shell.scrollBy({
+        top: delta,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
   });
 }
 

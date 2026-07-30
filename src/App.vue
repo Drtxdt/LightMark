@@ -36,9 +36,13 @@ import {
   stopExternalFileMonitor,
   stopWorkspaceKnowledgeWatch,
   syncWorkspaceKnowledgeWatch,
+  toggleDistractionFreeMode,
+  toggleFocusMode,
+  toggleTypewriterMode,
 } from "./stores/appStore";
-import { openFindPanel } from "./stores/findReplaceStore";
+import { closeFindPanel, openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
+import { hasVisibleBlockingOverlay } from "./utils/writingModes";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
 import { syncWindowChrome } from "./utils/windowChrome";
 import { flushCurrentDraft, recoverStartupDrafts, startDraftAutosave, stopDraftAutosave } from "./stores/draftStore";
@@ -52,6 +56,9 @@ let unbindGoToLine = () => {};
 let unbindNavigationBack = () => {};
 let unbindNavigationForward = () => {};
 let unbindFind = () => {};
+let unbindFocusMode = () => {};
+let unbindTypewriterMode = () => {};
+let unbindDistractionFreeMode = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
 let unlistenCloseRequested: (() => void) | null = null;
@@ -109,12 +116,23 @@ onMounted(async () => {
   unbindFind = bindShortcut("ctrl+f", () => {
     openFindPanel();
   });
+  unbindFocusMode = bindShortcut("f8", () => {
+    void toggleFocusMode();
+  });
+  unbindTypewriterMode = bindShortcut("f9", () => {
+    void toggleTypewriterMode();
+  });
+  unbindDistractionFreeMode = bindShortcut("ctrl+shift+f11", () => {
+    if (!appStore.distractionFreeMode) closeFindPanel();
+    toggleDistractionFreeMode();
+  });
   unbindPreventUiSelectAll = bindShortcut("ctrl+a", (event) => {
     if (isEditableTarget(event.target)) return false;
   });
   window.addEventListener("paste", handleGlobalImagePaste);
   window.addEventListener("dragover", handleGlobalImageDragOver);
   window.addEventListener("drop", handleGlobalImageDrop);
+  window.addEventListener("keydown", handleDistractionFreeEscape);
   unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
   unlistenExternalFileWatch = await listen("lightmark-file-watch-event", () => {
     void checkOpenFileSnapshots();
@@ -146,6 +164,9 @@ onUnmounted(() => {
   unbindNavigationBack();
   unbindNavigationForward();
   unbindFind();
+  unbindFocusMode();
+  unbindTypewriterMode();
+  unbindDistractionFreeMode();
   unbindPreventUiSelectAll();
   unwatchWindowChrome();
   unwatchDraftAutosave();
@@ -155,6 +176,7 @@ onUnmounted(() => {
   window.removeEventListener("paste", handleGlobalImagePaste);
   window.removeEventListener("dragover", handleGlobalImageDragOver);
   window.removeEventListener("drop", handleGlobalImageDrop);
+  window.removeEventListener("keydown", handleDistractionFreeEscape);
   unlistenCloseRequested?.();
   unlistenCloseRequested = null;
   unlistenExternalFileWatch?.();
@@ -229,6 +251,19 @@ async function recoverPendingDraftBeforeClose() {
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .ProseMirror, .cm-editor"));
+}
+
+function handleDistractionFreeEscape(event: KeyboardEvent) {
+  if (
+    event.key !== "Escape" ||
+    event.defaultPrevented ||
+    !appStore.distractionFreeMode ||
+    hasVisibleBlockingOverlay()
+  ) {
+    return;
+  }
+  event.preventDefault();
+  toggleDistractionFreeMode(false);
 }
 
 function handleGlobalImagePaste(event: ClipboardEvent) {

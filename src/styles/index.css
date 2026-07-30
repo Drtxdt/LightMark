@@ -202,6 +202,29 @@ body {
   color: inherit;
 }
 
+.lm-focus-dimmed {
+  opacity: 0.3;
+  transition: opacity 140ms ease;
+}
+
+.lm-focus-active {
+  opacity: 1;
+  transition: opacity 140ms ease;
+}
+
+.lm-editor-scroll.lm-typewriter-mode .ProseMirror,
+.cm-editor.lm-typewriter-mode .cm-scroller {
+  padding-top: 50vh !important;
+  padding-bottom: 50vh !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lm-focus-dimmed,
+  .lm-focus-active {
+    transition: none;
+  }
+}
+
 .ProseMirror p.is-editor-empty:first-child::before {
   color: #94a3b8;
   content: attr(data-placeholder);

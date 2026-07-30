@@ -41,6 +41,9 @@ const shortcutRows = [
   { command: "查找与替换", shortcut: "Ctrl+F" },
   { command: "快速打开文件", shortcut: "Ctrl+P" },
   { command: "命令面板", shortcut: "Ctrl+Shift+P" },
+  { command: "专注模式", shortcut: "F8" },
+  { command: "打字机模式", shortcut: "F9" },
+  { command: "无干扰模式", shortcut: "Ctrl+Shift+F11" },
   { command: "前往指定标题", shortcut: "Ctrl+Shift+O" },
   { command: "前往指定行", shortcut: "Ctrl+G" },
   { command: "后退 / 前进", shortcut: "Alt+← / Alt+→" },
@@ -50,7 +53,7 @@ const shortcutRows = [
 const experimentalGroups: Array<{ title: string; items: string[]; note?: string }> = [
   {
     title: "写作辅助",
-    items: ["纯文本粘贴策略", "拼写检查", "专注模式与打字机模式"],
+    items: ["纯文本粘贴策略", "拼写检查"],
   },
   {
     title: "Markdown 精细控制",
@@ -227,6 +230,14 @@ function cloneSettings(settings: AppSettings): AppSettings {
               <label class="settings-row">
                 <span><b>显示字数与行数</b><small>在底部状态栏显示普通文档字数或大文件行数。</small></span>
                 <input v-model="localSettings.editor.showWordCount" type="checkbox" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>专注模式</b><small>仅突出当前结构块，其他内容降低至约 30% 不透明度。</small></span>
+                <input v-model="localSettings.editor.focusMode" type="checkbox" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>打字机模式</b><small>光标离开视口舒适区后，将其平滑校正到垂直中央。</small></span>
+                <input v-model="localSettings.editor.typewriterMode" type="checkbox" @change="persist" />
               </label>
             </div>
             <div class="settings-group">

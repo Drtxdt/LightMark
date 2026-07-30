@@ -100,6 +100,8 @@ export const appStore = reactive({
   settingsOpen: false,
   commandPaletteOpen: false,
   wordCountOpen: false,
+  distractionFreeMode: false,
+  distractionHintVisible: false,
   wikiBacklinksOpen: false,
   wikiBacklinks: [] as BacklinkItem[],
   wikiBacklinksForPath: "",
@@ -130,6 +132,7 @@ let wikiIndexRefreshTimer = 0;
 let wikiIndexGeneration = 0;
 let wikiIndexHydrationPromise: Promise<void> | null = null;
 let workspaceKnowledgeRefreshTimer = 0;
+let distractionHintTimer = 0;
 const pendingWikiIndexUpdates = new Map<string, { path: string; content: string }>();
 const workspaceKnowledgePendingPaths = new Set<string>();
 const watchedFilePaths = new Map<string, string>();
@@ -1226,6 +1229,7 @@ export async function setActivePane(paneId: EditorPaneId) {
   const tab = appStore.tabs.find((item) => item.id === nextTabId) ?? getActiveTab();
   appStore.splitLayout = normalizeSplitLayout({ ...appStore.splitLayout, activePaneId: paneId }, tabIds(), tab?.id ?? "");
   if (tab) projectTab(tab);
+  dispatchWritingModesChanged();
   await persistConfig();
 }
 
@@ -1372,6 +1376,57 @@ export function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.spl
     appStore.editorMode = mode;
     syncActiveTabFromProjection();
   }
+  dispatchWritingModesChanged();
+}
+
+function dispatchWritingModesChanged() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("lightmark:writing-modes-changed"));
+  }
+}
+
+function writingModesAvailable() {
+  const tab = getPaneTab(appStore.splitLayout.activePaneId);
+  if (tab?.documentMode !== "large") return true;
+  appStore.statusMessage = "大文件模式暂不支持专注模式与打字机模式。";
+  return false;
+}
+
+export async function toggleFocusMode(force?: boolean) {
+  if (!writingModesAvailable()) return false;
+  const enabled = force ?? !appStore.settings.editor.focusMode;
+  appStore.settings.editor.focusMode = enabled;
+  dispatchWritingModesChanged();
+  appStore.statusMessage = `专注模式已${enabled ? "开启" : "关闭"}`;
+  await persistConfig();
+  return true;
+}
+
+export async function toggleTypewriterMode(force?: boolean) {
+  if (!writingModesAvailable()) return false;
+  const enabled = force ?? !appStore.settings.editor.typewriterMode;
+  appStore.settings.editor.typewriterMode = enabled;
+  dispatchWritingModesChanged();
+  appStore.statusMessage = `打字机模式已${enabled ? "开启" : "关闭"}`;
+  await persistConfig();
+  return true;
+}
+
+export function toggleDistractionFreeMode(force?: boolean) {
+  const enabled = force ?? !appStore.distractionFreeMode;
+  appStore.distractionFreeMode = enabled;
+  window.clearTimeout(distractionHintTimer);
+  appStore.distractionHintVisible = enabled;
+  if (enabled) {
+    appStore.wordCountOpen = false;
+    closeTransientPalettes();
+    distractionHintTimer = window.setTimeout(() => {
+      appStore.distractionHintVisible = false;
+    }, 2200);
+  }
+  appStore.statusMessage = `无干扰模式已${enabled ? "开启" : "关闭"}`;
+  dispatchWritingModesChanged();
+  return enabled;
 }
 
 export async function readLargeFileChunk(startLine: number, lineCount: number) {
@@ -1484,12 +1539,20 @@ function normalizeTheme(theme: ThemeMode | undefined) {
 
 export async function updateSettings(settings: AppSettings) {
   const previousMathNumbering = appStore.settings.markdown.mathNumbering;
+  const previousFocusMode = appStore.settings.editor.focusMode;
+  const previousTypewriterMode = appStore.settings.editor.typewriterMode;
   appStore.settings = normalizeSettings({ recentFiles: appStore.recentFiles, settings });
   appStore.theme = appStore.settings.appearance.theme;
   applyTheme();
   await persistConfig();
   if (previousMathNumbering !== appStore.settings.markdown.mathNumbering) {
     window.dispatchEvent(new CustomEvent("lightmark:math-settings-changed"));
+  }
+  if (
+    previousFocusMode !== appStore.settings.editor.focusMode ||
+    previousTypewriterMode !== appStore.settings.editor.typewriterMode
+  ) {
+    dispatchWritingModesChanged();
   }
 }
 

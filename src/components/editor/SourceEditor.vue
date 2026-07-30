@@ -25,6 +25,7 @@ import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
+import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingModes";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
 import type { EditorPaneId } from "../../types";
@@ -37,6 +38,7 @@ const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 let applyingExternalChange = false;
 let mathDiagnosticTimer: number | null = null;
+let typewriterFrame = 0;
 let sourceFindMatches: TextMatch[] = [];
 const wikiCompletion = ref({
   visible: false,
@@ -83,6 +85,51 @@ const mathDiagnosticField = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
+
+const sourceFocusField = StateField.define<DecorationSet>({
+  create(state) {
+    return buildSourceFocusDecorations(state);
+  },
+  update(_value, transaction) {
+    return buildSourceFocusDecorations(transaction.state);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+function sourceFocusEnabled() {
+  return (
+    appStore.settings.editor.focusMode &&
+    props.paneId === appStore.splitLayout.activePaneId &&
+    paneDocumentMode.value === "normal" &&
+    paneEditorMode.value === "source"
+  );
+}
+
+function buildSourceFocusDecorations(state: EditorState) {
+  if (!sourceFocusEnabled()) return Decoration.none;
+  const range = sourceFocusRange(state);
+  const clearLines = new Set<number>();
+  if (findReplaceStore.open) {
+    for (const match of sourceFindMatches) {
+      const fromLine = state.doc.lineAt(Math.min(match.from, state.doc.length)).number;
+      const toLine = state.doc.lineAt(Math.min(match.to, state.doc.length)).number;
+      for (let line = fromLine; line <= toLine; line += 1) clearLines.add(line);
+    }
+  }
+  const decorations = [];
+  for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+    const line = state.doc.line(lineNumber);
+    decorations.push(
+      Decoration.line({
+        class:
+          lineNumber >= range.fromLine && lineNumber <= range.toLine || clearLines.has(lineNumber)
+            ? "lm-focus-active"
+            : "lm-focus-dimmed",
+      }).range(line.from),
+    );
+  }
+  return Decoration.set(decorations, true);
+}
 
 const minimalTheme = EditorView.theme({
   "&": {
@@ -226,6 +273,7 @@ function extensions() {
     keymap.of([...sourceInputKeymap, ...historyKeymap]),
     sourceFindField,
     mathDiagnosticField,
+    sourceFocusField,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
@@ -315,6 +363,7 @@ function extensions() {
       if (update.docChanged) scheduleMathDiagnostics(update.view);
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
       if (update.docChanged || update.selectionSet) captureSourcePosition(update.view);
+      if (update.docChanged || update.selectionSet) scheduleSourceTypewriter(update.view);
     }),
   ];
 }
@@ -506,6 +555,7 @@ onMounted(() => {
   scheduleMathDiagnostics(view, 0);
   restorePendingSourceCursor();
   restorePendingSourcePosition();
+  syncSourceWritingModes();
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
@@ -515,6 +565,7 @@ onMounted(() => {
   window.addEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
+  window.addEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
 });
 
 watch(
@@ -528,6 +579,7 @@ watch(
     }));
     applyingExternalChange = false;
     scheduleMathDiagnostics(view, 0);
+    syncSourceWritingModes();
     restorePendingSourcePosition();
   },
 );
@@ -543,6 +595,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
+  window.removeEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
+  window.cancelAnimationFrame(typewriterFrame);
   view?.destroy();
   view = null;
 });
@@ -638,6 +692,43 @@ function restoreSourcePosition(position: any) {
     view.dispatch({ selection: { anchor, head } });
     view.scrollDOM.scrollTop = scrollTopFromSnapshot(position, view.scrollDOM.scrollHeight, view.scrollDOM.clientHeight);
     view.focus();
+    window.requestAnimationFrame(() => scheduleSourceTypewriter(view));
+  });
+}
+
+function handleSourceWritingModesChanged() {
+  syncSourceWritingModes();
+  if (!view) return;
+  view.dispatch({});
+  scheduleSourceTypewriter(view);
+}
+
+function syncSourceWritingModes() {
+  view?.dom.classList.toggle("lm-typewriter-mode", appStore.settings.editor.typewriterMode && paneDocumentMode.value === "normal");
+}
+
+function scheduleSourceTypewriter(currentView = view) {
+  window.cancelAnimationFrame(typewriterFrame);
+  typewriterFrame = window.requestAnimationFrame(() => {
+    if (
+      !currentView ||
+      !appStore.settings.editor.typewriterMode ||
+      props.paneId !== appStore.splitLayout.activePaneId ||
+      paneDocumentMode.value !== "normal" ||
+      paneEditorMode.value !== "source"
+    ) {
+      return;
+    }
+    const selection = currentView.state.selection.main;
+    const caret = currentView.coordsAtPos(selection.head);
+    if (!caret) return;
+    const viewport = currentView.scrollDOM.getBoundingClientRect();
+    const delta = typewriterScrollDelta(caret.top, caret.bottom, viewport.top, viewport.bottom);
+    if (Math.abs(delta) < 1) return;
+    currentView.scrollDOM.scrollBy({
+      top: delta,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
   });
 }
 
