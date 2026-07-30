@@ -24,6 +24,8 @@
     "check:export-preparation": "node scripts/check-export-preparation.mjs",
     "check:front-matter": "node scripts/check-front-matter.mjs",
     "check:writing-modes": "node scripts/check-writing-modes.mjs",
+    "check:image-layout": "node scripts/check-image-layout.mjs",
+    "check:document-assets": "node scripts/check-document-assets.mjs",
     "check:regression-closures": "node scripts/check-regression-closures.mjs",
     "check:math-tools-cli": "node scripts/check-math-tools-cli.mjs"
   },

@@ -19,6 +19,7 @@ import type { MathNumberingMode } from "./mathMarkdown";
 import { analyzeMathExportCompatibility } from "./mathExportCompatibility";
 import { alertDialog, confirmDialog } from "../stores/dialogStore";
 import { markdownForNativeExport, markdownForPandocExport } from "./frontMatter";
+import { enhancedImagesForPandoc } from "./enhancedImages";
 
 const katexFontUrls = import.meta.glob("../../node_modules/katex/dist/fonts/*.woff2", {
   eager: true,
@@ -118,7 +119,9 @@ export async function exportCurrentDocument(input: {
   const title = fileNameFromPath(input.currentPath);
   const theme = exportTheme(input.settings);
   const nativeMarkdown = markdownForNativeExport(input.markdown, input.settings.includeYamlFrontMatter);
-  const pandocMarkdown = markdownForPandocExport(input.markdown, input.settings.includeYamlFrontMatter);
+  const pandocMarkdown = enhancedImagesForPandoc(
+    markdownForPandocExport(input.markdown, input.settings.includeYamlFrontMatter),
+  );
   const body = await renderExportBody(nativeMarkdown, theme, input.mathNumbering);
   const extraStyles = await getExportExtraStyles();
   const styledHtml = await inlineExportResources(buildExportHtml(title, body, {

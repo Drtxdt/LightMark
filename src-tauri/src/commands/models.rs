@@ -11,6 +11,25 @@ pub struct FileNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AssetFileInfo {
+    pub source: String,
+    pub path: String,
+    pub name: String,
+    pub exists: bool,
+    pub size: Option<u64>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetInspection {
+    pub asset_folder: String,
+    pub references: Vec<AssetFileInfo>,
+    pub folder_files: Vec<AssetFileInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(default)]
     pub recent_files: Vec<String>,

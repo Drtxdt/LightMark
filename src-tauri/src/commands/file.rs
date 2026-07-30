@@ -11,7 +11,7 @@ use rfd::FileDialog;
 use tauri::{AppHandle, Emitter};
 
 use super::models::{
-    DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent, LargeFileSession, LargeFindMatch,
+    AssetFileInfo, AssetInspection, DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent, LargeFileSession, LargeFindMatch,
     LargeFindOptions, LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
     WorkspaceWatchEvent,
 };
@@ -19,6 +19,7 @@ use super::models::{
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 const FILE_WATCH_EVENT: &str = "lightmark-file-watch-event";
 const WORKSPACE_WATCH_EVENT: &str = "lightmark-workspace-watch-event";
+const ASSET_WATCH_EVENT: &str = "lightmark-asset-watch-event";
 
 #[derive(Debug, Clone)]
 struct SessionState {
@@ -32,6 +33,7 @@ struct SessionState {
 static LARGE_SESSIONS: OnceLock<Mutex<HashMap<String, SessionState>>> = OnceLock::new();
 static FILE_WATCHERS: OnceLock<Mutex<HashMap<String, FileWatcherEntry>>> = OnceLock::new();
 static WORKSPACE_WATCHER: OnceLock<Mutex<Option<FileWatcherEntry>>> = OnceLock::new();
+static ASSET_WATCHER: OnceLock<Mutex<Option<FileWatcherEntry>>> = OnceLock::new();
 
 struct FileWatcherEntry {
     _watcher: RecommendedWatcher,
@@ -49,6 +51,10 @@ fn workspace_watcher() -> &'static Mutex<Option<FileWatcherEntry>> {
     WORKSPACE_WATCHER.get_or_init(|| Mutex::new(None))
 }
 
+fn asset_watcher() -> &'static Mutex<Option<FileWatcherEntry>> {
+    ASSET_WATCHER.get_or_init(|| Mutex::new(None))
+}
+
 #[tauri::command]
 pub fn open_file_dialog() -> Result<Option<String>, String> {
     let file = FileDialog::new()
@@ -60,6 +66,14 @@ pub fn open_file_dialog() -> Result<Option<String>, String> {
 #[tauri::command]
 pub fn open_folder_dialog() -> Result<Option<String>, String> {
     Ok(FileDialog::new().pick_folder().map(path_to_string))
+}
+
+#[tauri::command]
+pub fn open_asset_file_dialog() -> Result<Option<String>, String> {
+    Ok(FileDialog::new()
+        .add_filter("附件", &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "mp3", "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "mkv", "pdf"])
+        .pick_file()
+        .map(path_to_string))
 }
 
 #[tauri::command]
@@ -455,12 +469,13 @@ pub fn save_asset_file(
     markdown_path: String,
     file_name: String,
     bytes: Vec<u8>,
+    asset_folder: Option<String>,
 ) -> Result<String, String> {
     let markdown_path = PathBuf::from(markdown_path);
     let document_dir = markdown_path
         .parent()
         .ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
-    let assets_dir = document_dir.join("assets");
+    let assets_dir = resolve_asset_folder(document_dir, asset_folder.as_deref())?;
     fs::create_dir_all(&assets_dir)
         .map_err(|err| format!("Failed to create folder {}: {err}", assets_dir.display()))?;
 
@@ -477,6 +492,71 @@ pub fn save_asset_file(
                 target.display()
             )
         })
+}
+
+#[tauri::command]
+pub fn inspect_document_assets(
+    markdown_path: String,
+    asset_folder: Option<String>,
+    sources: Vec<String>,
+) -> Result<AssetInspection, String> {
+    let markdown_path = PathBuf::from(markdown_path);
+    let document_dir = markdown_path
+        .parent()
+        .ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+    let assets_dir = resolve_asset_folder(document_dir, asset_folder.as_deref())?;
+    let references = sources
+        .into_iter()
+        .map(|source| {
+            let decoded = percent_decode_path(source.split(['?', '#']).next().unwrap_or(""));
+            let path = {
+                let candidate = PathBuf::from(&decoded);
+                if candidate.is_absolute() { candidate } else { document_dir.join(candidate) }
+            };
+            asset_file_info(source, path)
+        })
+        .collect::<Vec<_>>();
+    let mut folder_files = Vec::new();
+    if assets_dir.is_dir() {
+        collect_asset_files(&assets_dir, &mut folder_files)?;
+    }
+    folder_files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+    Ok(AssetInspection {
+        asset_folder: path_to_string(assets_dir),
+        references,
+        folder_files,
+    })
+}
+
+#[tauri::command]
+pub fn watch_asset_folder(app: AppHandle, markdown_path: String, asset_folder: Option<String>) -> Result<(), String> {
+    let markdown_path = PathBuf::from(markdown_path);
+    let document_dir = markdown_path.parent().ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+    let folder = resolve_asset_folder(document_dir, asset_folder.as_deref())?;
+    let watch_target = if folder.is_dir() { folder } else { document_dir.to_path_buf() };
+    let app_handle = app.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return; };
+            let paths = event.paths.into_iter().filter(|path| is_asset_file(path)).map(path_to_string).collect::<Vec<_>>();
+            if !paths.is_empty() {
+                let _ = app_handle.emit(ASSET_WATCH_EVENT, WorkspaceWatchEvent { paths });
+            }
+        },
+        Config::default(),
+    ).map_err(|err| format!("Failed to create asset watcher: {err}"))?;
+    watcher.watch(&watch_target, RecursiveMode::Recursive)
+        .map_err(|err| format!("Failed to watch asset folder {}: {err}", watch_target.display()))?;
+    let mut guard = asset_watcher().lock().map_err(|_| "Asset watcher lock was poisoned.".to_string())?;
+    *guard = Some(FileWatcherEntry { _watcher: watcher });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unwatch_asset_folder() -> Result<(), String> {
+    let mut guard = asset_watcher().lock().map_err(|_| "Asset watcher lock was poisoned.".to_string())?;
+    *guard = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -529,6 +609,25 @@ pub fn image_paths_to_markdown(
     }
 
     Ok(snippets.join("\n\n"))
+}
+
+#[tauri::command]
+pub fn asset_path_to_reference(
+    markdown_path: String,
+    path: String,
+    use_relative_path: Option<bool>,
+    ensure_dot_slash: Option<bool>,
+    escape_path: Option<bool>,
+) -> Result<String, String> {
+    let markdown_path = PathBuf::from(markdown_path);
+    let document_dir = markdown_path.parent().ok_or_else(|| "当前 Markdown 文件没有可用的父目录。".to_string())?;
+    let asset_path = PathBuf::from(path);
+    let reference = if use_relative_path.unwrap_or(true) {
+        normalize_relative_reference(&relative_path(document_dir, &asset_path), ensure_dot_slash.unwrap_or(false))
+    } else {
+        path_to_string(asset_path)
+    };
+    Ok(if escape_path.unwrap_or(true) { markdown_path_url(&reference) } else { reference })
 }
 
 #[tauri::command]
@@ -735,6 +834,81 @@ fn unique_asset_path(folder: &Path, file_name: &str) -> PathBuf {
     }
 
     unreachable!("unbounded asset filename search should always return");
+}
+
+fn resolve_asset_folder(document_dir: &Path, value: Option<&str>) -> Result<PathBuf, String> {
+    let folder = value.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("assets");
+    let relative = Path::new(folder);
+    if relative.is_absolute() || relative.components().any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+        return Err("附件目录必须是文档目录内的相对路径，不能包含“..”。".to_string());
+    }
+    Ok(document_dir.join(relative))
+}
+
+fn asset_file_info(source: String, path: PathBuf) -> AssetFileInfo {
+    let metadata = fs::metadata(&path).ok();
+    AssetFileInfo {
+        source,
+        name: path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_string(),
+        kind: asset_kind(&path).to_string(),
+        path: path_to_string(path),
+        exists: metadata.as_ref().map(|value| value.is_file()).unwrap_or(false),
+        size: metadata.map(|value| value.len()),
+    }
+}
+
+fn collect_asset_files(folder: &Path, result: &mut Vec<AssetFileInfo>) -> Result<(), String> {
+    for entry in fs::read_dir(folder).map_err(|err| format!("Failed to read asset folder {}: {err}", folder.display()))? {
+        let entry = entry.map_err(|err| format!("Failed to inspect asset entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_asset_files(&path, result)?;
+        } else if is_asset_file(&path) {
+            result.push(asset_file_info(String::new(), path));
+        }
+    }
+    Ok(())
+}
+
+fn is_asset_file(path: &Path) -> bool {
+    matches!(asset_kind(path), "image" | "audio" | "video" | "pdf")
+}
+
+fn asset_kind(path: &Path) -> &'static str {
+    match path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "avif" => "image",
+        "mp3" | "wav" | "ogg" | "m4a" | "flac" => "audio",
+        "mp4" | "webm" | "mov" | "mkv" => "video",
+        "pdf" => "pdf",
+        _ => "other",
+    }
+}
+
+fn percent_decode_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+                result.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        result.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&result).to_string()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -1263,7 +1437,7 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{similar_markdown_files, watch_path_key, write_text_file_safely};
+    use super::{percent_decode_path, resolve_asset_folder, similar_markdown_files, watch_path_key, write_text_file_safely};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1310,6 +1484,20 @@ mod tests {
         let right = watch_path_key(PathBuf::from(r"c:/docs/note.md").as_path());
 
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn asset_folder_stays_inside_document_directory() {
+        let root = PathBuf::from(r"C:\Docs");
+        assert_eq!(resolve_asset_folder(&root, Some("media/images")).unwrap(), root.join("media/images"));
+        assert_eq!(resolve_asset_folder(&root, Some("")).unwrap(), root.join("assets"));
+        assert!(resolve_asset_folder(&root, Some("../outside")).is_err());
+        assert!(resolve_asset_folder(&root, Some(r"C:\outside")).is_err());
+    }
+
+    #[test]
+    fn asset_reference_decodes_unicode_and_spaces() {
+        assert_eq!(percent_decode_path("assets/%E5%9B%BE%20%E7%89%87.png"), "assets/图 片.png");
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

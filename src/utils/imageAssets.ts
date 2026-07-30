@@ -113,6 +113,7 @@ async function saveImageAsset(file: File) {
     markdownPath: appStore.currentFilePath,
     fileName,
     bytes,
+    assetFolder: appStore.settings.image.assetFolder || "assets",
   });
 }
 

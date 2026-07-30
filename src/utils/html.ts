@@ -42,6 +42,8 @@ const blockHtmlTags = new Set([
   "main",
   "nav",
   "blockquote",
+  "figure",
+  "figcaption",
   "pre",
   "ul",
   "ol",
@@ -93,6 +95,9 @@ const safeStyleProperties = new Set([
   "vertical-align",
   "object-fit",
   "border-radius",
+  "margin-left",
+  "margin-right",
+  "text-align",
 ]);
 
 export function escapeHtml(value: string) {

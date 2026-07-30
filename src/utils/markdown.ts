@@ -25,6 +25,7 @@ import {
   parseMarkdownMath,
 } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
+import { protectEnhancedImagesForEditor, protectEnhancedImagesForPreview, unwrapEnhancedImageParagraphs } from "./enhancedImages";
 
 const LEADING_FRONT_MATTER_PATTERN = /^(?:\uFEFF)?---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[^\S\r\n]*(?=\r?\n|$)/;
 
@@ -60,7 +61,7 @@ export function renderMarkdown(
   };
   const enhanced = enhanceMarkdownForRender(markdown, stash, options.mathNumbering);
   const withTables = renderMarkdownTables(enhanced, (source) => md.renderInline(source));
-  return restorePlaceholders(md.render(withTables), placeholders);
+  return unwrapEnhancedImageParagraphs(restorePlaceholders(md.render(withTables), placeholders));
 }
 
 export function renderMarkdownForEditor(markdown: string) {
@@ -121,6 +122,9 @@ export function buildExportHtml(
     .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: ${isDark ? "#79b8ff" : "#005cc5"}; }
     .hljs-type, .hljs-class .hljs-title { color: ${isDark ? "#85e89d" : "#22863a"}; }
     img { max-width: 100%; height: auto; vertical-align: middle; }
+    figure[data-lightmark-image] { max-width: 100%; }
+    figure[data-lightmark-image] img { display: block; max-width: 100%; height: auto; }
+    figure[data-lightmark-image] figcaption { margin-top: 0.42rem; color: var(--lm-muted); font-size: 0.88rem; text-align: center; }
     table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto; overflow-wrap: anywhere; font-size: 0.95em; break-inside: auto; page-break-inside: auto; }
     th, td { max-width: min(52rem, 100%); border: 1px solid var(--lm-border); padding: 8px 10px; overflow-wrap: anywhere; word-break: break-word; }
     tr { break-inside: avoid; page-break-inside: avoid; }
@@ -200,7 +204,8 @@ function markSpecialBlocksForEditor(markdown: string) {
     return token;
   };
 
-  let next = markdown.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
+  let next = protectEnhancedImagesForEditor(markdown, stash);
+  next = next.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   });
 
@@ -277,7 +282,8 @@ function enhanceMarkdownForRender(
   stash?: (html: string) => string,
   mathNumbering: MathNumberingMode = "none",
 ) {
-  let next = markdown.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
+  let next = stash ? protectEnhancedImagesForPreview(markdown, stash) : markdown;
+  next = next.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
   });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);

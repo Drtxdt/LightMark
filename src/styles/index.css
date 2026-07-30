@@ -1634,7 +1634,25 @@ sub {
 }
 
 .typora-image-node {
+  position: relative;
+  box-sizing: border-box;
+  max-width: 100%;
   margin: 0.9rem 0;
+}
+
+.typora-image-node[data-align="center"] {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.typora-image-node[data-align="right"] {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.typora-image-node[data-align="left"] {
+  margin-left: 0;
+  margin-right: auto;
 }
 
 .ProseMirror > .typora-image-node:first-child,
@@ -1647,6 +1665,158 @@ sub {
   max-width: 100%;
   height: auto;
   margin: 0;
+}
+
+.typora-image-stage {
+  position: relative;
+}
+
+.typora-image-toolbar {
+  display: none;
+  min-height: 32px;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 6px;
+  padding: 3px 5px;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  border-radius: 6px;
+  background: rgba(250, 249, 246, 0.98);
+  color: #6f675d;
+  box-shadow: 0 4px 14px rgba(37, 34, 29, 0.08);
+}
+
+.typora-image-node-editing .typora-image-toolbar,
+.ProseMirror-selectednode.typora-image-node .typora-image-toolbar {
+  display: flex;
+}
+
+.typora-image-tool,
+.typora-image-width {
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+
+.typora-image-tool {
+  padding: 0 7px;
+  cursor: pointer;
+}
+
+.typora-image-tool:hover,
+.typora-image-tool.active {
+  background: rgba(120, 113, 108, 0.13);
+  color: #2f2b26;
+}
+
+.typora-image-width {
+  width: 62px;
+  padding: 0 5px;
+  outline: 1px solid rgba(120, 113, 108, 0.18);
+}
+
+.typora-image-resize {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  display: none;
+  width: 12px;
+  height: 38px;
+  border: 2px solid #9a6a35;
+  border-radius: 5px;
+  background: #fffaf3;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+.typora-image-node-editing .typora-image-resize,
+.ProseMirror-selectednode.typora-image-node .typora-image-resize {
+  display: block;
+}
+
+.typora-image-resize-left { left: -6px; }
+.typora-image-resize-right { right: -6px; }
+
+.typora-image-caption {
+  display: block;
+  width: 100%;
+  margin: 7px 0 0;
+  padding: 3px 6px;
+  border: 0;
+  border-bottom: 1px solid rgba(120, 113, 108, 0.24);
+  background: transparent;
+  color: #777066;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  text-align: center;
+  outline: none;
+}
+
+.typora-image-caption:focus {
+  border-bottom-color: #9a6a35;
+}
+
+.markdown-preview figure[data-lightmark-image] {
+  max-width: 100%;
+}
+
+.markdown-preview figure[data-lightmark-image] img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-preview figure[data-lightmark-image] figcaption {
+  margin-top: 0.42rem;
+  color: #777066;
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+.dark .typora-image-toolbar {
+  border-color: rgba(200, 192, 182, 0.18);
+  background: rgba(35, 33, 30, 0.98);
+  color: #bbb3a8;
+}
+
+.dark .typora-image-tool:hover,
+.dark .typora-image-tool.active {
+  background: rgba(214, 211, 207, 0.1);
+  color: #eee8de;
+}
+
+.dark .typora-image-resize {
+  background: #2f2921;
+}
+
+.dark .typora-image-caption,
+.dark .markdown-preview figure[data-lightmark-image] figcaption {
+  color: #aaa297;
+}
+
+.dark .resources-pane .resource-tabs button.active,
+.dark .resources-pane .resource-card {
+  background: rgba(42, 39, 35, 0.96);
+}
+
+.dark .resources-pane .resource-name {
+  color: #e4ddd3;
+}
+
+.dark .resources-pane .resource-meta,
+.dark .resources-pane .resource-path,
+.dark .resources-pane .resource-state,
+.dark .resources-pane .resource-hint {
+  color: #aaa297;
+}
+
+.dark .resources-pane .resource-actions button {
+  background: rgba(214, 211, 207, 0.1);
+  color: #d8d0c5;
 }
 
 .typora-image-source {

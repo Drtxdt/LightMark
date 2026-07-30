@@ -17,8 +17,9 @@ import FileTreeNode from "./FileTreeNode.vue";
 import { extractOutline } from "../../utils/outline";
 import type { LargeOutlineItem, OutlineItem } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
+import ResourcesPane from "./ResourcesPane.vue";
 
-const activePane = ref<"files" | "outline" | "knowledge">("files");
+const activePane = ref<"files" | "outline" | "knowledge" | "resources">("files");
 const knowledgeTab = ref<"backlinks" | "mentions" | "tags">("backlinks");
 const selectedTag = ref("");
 const outline = computed(() => {
@@ -175,6 +176,14 @@ function outlineIndent(level: number) {
           <UiIcon name="hash" :size="15" />
           <span>知识</span>
         </button>
+        <button
+          class="sidebar-switch flex-1 px-2 py-1 text-sm"
+          :class="{ active: activePane === 'resources' }"
+          @click="activePane = 'resources'"
+        >
+          <UiIcon name="image" :size="15" />
+          <span>资源</span>
+        </button>
       </div>
     </div>
 
@@ -202,7 +211,7 @@ function outlineIndent(level: number) {
       </button>
     </section>
 
-    <section v-else class="min-h-0 flex-1 overflow-auto px-3 pb-3">
+    <section v-else-if="activePane === 'knowledge'" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
       <div class="mb-3 flex items-center justify-between gap-2">
         <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">知识</h2>
         <button class="btn-small" :disabled="appStore.wikiIndexBusy" @click="refreshKnowledgeIndex()">刷新</button>
@@ -270,6 +279,9 @@ function outlineIndent(level: number) {
           </div>
         </div>
       </template>
+    </section>
+    <section v-else class="min-h-0 flex-1 overflow-auto px-3 pb-3">
+      <ResourcesPane />
     </section>
   </aside>
 </template>

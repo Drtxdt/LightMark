@@ -56,6 +56,12 @@ import {
   resolveRenderedImageSources,
   saveImagesAsMarkdown,
 } from "../../utils/imageAssets";
+import {
+  clampImageWidth,
+  imageMarkdownOrFigure,
+  parseEnhancedFigureElement,
+  type ImageAlignment,
+} from "../../utils/enhancedImages";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
@@ -349,6 +355,21 @@ const MarkdownImage = Image.extend({
       editing: {
         default: false,
         rendered: false,
+      },
+      widthPx: {
+        default: null,
+        parseHTML: (element) => clampImageWidth(element.getAttribute("data-lightmark-width")),
+        renderHTML: (attributes) => attributes.widthPx ? { "data-lightmark-width": attributes.widthPx } : {},
+      },
+      alignment: {
+        default: "left",
+        parseHTML: (element) => element.getAttribute("data-lightmark-align") || "left",
+        renderHTML: (attributes) => ({ "data-lightmark-align": attributes.alignment || "left" }),
+      },
+      caption: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-lightmark-caption") || "",
+        renderHTML: (attributes) => attributes.caption ? { "data-lightmark-caption": attributes.caption } : {},
       },
     };
   },
@@ -1642,10 +1663,29 @@ turndown.addRule("image", {
     if (!(node instanceof HTMLElement)) return "";
     const src = markdownImageSourceFromElement(node).trim();
     if (!src) return "";
+    if (node.hasAttribute("data-lightmark-width") || node.getAttribute("data-lightmark-align") !== "left" || node.hasAttribute("data-lightmark-caption")) {
+      return imageMarkdownOrFigure({
+        src,
+        alt: node.getAttribute("alt") || "",
+        title: node.getAttribute("title"),
+        widthPx: clampImageWidth(node.getAttribute("data-lightmark-width")),
+        alignment: (node.getAttribute("data-lightmark-align") || "left") as ImageAlignment,
+        caption: node.getAttribute("data-lightmark-caption") || "",
+      });
+    }
     const alt = (node.getAttribute("alt") || "").replace(/]/g, "\\]");
     const title = node.getAttribute("title");
     const markdown = title ? `![${alt}](${src} "${title.replace(/"/g, '\\"')}")` : `![${alt}](${src})`;
     return markdown;
+  },
+});
+
+turndown.addRule("lightmarkImageFigure", {
+  filter: (node) => node instanceof HTMLElement && node.tagName === "FIGURE" && node.hasAttribute("data-lightmark-image"),
+  replacement: (_content, node) => {
+    if (!(node instanceof HTMLElement)) return "";
+    const parsed = parseEnhancedFigureElement(node);
+    return parsed ? `\n\n${imageMarkdownOrFigure(parsed)}\n\n` : "";
   },
 });
 
@@ -1655,30 +1695,95 @@ function renderMarkdownForEditorWithAssets(markdown: string) {
 
 function createTyporaImageView(node: any, editor: any, getPos: (() => number | undefined) | boolean) {
   const dom = document.createElement("figure");
+  const toolbar = document.createElement("div");
   const source = document.createElement("input");
   const error = document.createElement("div");
+  const stage = document.createElement("div");
   const image = document.createElement("img");
+  const caption = document.createElement("input");
   let currentNode = node;
   let sourceVisible = Boolean(node.attrs.editing);
   let errorMessage = "";
+  let dragStart: { x: number; width: number; original: number | null } | null = null;
 
   dom.className = "typora-image-node";
   dom.contentEditable = "false";
+  toolbar.className = "typora-image-toolbar";
+  toolbar.setAttribute("role", "toolbar");
+  toolbar.setAttribute("aria-label", "图片排版");
   source.type = "text";
   source.className = "typora-image-source";
   source.spellcheck = false;
   error.className = "typora-image-error";
+  stage.className = "typora-image-stage";
   image.draggable = false;
-  dom.append(source, error, image);
+  caption.type = "text";
+  caption.className = "typora-image-caption";
+  caption.placeholder = "添加图片 Caption";
 
-  const markdown = () => imageMarkdownFromAttrs(currentNode.attrs);
+  const alignmentButtons = (["left", "center", "right"] as ImageAlignment[]).map((alignment) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "typora-image-tool";
+    button.dataset.align = alignment;
+    button.textContent = alignment === "left" ? "左" : alignment === "center" ? "中" : "右";
+    button.title = `${button.textContent}对齐`;
+    toolbar.append(button);
+    return button;
+  });
+  const widthInput = document.createElement("input");
+  widthInput.type = "number";
+  widthInput.min = "48";
+  widthInput.max = "4096";
+  widthInput.className = "typora-image-width";
+  widthInput.setAttribute("aria-label", "图片宽度（像素）");
+  const unit = document.createElement("span");
+  unit.textContent = "px";
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "typora-image-tool";
+  reset.textContent = "原始";
+  const captionToggle = document.createElement("button");
+  captionToggle.type = "button";
+  captionToggle.className = "typora-image-tool";
+  captionToggle.textContent = "Caption";
+  toolbar.append(widthInput, unit, reset, captionToggle);
+
+  const handles = [-1, 1].map((direction) => {
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = `typora-image-resize typora-image-resize-${direction < 0 ? "left" : "right"}`;
+    handle.setAttribute("aria-label", "调整图片宽度");
+    stage.append(handle);
+    return { handle, direction };
+  });
+  stage.insertBefore(image, handles[1].handle);
+  dom.append(toolbar, source, error, stage, caption);
+
+  const sourceMarkdown = () => basicImageMarkdownFromAttrs(currentNode.attrs);
+  const patchAttrs = (attrs: Record<string, unknown>, addToHistory = true) => {
+    if (typeof getPos !== "function") return;
+    const pos = getPos();
+    if (typeof pos !== "number") return;
+    const transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, { ...currentNode.attrs, ...attrs });
+    if (!addToHistory) transaction.setMeta("addToHistory", false);
+    editor.view.dispatch(transaction);
+  };
   const render = () => {
-    if (document.activeElement !== source) source.value = markdown();
+    if (document.activeElement !== source) source.value = sourceMarkdown();
     error.textContent = errorMessage;
     image.src = currentNode.attrs.src || "";
     image.alt = currentNode.attrs.alt || "";
     if (currentNode.attrs.title) image.title = currentNode.attrs.title;
     else image.removeAttribute("title");
+    const width = clampImageWidth(currentNode.attrs.widthPx);
+    dom.dataset.align = currentNode.attrs.alignment || "left";
+    dom.style.width = width ? `${width}px` : "";
+    widthInput.value = width ? String(width) : "";
+    if (document.activeElement !== caption) caption.value = currentNode.attrs.caption || "";
+    caption.hidden = !currentNode.attrs.caption && !sourceVisible;
+    alignmentButtons.forEach((button) => button.classList.toggle("active", button.dataset.align === dom.dataset.align));
+    captionToggle.classList.toggle("active", !caption.hidden);
     dom.classList.toggle("typora-image-node-editing", sourceVisible);
     dom.classList.toggle("typora-image-node-error", Boolean(errorMessage));
   };
@@ -1695,7 +1800,7 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
   const hideSource = (reset = false) => {
     sourceVisible = false;
     errorMessage = "";
-    if (reset) source.value = markdown();
+    if (reset) source.value = sourceMarkdown();
     render();
   };
   const commitSource = () => {
@@ -1744,8 +1849,70 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
 
   image.addEventListener("click", (event) => {
     event.preventDefault();
-    showSource(true);
+    showSource(false);
     selectImage();
+  });
+  toolbar.addEventListener("pointerdown", (event) => event.preventDefault());
+  alignmentButtons.forEach((button) => button.addEventListener("click", () => {
+    patchAttrs({ alignment: button.dataset.align as ImageAlignment });
+    selectImage();
+  }));
+  widthInput.addEventListener("change", () => patchAttrs({ widthPx: clampImageWidth(widthInput.value) }));
+  widthInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    patchAttrs({ widthPx: clampImageWidth(widthInput.value) });
+    editor.view.focus();
+  });
+  reset.addEventListener("click", () => {
+    patchAttrs({ widthPx: null });
+    selectImage();
+  });
+  captionToggle.addEventListener("click", () => {
+    sourceVisible = true;
+    render();
+    requestAnimationFrame(() => caption.focus());
+  });
+  caption.addEventListener("input", () => patchAttrs({ caption: caption.value }, false));
+  caption.addEventListener("change", () => patchAttrs({ caption: caption.value.trim() }));
+  caption.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    patchAttrs({ caption: caption.value.trim() });
+    editor.view.focus();
+  });
+  const beginResize = (event: PointerEvent, direction: number) => {
+    event.preventDefault();
+    selectImage();
+    const width = image.getBoundingClientRect().width || 320;
+    dragStart = { x: event.clientX * direction, width, original: clampImageWidth(currentNode.attrs.widthPx) };
+    const move = (next: PointerEvent) => {
+      if (!dragStart) return;
+      patchAttrs({ widthPx: clampImageWidth(dragStart.width + next.clientX * direction - dragStart.x) }, false);
+    };
+    const finish = () => {
+      if (!dragStart) return;
+      const finalWidth = clampImageWidth(currentNode.attrs.widthPx);
+      const original = dragStart.original;
+      dragStart = null;
+      if (finalWidth !== original) {
+        patchAttrs({ widthPx: original }, false);
+        patchAttrs({ widthPx: finalWidth });
+      }
+      window.removeEventListener("pointermove", move);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+  };
+  handles.forEach(({ handle, direction }) => {
+    handle.addEventListener("pointerdown", (event) => beginResize(event, direction));
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const current = clampImageWidth(currentNode.attrs.widthPx) || Math.round(image.getBoundingClientRect().width);
+      const delta = (event.key === "ArrowRight" ? 1 : -1) * (event.shiftKey ? 10 : 1);
+      patchAttrs({ widthPx: clampImageWidth(current + delta) });
+    });
   });
   source.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1789,11 +1956,11 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
       document.removeEventListener("mousedown", onMouseDown);
     },
     ignoreMutation: () => true,
-    stopEvent: (event: Event) => event.target instanceof globalThis.Node && source.contains(event.target),
+    stopEvent: (event: Event) => event.target instanceof globalThis.Node && dom.contains(event.target),
   };
 }
 
-function imageMarkdownFromAttrs(attrs: Record<string, string | null | undefined>) {
+function basicImageMarkdownFromAttrs(attrs: Record<string, string | null | undefined>) {
   const src = attrs.markdownSrc || attrs.src || "";
   const alt = (attrs.alt || "").replace(/]/g, "\\]");
   const title = attrs.title ? ` "${attrs.title.replace(/"/g, '\\"')}"` : "";
