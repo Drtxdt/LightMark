@@ -15,7 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
-import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   appStore,
@@ -52,6 +52,13 @@ import {
 } from "../../utils/wikiLinks";
 import { containsInlineHtml, decodeHtmlEntities, renderInlineMarkdownInHtml, sanitizeHtmlFragment, sanitizeInlineHtmlSource } from "../../utils/html";
 import { escapeMarkdownTableCell, markdownPipeRowToTableHtml } from "../../utils/tableMarkdown";
+import {
+  clipboardPayloadFromDataTransfer,
+  plainTextToLiteralMarkdown,
+  prepareSmartPaste,
+  readClipboardPayload,
+  type PasteConversionResult,
+} from "../../utils/smartPaste";
 import {
   getImageFilesFromClipboard,
   getImageFilesFromDrop,
@@ -1285,6 +1292,11 @@ const turndown = new TurndownService({
 
 turndown.escape = (text) => text;
 
+turndown.addRule("plainPaste", {
+  filter: (node) => node instanceof HTMLElement && node.dataset.plainPaste === "true",
+  replacement: (_content, node) => plainTextToLiteralMarkdown(node.textContent || "").replace(/\t/g, "@@LIGHTMARK_PLAIN_TAB@@"),
+});
+
 turndown.addRule("horizontalRule", {
   filter: "hr",
   replacement: () => "\n\n---\n\n",
@@ -1392,6 +1404,16 @@ const WritingFocusDecorations = Extension.create({
         },
       }),
     ];
+  },
+});
+
+const PlainPasteMark = Mark.create({
+  name: "plainPaste",
+  parseHTML() {
+    return [{ tag: 'span[data-plain-paste="true"]' }];
+  },
+  renderHTML() {
+    return ["span", { "data-plain-paste": "true" }, 0];
   },
 });
 
@@ -2252,6 +2274,7 @@ const editor = useEditor({
     FootnoteRefNode,
     HighlightMark,
     StrikeMark,
+    PlainPasteMark,
     SuperscriptMark,
     SubscriptMark,
     TaskStateMark,
@@ -2274,6 +2297,12 @@ const editor = useEditor({
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        const { from, to } = view.state.selection;
+        void pasteWysiwygFromClipboard(true, from, to);
+        return true;
+      }
       if (handleExactFormatHistoryKeydown(view, event)) return true;
       if (handleWikiCompletionKeydown(view, event)) return true;
       if (handleWysiwygPair(view, event)) return true;
@@ -2467,11 +2496,11 @@ const editor = useEditor({
         void insertImageFilesIntoWysiwyg(imageFiles, from, to);
         return true;
       }
-      const text = event.clipboardData?.getData("text/plain");
-      if (!text || !looksLikeMarkdown(text)) return false;
+      const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
+      if (!result.markdown) return false;
       event.preventDefault();
       const { from, to } = view.state.selection;
-      editor.value?.commands.insertContentAt({ from, to }, renderMarkdownForEditorWithAssets(text));
+      insertPreparedPasteIntoWysiwyg(result, from, to);
       return true;
     },
   },
@@ -3237,6 +3266,7 @@ onMounted(() => {
   window.addEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.addEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
+  window.addEventListener("keydown", handleWysiwygPlainPasteCapture, true);
   syncWysiwygWritingModes();
 });
 
@@ -3255,6 +3285,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.removeEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
+  window.removeEventListener("keydown", handleWysiwygPlainPasteCapture, true);
   window.cancelAnimationFrame(wysiwygTypewriterFrame);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
@@ -3934,14 +3965,6 @@ async function writeClipboard(text: string, html?: string) {
   }
 }
 
-async function readClipboardText() {
-  try {
-    return await navigator.clipboard.readText();
-  } catch {
-    return "";
-  }
-}
-
 function getSelectedHtml() {
   const activeEditor = editor.value;
   if (!activeEditor) return "";
@@ -3991,14 +4014,83 @@ async function copySelectionAsHtml() {
   await writeClipboard(markdown, html);
 }
 
-async function pasteFromClipboard(clean: boolean) {
-  const text = await readClipboardText();
-  if (!text) return;
-  if (clean) {
-    (editor.value as any)?.commands.insertContent(renderMarkdownForEditorWithAssets(text));
+async function pasteFromClipboard(plainText: boolean) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const { from, to } = activeEditor.state.selection;
+  await pasteWysiwygFromClipboard(plainText, from, to);
+}
+
+async function pasteWysiwygFromClipboard(plainText: boolean, from: number, to: number) {
+  const result = prepareSmartPaste(await readClipboardPayload(), { plainText });
+  if (result.kind === "image-files") {
+    await insertImageFilesIntoWysiwyg(result.files, from, to);
     return;
   }
-  (editor.value as any)?.commands.insertContent(text);
+  if (!result.markdown) return;
+  insertPreparedPasteIntoWysiwyg(result, from, to);
+}
+
+function handleWysiwygPlainPasteCapture(event: KeyboardEvent) {
+  const activeEditor = editor.value;
+  const target = event.target;
+  if (
+    !activeEditor
+    || props.paneId !== appStore.splitLayout.activePaneId
+    || paneEditorMode.value !== "wysiwyg"
+    || paneDocumentMode.value !== "normal"
+    || !(target instanceof HTMLElement)
+    || !activeEditor.view.dom.contains(target)
+    || !(event.ctrlKey || event.metaKey)
+    || !event.shiftKey
+    || event.key.toLowerCase() !== "v"
+  ) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const { from, to } = activeEditor.state.selection;
+  void pasteWysiwygFromClipboard(true, from, to);
+}
+
+function insertPreparedPasteIntoWysiwyg(result: PasteConversionResult, from: number, to: number) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const max = activeEditor.state.doc.content.size;
+  const boundedFrom = Math.max(0, Math.min(from, max));
+  const boundedTo = Math.max(boundedFrom, Math.min(to, max));
+  if (activeEditor.state.doc.resolve(boundedFrom).parent.type.name === "codeBlock") {
+    activeEditor.view.dispatch(activeEditor.state.tr.insertText(result.markdown, boundedFrom, boundedTo).scrollIntoView());
+    activeEditor.commands.focus();
+    if (result.warnings.length > 0) appStore.statusMessage = result.warnings.join(" ");
+    return;
+  }
+  if (result.kind === "plain") {
+    const mark = activeEditor.state.schema.marks.plainPaste.create();
+    if (!/\r?\n/.test(result.markdown)) {
+      activeEditor.view.dispatch(
+        activeEditor.state.tr
+          .replaceRangeWith(boundedFrom, boundedTo, activeEditor.state.schema.text(result.markdown, [mark]))
+          .scrollIntoView(),
+      );
+    } else {
+      const paragraphs = result.markdown.replace(/\r\n?/g, "\n").split("\n").map((line) => (
+        activeEditor.state.schema.nodes.paragraph.create(
+          null,
+          line ? activeEditor.state.schema.text(line, [mark]) : null,
+        )
+      ));
+      activeEditor.view.dispatch(
+        activeEditor.state.tr
+          .replaceRange(boundedFrom, boundedTo, new Slice(Fragment.fromArray(paragraphs), 0, 0))
+          .scrollIntoView(),
+      );
+    }
+    activeEditor.commands.focus();
+    return;
+  }
+  const content = renderMarkdownForEditorWithAssets(result.markdown);
+  activeEditor.commands.insertContentAt({ from: boundedFrom, to: boundedTo }, content);
+  activeEditor.commands.focus();
+  if (result.warnings.length > 0) appStore.statusMessage = result.warnings.join(" ");
 }
 
 function insertMarkdownText(text: string, selectFromOffset?: number, selectToOffset?: number) {
@@ -4377,10 +4469,6 @@ function deleteCodeBlock() {
   activeEditor.view.dispatch(state.tr.delete($from.before(), $from.after()).scrollIntoView());
 }
 
-function looksLikeMarkdown(text: string) {
-  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.+\||!\[[^\]]*\]\(|\[[^\]]+\]\(|\[\^[^\]]+\]:|\$\$)/.test(text) || /\[\^[^\]]+\]|`[^`\n]+`|\*\*[^*]+\*\*|\$[^$\n]+\$/.test(text) || containsInlineHtml(text);
-}
-
 function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
@@ -4429,6 +4517,7 @@ function editorHtmlToMarkdown(html: string) {
   });
 
   let markdown = turndown.turndown(document.body.innerHTML);
+  markdown = markdown.replace(/@@LIGHTMARK_PLAIN_TAB@@/g, "\t");
   footnoteSources.forEach((source, index) => {
     const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${index}@@`;
     markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
@@ -5180,7 +5269,17 @@ function convertInlineMarkdownSyntax(state: any, options: { onlySelectionBlock?:
     for (const converter of converters) {
       if (!converter.mark) continue;
       converter.pattern.lastIndex = 0;
-      const match = converter.pattern.exec(text);
+      const protectedRanges = plainPasteRanges(node);
+      let match: RegExpExecArray | null = null;
+      let candidate = converter.pattern.exec(text);
+      while (candidate) {
+        const candidateTo = candidate.index + candidate[0].length;
+        if (!protectedRanges.some((range) => range.from < candidateTo && range.to > candidate!.index)) {
+          match = candidate;
+          break;
+        }
+        candidate = converter.pattern.exec(text);
+      }
       if (!match) continue;
 
       const full = match[0];
@@ -5230,7 +5329,17 @@ function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boo
 
     const text = node.textContent;
     inlineCodePattern.lastIndex = 0;
-    const match = inlineCodePattern.exec(text);
+    const protectedRanges = plainPasteRanges(node);
+    let match: RegExpExecArray | null = null;
+    let candidate = inlineCodePattern.exec(text);
+    while (candidate) {
+      const candidateTo = candidate.index + candidate[0].length;
+      if (!protectedRanges.some((range) => range.from < candidateTo && range.to > candidate!.index)) {
+        match = candidate;
+        break;
+      }
+      candidate = inlineCodePattern.exec(text);
+    }
     if (!match) return true;
 
     const full = match[0];
@@ -5245,6 +5354,17 @@ function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boo
   });
 
   return converted ? tr : null;
+}
+
+function plainPasteRanges(node: any) {
+  const ranges: Array<{ from: number; to: number }> = [];
+  node.descendants((child: any, pos: number) => {
+    if (child.isText && child.marks?.some((mark: any) => mark.type.name === "plainPaste")) {
+      ranges.push({ from: pos, to: pos + child.nodeSize });
+    }
+    return true;
+  });
+  return ranges;
 }
 
 function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: number, selectionPos: number, markType: any) {
@@ -5769,8 +5889,8 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
         <div class="lm-menu-sub">
           <button class="lm-menu-item">粘贴</button>
           <div class="lm-menu-pop">
-            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">普通粘贴</button>
-            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">清洗格式并粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">智能粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">纯文本粘贴</button>
           </div>
         </div>
         <div class="lm-menu-separator"></div>
@@ -5795,8 +5915,8 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
         <div class="lm-menu-sub">
           <button class="lm-menu-item">粘贴</button>
           <div class="lm-menu-pop">
-            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">普通粘贴</button>
-            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">清洗格式并粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(false))">智能粘贴</button>
+            <button class="lm-menu-item" @click="runMenuCommand(() => pasteFromClipboard(true))">纯文本粘贴</button>
           </div>
         </div>
 

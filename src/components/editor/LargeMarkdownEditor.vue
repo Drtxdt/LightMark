@@ -5,6 +5,12 @@ import { appStore, applyLargeFileEdits, readLargeFileChunk, updateLargeFileViewp
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import type { DirtyState, EditorPaneId, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import {
+  clipboardPayloadFromDataTransfer,
+  prepareSmartPaste,
+  readClipboardPayload,
+  type PasteConversionResult,
+} from "../../utils/smartPaste";
 
 type LineRecord = {
   line: number;
@@ -445,6 +451,43 @@ function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: Ed
   viewportStartLine.value = Math.max(0, line - 20);
   void loadAround(viewportStartLine.value);
 }
+
+function handleLargePaste(event: ClipboardEvent) {
+  const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
+  event.preventDefault();
+  if (result.kind === "image-files") {
+    appStore.statusMessage = "大文件模式暂不支持直接粘贴图片。";
+    return;
+  }
+  insertLargePaste(result, event.currentTarget as HTMLTextAreaElement);
+}
+
+async function pasteLargePlainText(event: KeyboardEvent) {
+  event.preventDefault();
+  const textarea = event.currentTarget as HTMLTextAreaElement;
+  const selection = { from: textarea.selectionStart, to: textarea.selectionEnd };
+  const result = prepareSmartPaste(await readClipboardPayload(), { plainText: true });
+  insertLargePaste(result, textarea, selection);
+}
+
+function insertLargePaste(
+  result: PasteConversionResult,
+  textarea: HTMLTextAreaElement,
+  selection = { from: textarea.selectionStart, to: textarea.selectionEnd },
+) {
+  if (!result.markdown) return;
+  textarea.focus();
+  textarea.setSelectionRange(selection.from, selection.to);
+  const inserted = document.execCommand("insertText", false, result.markdown);
+  if (!inserted) textarea.setRangeText(result.markdown, selection.from, selection.to, "end");
+  editingText.value = textarea.value;
+  const cursor = selection.from + result.markdown.length;
+  void nextTick(() => {
+    textarea.focus();
+    textarea.setSelectionRange(cursor, cursor);
+  });
+  if (result.warnings.length > 0) appStore.statusMessage = result.warnings.join(" ");
+}
 </script>
 
 <template>
@@ -465,13 +508,15 @@ function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: Ed
             :data-line-start="block.startLine"
             @dblclick="startEditing(block)"
           >
-            <textarea
+              <textarea
               v-if="editingKey === block.key"
               v-model="editingText"
               data-large-editor-input
               class="large-doc-input"
-              spellcheck="false"
-              @blur="commitEditing(block)"
+                spellcheck="false"
+                @paste="handleLargePaste"
+                @keydown.ctrl.shift.v="pasteLargePlainText"
+                @blur="commitEditing(block)"
               @keydown.ctrl.enter.prevent="commitEditing(block)"
             />
             <div v-else class="large-doc-render prose prose-stone max-w-none dark:prose-invert" @click="taskLine(block) !== null && toggleTask(taskLine(block)!)" v-html="block.html || '&nbsp;'" />

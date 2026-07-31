@@ -42,6 +42,11 @@ import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingMode
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
 import { extractOutlineWithLines, structureOutline } from "../../utils/outline";
+import {
+  clipboardPayloadFromDataTransfer,
+  prepareSmartPaste,
+  readClipboardPayload,
+} from "../../utils/smartPaste";
 import type { EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -430,6 +435,13 @@ const sourceInputKeymap: KeyBinding[] = [
   { key: "Enter", run: handleSourceListEnter },
   { key: "Tab", run: (currentView) => handleSourceTab(currentView, false) },
   { key: "Shift-Tab", run: (currentView) => handleSourceTab(currentView, true) },
+  {
+    key: "Mod-Shift-v",
+    run: (currentView) => {
+      void pasteSourceFromClipboard(currentView, true);
+      return true;
+    },
+  },
 ];
 
 function extensions() {
@@ -448,9 +460,16 @@ function extensions() {
     EditorView.domEventHandlers({
       paste(event, currentView) {
         const files = getImageFilesFromClipboard(event.clipboardData);
-        if (files.length === 0) return false;
+        if (files.length > 0) {
+          event.preventDefault();
+          void insertImageFilesIntoSource(files, currentView);
+          return true;
+        }
+        const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
+        if (!result.markdown) return false;
         event.preventDefault();
-        void insertImageFilesIntoSource(files, currentView);
+        insertSmartPasteIntoSource(result.markdown, currentView);
+        showPasteWarnings(result.warnings);
         return true;
       },
       keydown(event, currentView) {
@@ -753,7 +772,8 @@ onMounted(() => {
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.addEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
-  window.addEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
+    window.addEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
+    window.addEventListener("keydown", handleSourcePlainPasteCapture, true);
 });
 
 watch(
@@ -784,7 +804,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.removeEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
-  window.removeEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
+    window.removeEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
+    window.removeEventListener("keydown", handleSourcePlainPasteCapture, true);
   window.cancelAnimationFrame(typewriterFrame);
   view?.destroy();
   view = null;
@@ -803,6 +824,45 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
     annotations: isolateHistory.of("full"),
   });
   view.focus();
+}
+
+async function pasteSourceFromClipboard(currentView: EditorView, plainText: boolean) {
+  const result = prepareSmartPaste(await readClipboardPayload(), { plainText });
+  if (!result.markdown) return;
+  insertSmartPasteIntoSource(result.markdown, currentView);
+  showPasteWarnings(result.warnings);
+}
+
+function handleSourcePlainPasteCapture(event: KeyboardEvent) {
+  const target = event.target;
+  if (
+    !view
+    || props.paneId !== appStore.splitLayout.activePaneId
+    || paneEditorMode.value !== "source"
+    || paneDocumentMode.value !== "normal"
+    || !(target instanceof HTMLElement)
+    || !view.dom.contains(target)
+    || !(event.ctrlKey || event.metaKey)
+    || !event.shiftKey
+    || event.key.toLowerCase() !== "v"
+  ) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  void pasteSourceFromClipboard(view, true);
+}
+
+function insertSmartPasteIntoSource(markdown: string, currentView: EditorView) {
+  const selection = currentView.state.selection.main;
+  currentView.dispatch({
+    changes: { from: selection.from, to: selection.to, insert: markdown },
+    selection: { anchor: selection.from + markdown.length },
+    scrollIntoView: true,
+  });
+  currentView.focus();
+}
+
+function showPasteWarnings(warnings: string[]) {
+  if (warnings.length > 0) appStore.statusMessage = warnings.join(" ");
 }
 
 function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
