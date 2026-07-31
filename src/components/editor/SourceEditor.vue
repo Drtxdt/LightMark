@@ -4,7 +4,17 @@ import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, keymap, lineNumbers, type KeyBinding } from "@codemirror/view";
+import {
+  Decoration,
+  GutterMarker,
+  type DecorationSet,
+  EditorView,
+  WidgetType,
+  gutter,
+  keymap,
+  lineNumbers,
+  type KeyBinding,
+} from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
   appStore,
@@ -15,8 +25,11 @@ import {
   getPanePendingModeCursor,
   getPaneTab,
   recordNavigationLocation,
+  revealHeadingAtLine,
   setPaneContent,
   setPanePendingModeCursor,
+  toggleHeadingFoldByKey,
+  updatePaneOutlineAnchor,
   updatePanePosition,
 } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
@@ -28,6 +41,7 @@ import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinua
 import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingModes";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
+import { extractOutlineWithLines, structureOutline } from "../../utils/outline";
 import type { EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -39,6 +53,7 @@ let view: EditorView | null = null;
 let applyingExternalChange = false;
 let mathDiagnosticTimer: number | null = null;
 let typewriterFrame = 0;
+let sourceManualScrollUntil = 0;
 let sourceFindMatches: TextMatch[] = [];
 const wikiCompletion = ref({
   visible: false,
@@ -95,6 +110,120 @@ const sourceFocusField = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
+
+const refreshSourceHeadingFolds = StateEffect.define<void>();
+
+class SourceHeadingFoldWidget extends WidgetType {
+  constructor(private readonly hiddenLines: number) {
+    super();
+  }
+
+  eq(other: SourceHeadingFoldWidget) {
+    return other.hiddenLines === this.hiddenLines;
+  }
+
+  toDOM() {
+    const element = document.createElement("span");
+    element.className = "cm-heading-fold-placeholder";
+    element.textContent = `… ${this.hiddenLines} 行`;
+    element.title = "点击标题左侧箭头展开";
+    return element;
+  }
+}
+
+class SourceHeadingGutterMarker extends GutterMarker {
+  constructor(
+    private readonly collapsed: boolean,
+    private readonly key: string,
+  ) {
+    super();
+  }
+
+  eq(other: SourceHeadingGutterMarker) {
+    return other.collapsed === this.collapsed && other.key === this.key;
+  }
+
+  toDOM() {
+    const element = document.createElement("span");
+    element.className = `cm-heading-fold-toggle${this.collapsed ? " collapsed" : ""}`;
+    element.textContent = this.collapsed ? "›" : "⌄";
+    element.title = this.collapsed ? "展开标题" : "折叠标题";
+    element.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    element.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleHeadingFoldByKey(props.paneId, this.key);
+    });
+    return element;
+  }
+}
+
+function buildSourceHeadingFoldDecorations(state: EditorState) {
+  const tab = getPaneTab(props.paneId);
+  if (!tab || tab.documentMode !== "normal" || paneEditorMode.value !== "source") return Decoration.none;
+  const collapsed = new Set(tab.collapsedHeadingKeys);
+  const ranges = [];
+  for (const item of sourceStructuredOutline(state)) {
+    if (!collapsed.has(item.key) || item.line + 1 >= item.sectionEndLine) continue;
+    const headingLine = state.doc.line(Math.min(item.line + 1, state.doc.lines));
+    const from = Math.min(headingLine.to + 1, state.doc.length);
+    const to = item.sectionEndLine >= state.doc.lines
+      ? state.doc.length
+      : state.doc.line(item.sectionEndLine + 1).from;
+    if (to <= from) continue;
+    ranges.push(
+      Decoration.replace({
+        widget: new SourceHeadingFoldWidget(item.sectionEndLine - item.line - 1),
+        inclusive: false,
+      }).range(from, to),
+    );
+  }
+  return Decoration.set(ranges, true);
+}
+
+const sourceHeadingFoldField = StateField.define<DecorationSet>({
+  create(state) {
+    return buildSourceHeadingFoldDecorations(state);
+  },
+  update(value, transaction) {
+    if (transaction.docChanged || transaction.effects.some((effect) => effect.is(refreshSourceHeadingFolds))) {
+      return buildSourceHeadingFoldDecorations(transaction.state);
+    }
+    return value.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const sourceHeadingGutter = gutter({
+  class: "cm-heading-fold-gutter",
+  lineMarker(currentView, line) {
+    const lineNumber = currentView.state.doc.lineAt(line.from).number - 1;
+    const item = sourceStructuredOutline(currentView.state).find((candidate) => candidate.line === lineNumber);
+    if (!item || item.sectionEndLine <= item.line + 1) return null;
+    return new SourceHeadingGutterMarker(
+      Boolean(getPaneTab(props.paneId)?.collapsedHeadingKeys.includes(item.key)),
+      item.key,
+    );
+  },
+  domEventHandlers: {
+    mousedown(currentView, line, event) {
+      if (!(event instanceof MouseEvent) || event.button !== 0) return false;
+      const lineNumber = currentView.state.doc.lineAt(line.from).number - 1;
+      const item = sourceStructuredOutline(currentView.state).find((candidate) => candidate.line === lineNumber);
+      if (!item || item.sectionEndLine <= item.line + 1) return false;
+      event.preventDefault();
+      toggleHeadingFoldByKey(props.paneId, item.key);
+      return true;
+    },
+  },
+});
+
+function sourceStructuredOutline(state: EditorState) {
+  return structureOutline(extractOutlineWithLines(state.doc.toString()), state.doc.lines);
+}
 
 function sourceFocusEnabled() {
   return (
@@ -189,6 +318,43 @@ const minimalTheme = EditorView.theme({
     borderColor: "#e7e1d7",
     color: "#756f66",
   },
+  ".cm-heading-fold-gutter": {
+    width: "20px",
+    pointerEvents: "auto",
+  },
+  ".cm-heading-fold-toggle": {
+    display: "inline-flex",
+    width: "18px",
+    height: "20px",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "5px",
+    color: "var(--lm-cm-muted)",
+    cursor: "pointer",
+    pointerEvents: "auto",
+    position: "relative",
+    zIndex: "4",
+    font: "700 17px/1 var(--lm-ui-font-family)",
+  },
+  ".cm-heading-fold-toggle:hover": {
+    backgroundColor: "var(--lm-accent-soft)",
+    color: "var(--lm-cm-heading)",
+  },
+  ".cm-heading-fold-toggle.collapsed": {
+    color: "var(--lm-cm-accent)",
+  },
+  ".cm-heading-fold-placeholder": {
+    display: "inline-flex",
+    alignItems: "center",
+    marginLeft: "8px",
+    border: "1px solid var(--lm-border)",
+    borderRadius: "999px",
+    padding: "1px 7px",
+    backgroundColor: "var(--lm-surface-raised)",
+    color: "var(--lm-cm-muted)",
+    font: "600 10px/1.5 var(--lm-ui-font-family)",
+    verticalAlign: "middle",
+  },
   ".cm-math-error": {
     textDecoration: "underline wavy #b4533c 1px",
     textUnderlineOffset: "3px",
@@ -274,6 +440,8 @@ function extensions() {
     sourceFindField,
     mathDiagnosticField,
     sourceFocusField,
+    sourceHeadingFoldField,
+    sourceHeadingGutter,
     markdown(),
     syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
@@ -286,6 +454,7 @@ function extensions() {
         return true;
       },
       keydown(event, currentView) {
+        if (["PageDown", "PageUp", "Home", "End"].includes(event.key)) markSourceManualScroll();
         if (!wikiCompletion.value.visible) return false;
         if (event.key === "ArrowDown") {
           event.preventDefault();
@@ -351,6 +520,20 @@ function extensions() {
       },
       scroll(_event, currentView) {
         captureSourcePosition(currentView);
+        if (Date.now() <= sourceManualScrollUntil) captureSourceScrollAnchor(currentView);
+        return false;
+      },
+      wheel() {
+        markSourceManualScroll();
+        return false;
+      },
+      touchmove() {
+        markSourceManualScroll();
+        return false;
+      },
+      pointerdown(event, currentView) {
+        const rect = currentView.scrollDOM.getBoundingClientRect();
+        if (event.clientX >= rect.right - 18) markSourceManualScroll(1500);
         return false;
       },
     }),
@@ -362,7 +545,11 @@ function extensions() {
       }
       if (update.docChanged) scheduleMathDiagnostics(update.view);
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
-      if (update.docChanged || update.selectionSet) captureSourcePosition(update.view);
+      if (update.docChanged || update.selectionSet) {
+        captureSourcePosition(update.view);
+        const line = update.state.doc.lineAt(update.state.selection.main.head).number - 1;
+        updatePaneOutlineAnchor(props.paneId, line, "selection");
+      }
       if (update.docChanged || update.selectionSet) scheduleSourceTypewriter(update.view);
     }),
   ];
@@ -566,6 +753,7 @@ onMounted(() => {
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.addEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
+  window.addEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
 });
 
 watch(
@@ -596,6 +784,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.removeEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
+  window.removeEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
   window.cancelAnimationFrame(typewriterFrame);
   view?.destroy();
   view = null;
@@ -669,6 +858,25 @@ function captureSourcePosition(currentView = view) {
       clientHeight: scroller.clientHeight,
     }),
   );
+}
+
+function markSourceManualScroll(duration = 500) {
+  sourceManualScrollUntil = Date.now() + duration;
+}
+
+function captureSourceScrollAnchor(currentView = view) {
+  if (!currentView || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal") return;
+  const scroller = currentView.scrollDOM;
+  const anchorHeight = scroller.scrollTop + Math.min(96, scroller.clientHeight * 0.2);
+  const block = currentView.lineBlockAtHeight(anchorHeight);
+  const line = currentView.state.doc.lineAt(block.from).number - 1;
+  updatePaneOutlineAnchor(props.paneId, line, "scroll");
+}
+
+function handleSourceHeadingFoldsChanged(event: CustomEvent<{ paneId?: EditorPaneId }>) {
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  if (!view) return;
+  view.dispatch({ effects: refreshSourceHeadingFolds.of(undefined) });
 }
 
 function restorePendingSourcePosition() {
@@ -755,12 +963,14 @@ function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: Ed
   const detail = event.detail;
   if (typeof detail === "object" && detail?.paneId && detail.paneId !== props.paneId) return;
   const requestedLine = typeof detail === "number" ? detail : detail?.line ?? 0;
+  revealHeadingAtLine(props.paneId, requestedLine);
   const targetLine = Math.max(1, Math.min(Math.floor(requestedLine) + 1, view.state.doc.lines));
   const line = view.state.doc.line(targetLine);
   view.dispatch({
     selection: { anchor: line.from },
     effects: EditorView.scrollIntoView(line.from, { y: "center" }),
   });
+  updatePaneOutlineAnchor(props.paneId, requestedLine, "navigation");
   view.focus();
 }
 
@@ -778,10 +988,13 @@ function handleKnowledgeOccurrence(event: CustomEvent<{ paneId?: EditorPaneId; l
   }
   const anchor = clampOffset(event.detail.from, view.state.doc.length);
   const head = clampOffset(event.detail.to ?? event.detail.from, view.state.doc.length);
+  const targetLine = view.state.doc.lineAt(anchor).number - 1;
+  revealHeadingAtLine(props.paneId, targetLine);
   view.dispatch({
     selection: { anchor, head },
     effects: EditorView.scrollIntoView(anchor, { y: "center" }),
   });
+  updatePaneOutlineAnchor(props.paneId, targetLine, "navigation");
   view.focus();
 }
 
@@ -869,6 +1082,7 @@ function navigateSourceFind(delta: 1 | -1) {
   if (findReplaceStore.error || sourceFindMatches.length === 0) return;
   const current = normalizeMatchIndex(findReplaceStore.currentIndex + delta, sourceFindMatches.length);
   const match = sourceFindMatches[current];
+  revealHeadingAtLine(props.paneId, view.state.doc.lineAt(match.from).number - 1);
   setFindResult(sourceFindMatches.length, current, "");
   applySourceFindDecorations(current);
   view.dispatch({

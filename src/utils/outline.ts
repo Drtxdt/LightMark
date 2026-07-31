@@ -1,13 +1,20 @@
 import type { OutlineItem } from "../types";
 
 export interface OutlineItemWithLine extends OutlineItem {
-  line: number;
 }
 
 export interface BreadcrumbItem extends OutlineItemWithLine {}
 
+export interface StructuredOutlineItem extends OutlineItemWithLine {
+  key: string;
+  parentKey: string | null;
+  ancestorKeys: string[];
+  sectionEndLine: number;
+  hasChildren: boolean;
+}
+
 export function extractOutline(markdown: string): OutlineItem[] {
-  return extractOutlineWithLines(markdown).map(({ line: _line, ...item }) => item);
+  return extractOutlineWithLines(markdown);
 }
 
 export function extractOutlineWithLines(markdown: string): OutlineItemWithLine[] {
@@ -63,6 +70,86 @@ export function extractOutlineWithLines(markdown: string): OutlineItemWithLine[]
   return items;
 }
 
+export function structureOutline(
+  items: OutlineItemWithLine[],
+  totalLines = Math.max(1, items.at(-1)?.line ?? 0) + 1,
+): StructuredOutlineItem[] {
+  const result: StructuredOutlineItem[] = [];
+  const ancestors: StructuredOutlineItem[] = [];
+  const siblingCounts = new Map<string, number>();
+
+  for (const item of items) {
+    while (ancestors.length > 0 && ancestors[ancestors.length - 1].level >= item.level) ancestors.pop();
+    const parentKey = ancestors.at(-1)?.key ?? null;
+    const segment = `${item.level}:${normalizeHeadingKeyText(item.text) || "untitled"}`;
+    const siblingScope = `${parentKey ?? "root"}\u0000${segment}`;
+    const occurrence = siblingCounts.get(siblingScope) ?? 0;
+    siblingCounts.set(siblingScope, occurrence + 1);
+    const key = `${parentKey ? `${parentKey}/` : ""}${segment}[${occurrence}]`;
+    const structured: StructuredOutlineItem = {
+      ...item,
+      key,
+      parentKey,
+      ancestorKeys: ancestors.map((ancestor) => ancestor.key),
+      sectionEndLine: totalLines,
+      hasChildren: false,
+    };
+    result.push(structured);
+    ancestors.push(structured);
+  }
+
+  for (let index = 0; index < result.length; index += 1) {
+    const item = result[index];
+    const next = result[index + 1];
+    item.hasChildren = Boolean(next && next.level > item.level);
+    for (let cursor = index + 1; cursor < result.length; cursor += 1) {
+      if (result[cursor].level <= item.level) {
+        item.sectionEndLine = result[cursor].line;
+        break;
+      }
+    }
+  }
+
+  return result;
+}
+
+export function visibleOutlineItems(
+  outline: StructuredOutlineItem[],
+  collapsedKeys: Iterable<string>,
+) {
+  const collapsed = collapsedKeys instanceof Set ? collapsedKeys : new Set(collapsedKeys);
+  return outline.filter((item) => !item.ancestorKeys.some((key) => collapsed.has(key)));
+}
+
+export function resolveActiveOutlineItem(
+  outline: StructuredOutlineItem[],
+  line: number,
+) {
+  const targetLine = Math.max(0, Number.isFinite(line) ? Math.floor(line) : 0);
+  let active: StructuredOutlineItem | null = null;
+  for (const item of outline) {
+    if (item.line > targetLine) break;
+    active = item;
+  }
+  return active;
+}
+
+export function resolveHeadingSection(
+  outline: StructuredOutlineItem[],
+  line: number,
+) {
+  const active = resolveActiveOutlineItem(outline, line);
+  return active && line < active.sectionEndLine ? active : null;
+}
+
+export function reconcileCollapsedKeys(
+  outline: StructuredOutlineItem[],
+  keys: Iterable<string>,
+) {
+  const valid = new Set(outline.map((item) => item.key));
+  return Array.from(new Set(keys)).filter((key) => valid.has(key));
+}
+
 export function resolveHeadingBreadcrumb(outline: OutlineItemWithLine[], line: number): BreadcrumbItem[] {
   const trail: BreadcrumbItem[] = [];
   const targetLine = Math.max(0, Number.isFinite(line) ? Math.floor(line) : 0);
@@ -76,6 +163,15 @@ export function resolveHeadingBreadcrumb(outline: OutlineItemWithLine[], line: n
 
 export function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^\w\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function normalizeHeadingKeyText(value: string) {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[/%[\]\u0000-\u001f]/g, "-")
+    .trim();
 }
 
 function isHtmlBlockStart(line: string) {

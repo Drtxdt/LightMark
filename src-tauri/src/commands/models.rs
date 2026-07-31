@@ -63,6 +63,10 @@ pub struct SessionTabState {
     pub last_active_at: u64,
     #[serde(default)]
     pub position: Option<EditorPositionSnapshot>,
+    #[serde(default)]
+    pub collapsed_outline_keys: Vec<String>,
+    #[serde(default)]
+    pub collapsed_heading_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

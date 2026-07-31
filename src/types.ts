@@ -106,6 +106,8 @@ export interface SessionTabState {
   editorMode: EditorMode;
   lastActiveAt: number;
   position?: EditorPositionSnapshot;
+  collapsedOutlineKeys?: string[];
+  collapsedHeadingKeys?: string[];
 }
 
 export interface ClosedTabRecord {
@@ -285,6 +287,7 @@ export interface OutlineItem {
   id: string;
   text: string;
   level: 1 | 2 | 3 | 4 | 5 | 6;
+  line: number;
 }
 
 export interface FileInfo {
@@ -296,7 +299,6 @@ export interface FileInfo {
 }
 
 export interface LargeOutlineItem extends OutlineItem {
-  line: number;
 }
 
 export interface LargeFileSession {
@@ -408,6 +410,8 @@ export interface DocumentTab {
   isDirty: boolean;
   editorMode: EditorMode;
   pendingModeCursor: PendingModeCursor | null;
+  collapsedOutlineKeys: string[];
+  collapsedHeadingKeys: string[];
   /**
    * Runtime-only exact Markdown snapshots for formatter undo/redo.
    * ProseMirror cannot represent trailing spaces and excess blank lines, so

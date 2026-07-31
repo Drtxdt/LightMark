@@ -18,6 +18,7 @@
     "check:input-rules": "node scripts/check-input-rules.mjs",
     "check:markdown-format": "node scripts/check-markdown-format.mjs",
     "check:breadcrumbs": "node scripts/check-breadcrumbs.mjs",
+    "check:outline-folding": "node scripts/check-outline-folding.mjs",
     "check:math": "node scripts/check-math.mjs",
     "check:tables": "node scripts/check-table-roundtrip.mjs",
     "check:editor-history": "node scripts/check-editor-history.mjs",

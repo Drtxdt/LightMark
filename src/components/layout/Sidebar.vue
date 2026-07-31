@@ -3,28 +3,43 @@ import { computed, nextTick, ref, watch } from "vue";
 import {
   appStore,
   convertUnlinkedMention,
+  getPaneStructuredOutline,
+  getPaneTab,
   navigateToFilePath,
   navigateToKnowledgeOccurrence,
   openFile,
   openWorkspace,
+  reconcilePaneCollapsedHeadings,
   recordNavigationLocation,
   refreshKnowledge,
   refreshKnowledgeIndex,
-  switchMode,
+  revealHeadingAtLine,
+  revealPaneOutlineKey,
+  setAllPaneOutlineFolds,
+  togglePaneOutlineFold,
   workspaceKnowledgeTags,
 } from "../../stores/appStore";
 import FileTreeNode from "./FileTreeNode.vue";
-import { extractOutline } from "../../utils/outline";
-import type { LargeOutlineItem, OutlineItem } from "../../types";
+import { resolveActiveOutlineItem, visibleOutlineItems, type StructuredOutlineItem } from "../../utils/outline";
 import UiIcon from "../ui/UiIcon.vue";
 import ResourcesPane from "./ResourcesPane.vue";
 
 const activePane = ref<"files" | "outline" | "knowledge" | "resources">("files");
 const knowledgeTab = ref<"backlinks" | "mentions" | "tags">("backlinks");
 const selectedTag = ref("");
-const outline = computed(() => {
-  if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
-  return extractOutline(appStore.currentContent);
+const outlineScroll = ref<HTMLElement | null>(null);
+const activeEditorPaneId = computed(() => appStore.splitLayout.activePaneId);
+const outline = computed(() => getPaneStructuredOutline(activeEditorPaneId.value));
+const outlineTab = computed(() => getPaneTab(activeEditorPaneId.value));
+const visibleOutline = computed(() => visibleOutlineItems(outline.value, outlineTab.value?.collapsedOutlineKeys ?? []));
+const activeOutlineItem = computed(() => resolveActiveOutlineItem(
+  outline.value,
+  appStore.paneOutlineAnchorLines[activeEditorPaneId.value],
+));
+const allOutlineCollapsed = computed(() => {
+  const branchKeys = outline.value.filter((item) => item.hasChildren).map((item) => item.key);
+  const collapsed = new Set(outlineTab.value?.collapsedOutlineKeys ?? []);
+  return branchKeys.length > 0 && branchKeys.every((key) => collapsed.has(key));
 });
 
 watch(
@@ -47,6 +62,23 @@ watch(
   () => appStore.currentWorkspace,
   (workspace) => {
     if (!workspace && activePane.value === "knowledge") activePane.value = "files";
+  },
+);
+
+watch(
+  () => [outlineTab.value?.id, outlineTab.value?.content, outline.value.length] as const,
+  () => reconcilePaneCollapsedHeadings(activeEditorPaneId.value),
+);
+
+watch(
+  () => activeOutlineItem.value?.key ?? "",
+  async (key) => {
+    if (!key) return;
+    revealPaneOutlineKey(activeEditorPaneId.value, key);
+    if (activePane.value !== "outline") return;
+    await nextTick();
+    const target = outlineScroll.value?.querySelector<HTMLElement>(`[data-outline-key="${cssEscape(key)}"]`);
+    target?.scrollIntoView({ block: "nearest" });
   },
 );
 
@@ -84,55 +116,18 @@ function displayPath(path: string) {
     : normalized;
 }
 
-async function jumpToHeading(item: OutlineItem | LargeOutlineItem) {
+async function jumpToHeading(item: StructuredOutlineItem) {
   recordNavigationLocation();
-  if (appStore.documentMode === "large" && "line" in item) {
-    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
+  const paneId = activeEditorPaneId.value;
+  if (outlineTab.value?.documentMode === "large") {
+    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: { line: item.line, paneId } }));
     return;
   }
-
-  if (appStore.editorMode !== "wysiwyg") {
-    switchMode("wysiwyg");
-    await nextTick();
-  }
-
+  revealHeadingAtLine(paneId, item.line);
   await nextTick();
-  const target = await waitForHeadingTarget(item);
-  target?.scrollIntoView({ block: "start", behavior: "smooth" });
-}
-
-function waitForHeadingTarget(item: OutlineItem) {
-  const selector = `.ProseMirror [data-outline-id="${cssEscape(item.id)}"]`;
-  return new Promise<HTMLElement | null>((resolve) => {
-    let attempts = 0;
-    const find = () => {
-      const target = document.querySelector<HTMLElement>(selector) || findHeadingByOutlineItem(item);
-      if (target || attempts >= 8) {
-        resolve(target);
-        return;
-      }
-      attempts += 1;
-      requestAnimationFrame(find);
-    };
-    find();
-  });
-}
-
-function findHeadingByOutlineItem(item: OutlineItem) {
-  const headings = Array.from(document.querySelectorAll<HTMLElement>(".ProseMirror h1,.ProseMirror h2,.ProseMirror h3,.ProseMirror h4,.ProseMirror h5,.ProseMirror h6"));
-  const index = outline.value.findIndex((candidate) => candidate.id === item.id);
-  const sameLevelBefore = outline.value.slice(0, Math.max(index, 0)).filter((candidate) => candidate.level === item.level).length;
-  const sameLevelHeadings = headings.filter((heading) => Number(heading.tagName.slice(1)) === item.level);
-  const indexed = sameLevelHeadings[sameLevelBefore];
-  if (indexed && normalizeHeadingText(indexed.textContent || "") === normalizeHeadingText(item.text)) return indexed;
-
-  return headings.find((heading) => {
-    return Number(heading.tagName.slice(1)) === item.level && normalizeHeadingText(heading.textContent || "") === normalizeHeadingText(item.text);
-  }) || null;
-}
-
-function normalizeHeadingText(value: string) {
-  return value.replace(/[#*_`[\]()]/g, "").replace(/\s+/g, " ").trim();
+  window.dispatchEvent(new CustomEvent("lightmark:jump-heading", {
+    detail: { id: item.id, text: item.text, line: item.line, paneId },
+  }));
 }
 
 function cssEscape(value: string) {
@@ -141,7 +136,15 @@ function cssEscape(value: string) {
 }
 
 function outlineIndent(level: number) {
-  return `${Math.min(Math.max(level - 1, 0), 5) * 0.75 + 0.5}rem`;
+  return `${Math.min(Math.max(level - 1, 0), 5) * 0.8 + 0.25}rem`;
+}
+
+function toggleOutlineBranch(item: StructuredOutlineItem) {
+  togglePaneOutlineFold(activeEditorPaneId.value, item.key);
+}
+
+function toggleAllOutlineBranches() {
+  setAllPaneOutlineFolds(activeEditorPaneId.value, !allOutlineCollapsed.value);
 }
 </script>
 
@@ -197,18 +200,43 @@ function outlineIndent(level: number) {
       <FileTreeNode v-for="node in appStore.fileTree" :key="node.path" :node="node" @select="selectFile" />
     </section>
 
-    <section v-else-if="activePane === 'outline'" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
-      <h2 class="mb-3 text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">当前文档</h2>
+    <section v-else-if="activePane === 'outline'" ref="outlineScroll" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
+      <div class="outline-header">
+        <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">当前文档</h2>
+        <button
+          v-if="outline.some((item) => item.hasChildren)"
+          class="outline-toggle-all"
+          :title="allOutlineCollapsed ? '全部展开' : '全部折叠'"
+          @click="toggleAllOutlineBranches"
+        >
+          {{ allOutlineCollapsed ? "全部展开" : "全部折叠" }}
+        </button>
+      </div>
       <p v-if="outline.length === 0" class="text-sm text-ink-500 dark:text-ink-300">暂无标题。</p>
-      <button
-        v-for="item in outline"
-        :key="item.id"
-        class="outline-item block w-full truncate px-2 py-1.5 text-left text-sm"
+      <div
+        v-for="item in visibleOutline"
+        :key="item.key"
+        class="outline-row"
+        :class="{ active: activeOutlineItem?.key === item.key }"
+        :data-outline-key="item.key"
         :style="{ paddingLeft: outlineIndent(item.level) }"
-        @click="jumpToHeading(item)"
       >
-        {{ item.text }}
-      </button>
+        <button
+          v-if="item.hasChildren"
+          class="outline-disclosure"
+          :aria-label="(outlineTab?.collapsedOutlineKeys ?? []).includes(item.key) ? `展开 ${item.text}` : `折叠 ${item.text}`"
+          @click.stop="toggleOutlineBranch(item)"
+        >
+          <UiIcon
+            :name="(outlineTab?.collapsedOutlineKeys ?? []).includes(item.key) ? 'chevron-right' : 'chevron-down'"
+            :size="14"
+          />
+        </button>
+        <span v-else class="outline-disclosure-spacer" />
+        <button class="outline-item min-w-0 flex-1 truncate py-1.5 text-left text-sm" @click="jumpToHeading(item)">
+          {{ item.text }}
+        </button>
+      </div>
     </section>
 
     <section v-else-if="activePane === 'knowledge'" class="min-h-0 flex-1 overflow-auto px-3 pb-3">
@@ -296,8 +324,16 @@ function outlineIndent(level: number) {
 .sidebar-switch.active { background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-sm); }
 .sidebar-empty { margin-top: 14px; border: 1px dashed var(--lm-border-strong); border-radius: var(--lm-radius-md); padding: 16px 14px; color: var(--lm-ink-soft); line-height: 1.5; text-align: center; }
 .sidebar-empty span { color: var(--lm-ink-muted); font-size: 12px; }
-.outline-item { border: 0; border-radius: var(--lm-radius-sm); background: transparent; color: var(--lm-ink-soft); transition: background var(--lm-transition), color var(--lm-transition); }
-.outline-item:hover { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.outline-header { display: flex; min-height: 36px; align-items: center; justify-content: space-between; gap: 8px; position: sticky; top: 0; z-index: 2; background: var(--lm-sidebar); }
+.outline-toggle-all { border: 0; border-radius: 6px; background: transparent; padding: 4px 6px; color: var(--lm-ink-muted); font-size: 10px; }
+.outline-toggle-all:hover { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.outline-row { display: flex; min-width: 0; align-items: center; border-radius: var(--lm-radius-sm); color: var(--lm-ink-soft); transition: background var(--lm-transition), color var(--lm-transition); }
+.outline-row:hover { background: color-mix(in srgb, var(--lm-accent-soft) 72%, transparent); color: var(--lm-ink); }
+.outline-row.active { background: var(--lm-accent-soft); color: var(--lm-ink); box-shadow: inset 2px 0 0 var(--lm-accent); }
+.outline-item { border: 0; background: transparent; color: inherit; }
+.outline-disclosure { display: inline-flex; width: 22px; height: 28px; flex: 0 0 22px; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--lm-ink-muted); }
+.outline-disclosure:hover { background: var(--lm-surface-raised); color: var(--lm-ink); }
+.outline-disclosure-spacer { width: 22px; flex: 0 0 22px; }
 .backlink-card { border: 1px solid var(--lm-border); border-radius: var(--lm-radius-md); background: color-mix(in srgb, var(--lm-surface-raised) 74%, transparent); box-shadow: var(--lm-shadow-sm); transition: border-color var(--lm-transition), background var(--lm-transition), transform var(--lm-transition); }
 .backlink-card:hover { border-color: var(--lm-border-strong); background: var(--lm-surface-raised); transform: translateY(-1px); }
 .knowledge-tabs { border: 1px solid var(--lm-border); border-radius: var(--lm-radius-md); background: color-mix(in srgb, var(--lm-surface) 46%, transparent); }

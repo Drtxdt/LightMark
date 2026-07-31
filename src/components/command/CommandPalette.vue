@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import {
   appStore,
   closeCommandPalette,
+  expandAllHeadingFolds,
   formatCurrentMarkdown,
   openFile,
   openFileInOtherPane,
@@ -14,6 +15,7 @@ import {
   saveCurrentFile,
   switchMode,
   toggleDistractionFreeMode,
+  toggleCurrentHeadingFold,
   toggleFocusMode,
   toggleSplitLayout,
   toggleTypewriterMode,
@@ -48,6 +50,8 @@ const coreCommands = [
   { name: "切换专注模式（F8）", handler: () => toggleFocusMode() },
   { name: "切换打字机模式（F9）", handler: () => toggleTypewriterMode() },
   { name: "切换无干扰模式（Ctrl+Shift+F11）", handler: () => toggleDistractionFreeMode() },
+  { name: "折叠/展开当前标题", handler: () => toggleCurrentHeadingFold() },
+  { name: "展开当前文档全部标题", handler: () => expandAllHeadingFolds() },
   { name: "在另一栏打开当前文件", handler: () => openFileInOtherPane(appStore.currentFilePath) },
   { name: "打开设置", handler: () => (appStore.settingsOpen = true) },
   ...exportTargets.map((target) => ({

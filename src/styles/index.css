@@ -212,6 +212,51 @@ body {
   transition: opacity 140ms ease;
 }
 
+.ProseMirror .lm-heading-fold-hidden {
+  display: none !important;
+}
+
+.ProseMirror .lm-heading-fold-toggle {
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  width: 22px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  transform: translate(-27px, 0.2em);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lm-ink-muted);
+  cursor: pointer;
+  font: 700 18px/1 var(--lm-ui-font-family);
+}
+
+.ProseMirror .lm-heading-fold-toggle:hover,
+.ProseMirror .lm-heading-fold-toggle:focus-visible {
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
+  outline: none;
+}
+
+.ProseMirror .lm-heading-fold-toggle.collapsed {
+  color: var(--lm-accent);
+}
+
+.ProseMirror .lm-heading-fold-summary {
+  display: inline-flex;
+  align-items: center;
+  margin: -0.35em 0 0.65em;
+  border: 1px solid var(--lm-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: var(--lm-surface-raised);
+  color: var(--lm-ink-muted);
+  font: 600 10px/1.5 var(--lm-ui-font-family);
+  pointer-events: none;
+}
+
 .lm-editor-scroll.lm-typewriter-mode .ProseMirror,
 .cm-editor.lm-typewriter-mode .cm-scroller {
   padding-top: 50vh !important;

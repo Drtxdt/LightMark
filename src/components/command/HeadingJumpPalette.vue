@@ -3,15 +3,16 @@ import { computed, nextTick, ref, watch } from "vue";
 import {
   appStore,
   closeHeadingJump,
+  getPaneStructuredOutline,
+  getPaneTab,
   recordNavigationLocation,
-  switchMode,
+  revealHeadingAtLine,
 } from "../../stores/appStore";
-import type { LargeOutlineItem, OutlineItem } from "../../types";
-import { extractOutline } from "../../utils/outline";
+import type { StructuredOutlineItem } from "../../utils/outline";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 type HeadingCandidate = {
-  item: OutlineItem | LargeOutlineItem;
+  item: StructuredOutlineItem;
   score: number;
 };
 const backdrop = ref<HTMLElement | null>(null);
@@ -19,10 +20,8 @@ const panel = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
 useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeHeadingJump });
 
-const outline = computed<Array<OutlineItem | LargeOutlineItem>>(() => {
-  if (appStore.documentMode === "large") return appStore.largeFile?.outline ?? [];
-  return extractOutline(appStore.currentContent);
-});
+const activePaneId = computed(() => appStore.splitLayout.activePaneId);
+const outline = computed(() => getPaneStructuredOutline(activePaneId.value));
 
 const candidates = computed(() => {
   const query = normalizeHeadingQuery(appStore.headingJumpQuery);
@@ -62,62 +61,19 @@ async function jumpToHeading(candidate: HeadingCandidate) {
   recordNavigationLocation();
   const item = candidate.item;
   closeHeadingJump();
-
-  if (appStore.documentMode === "large" && "line" in item) {
-    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: item.line }));
+  const paneId = activePaneId.value;
+  if (getPaneTab(paneId)?.documentMode === "large") {
+    window.dispatchEvent(new CustomEvent("lightmark:jump-line", { detail: { line: item.line, paneId } }));
     return;
   }
-
-  if (appStore.editorMode !== "wysiwyg") {
-    switchMode("wysiwyg");
-    await nextTick();
-  }
-
+  revealHeadingAtLine(paneId, item.line);
   await nextTick();
-  const target = await waitForHeadingTarget(item);
-  target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  window.dispatchEvent(new CustomEvent("lightmark:jump-heading", {
+    detail: { id: item.id, text: item.text, line: item.line, paneId },
+  }));
 }
 
-function waitForHeadingTarget(item: OutlineItem) {
-  const selector = `.ProseMirror [data-outline-id="${cssEscape(item.id)}"]`;
-  return new Promise<HTMLElement | null>((resolve) => {
-    let attempts = 0;
-    const find = () => {
-      const target = document.querySelector<HTMLElement>(selector) || findHeadingByOutlineItem(item);
-      if (target || attempts >= 8) {
-        resolve(target);
-        return;
-      }
-      attempts += 1;
-      requestAnimationFrame(find);
-    };
-    find();
-  });
-}
-
-function findHeadingByOutlineItem(item: OutlineItem) {
-  const headings = Array.from(
-    document.querySelectorAll<HTMLElement>(".ProseMirror h1,.ProseMirror h2,.ProseMirror h3,.ProseMirror h4,.ProseMirror h5,.ProseMirror h6"),
-  );
-  const index = outline.value.findIndex((candidate) => candidate.id === item.id);
-  const sameLevelBefore = outline.value
-    .slice(0, Math.max(index, 0))
-    .filter((candidate) => candidate.level === item.level).length;
-  const sameLevelHeadings = headings.filter((heading) => Number(heading.tagName.slice(1)) === item.level);
-  const indexed = sameLevelHeadings[sameLevelBefore];
-  if (indexed && normalizeHeadingText(indexed.textContent || "") === normalizeHeadingText(item.text)) return indexed;
-
-  return (
-    headings.find((heading) => {
-      return (
-        Number(heading.tagName.slice(1)) === item.level &&
-        normalizeHeadingText(heading.textContent || "") === normalizeHeadingText(item.text)
-      );
-    }) || null
-  );
-}
-
-function scoreHeading(item: OutlineItem | LargeOutlineItem, query: string) {
+function scoreHeading(item: StructuredOutlineItem, query: string) {
   const text = normalizeHeadingQuery(item.text);
   const exact = text.indexOf(query);
   if (exact >= 0) return exact + item.level / 10;
@@ -144,13 +100,8 @@ function normalizeHeadingQuery(value: string) {
   return normalizeHeadingText(value).toLocaleLowerCase();
 }
 
-function cssEscape(value: string) {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
-  return value.replace(/["\\]/g, "\\$&");
-}
-
-function lineLabel(item: OutlineItem | LargeOutlineItem) {
-  return "line" in item ? `L${item.line + 1}` : `H${item.level}`;
+function lineLabel(item: StructuredOutlineItem) {
+  return `L${item.line + 1}`;
 }
 </script>
 

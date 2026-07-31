@@ -36,7 +36,13 @@ import type {
 import { buildTextDiffSummary } from "../utils/textDiff";
 import { buildMarkdownFormatDiff, formatMarkdown, type MarkdownFormatResult } from "../utils/markdownFormat";
 import { mergeEditorPosition } from "../utils/editorPosition";
-import { extractOutlineWithLines } from "../utils/outline";
+import {
+  extractOutlineWithLines,
+  reconcileCollapsedKeys,
+  resolveHeadingSection,
+  structureOutline,
+  type StructuredOutlineItem,
+} from "../utils/outline";
 import {
   defaultSplitLayout,
   disableSplitLayout,
@@ -74,6 +80,8 @@ export const appStore = reactive({
   documentMode: "normal" as DocumentMode,
   largeFile: null as LargeFileState | null,
   paneContextLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
+  paneOutlineAnchorLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
+  paneOutlineAnchorSources: { main: "selection", secondary: "selection" } as Record<EditorPaneId, "selection" | "scroll" | "navigation">,
   largeFileViewportLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
   isDirty: false,
   editorMode: "wysiwyg" as EditorMode,
@@ -253,8 +261,142 @@ export function updatePanePosition(paneId: EditorPaneId, position: EditorPositio
   }
 }
 
+export function updatePaneOutlineAnchor(
+  paneId: EditorPaneId,
+  line: number,
+  source: "selection" | "scroll" | "navigation",
+) {
+  appStore.paneOutlineAnchorLines[paneId] = Math.max(0, Math.floor(Number.isFinite(line) ? line : 0));
+  appStore.paneOutlineAnchorSources[paneId] = source;
+}
+
 export function updateLargeFileViewportLine(paneId: EditorPaneId, line: number) {
   appStore.largeFileViewportLines[paneId] = Math.max(0, Math.floor(Number.isFinite(line) ? line : 0));
+  updatePaneOutlineAnchor(paneId, line, "scroll");
+}
+
+export function getPaneStructuredOutline(paneId: EditorPaneId): StructuredOutlineItem[] {
+  const tab = getPaneTab(paneId);
+  if (!tab) return [];
+  if (tab.documentMode === "large") {
+    return structureOutline(tab.largeFile?.outline ?? [], tab.largeFile?.totalLines ?? 1);
+  }
+  const content = tab.content;
+  return structureOutline(extractOutlineWithLines(content), content.split(/\r?\n/).length);
+}
+
+export function reconcilePaneCollapsedHeadings(paneId: EditorPaneId) {
+  const tab = getPaneTab(paneId);
+  if (!tab) return;
+  const outline = getPaneStructuredOutline(paneId);
+  tab.collapsedOutlineKeys = reconcileCollapsedKeys(outline, tab.collapsedOutlineKeys);
+  tab.collapsedHeadingKeys = reconcileCollapsedKeys(outline, tab.collapsedHeadingKeys);
+}
+
+export function togglePaneOutlineFold(paneId: EditorPaneId, key: string) {
+  const tab = getPaneTab(paneId);
+  const item = getPaneStructuredOutline(paneId).find((candidate) => candidate.key === key);
+  if (!tab || !item?.hasChildren) return;
+  const collapsed = new Set(tab.collapsedOutlineKeys);
+  if (collapsed.has(key)) collapsed.delete(key);
+  else collapsed.add(key);
+  tab.collapsedOutlineKeys = Array.from(collapsed);
+  void persistConfig();
+}
+
+export function revealPaneOutlineKey(paneId: EditorPaneId, key: string) {
+  const tab = getPaneTab(paneId);
+  const item = getPaneStructuredOutline(paneId).find((candidate) => candidate.key === key);
+  if (!tab || !item) return;
+  const ancestors = new Set(item.ancestorKeys);
+  const next = tab.collapsedOutlineKeys.filter((collapsedKey) => !ancestors.has(collapsedKey));
+  if (next.length === tab.collapsedOutlineKeys.length) return;
+  tab.collapsedOutlineKeys = next;
+  void persistConfig();
+}
+
+export function setAllPaneOutlineFolds(paneId: EditorPaneId, collapsed: boolean) {
+  const tab = getPaneTab(paneId);
+  if (!tab) return;
+  tab.collapsedOutlineKeys = collapsed
+    ? getPaneStructuredOutline(paneId).filter((item) => item.hasChildren).map((item) => item.key)
+    : [];
+  void persistConfig();
+}
+
+export function revealHeadingAtLine(paneId: EditorPaneId, line: number) {
+  const tab = getPaneTab(paneId);
+  if (!tab || tab.documentMode !== "normal") return;
+  const outline = getPaneStructuredOutline(paneId);
+  const targetLine = Math.max(0, Math.floor(line));
+  const containingKeys = new Set(
+    outline
+      .filter((item) => item.line <= targetLine && targetLine < item.sectionEndLine)
+      .map((item) => item.key),
+  );
+  const next = tab.collapsedHeadingKeys.filter((key) => !containingKeys.has(key));
+  if (next.length === tab.collapsedHeadingKeys.length) return;
+  tab.collapsedHeadingKeys = next;
+  window.dispatchEvent(new CustomEvent("lightmark:heading-folds-changed", { detail: { paneId } }));
+  void persistConfig();
+}
+
+export function toggleCurrentHeadingFold() {
+  const paneId = appStore.splitLayout.activePaneId;
+  const tab = getPaneTab(paneId);
+  if (!tab) {
+    appStore.statusMessage = "请先打开一个文档。";
+    return;
+  }
+  if (tab.documentMode === "large") {
+    appStore.statusMessage = "大文件模式暂不支持正文标题折叠。";
+    return;
+  }
+  const outline = getPaneStructuredOutline(paneId);
+  const item = resolveHeadingSection(outline, appStore.paneOutlineAnchorLines[paneId]);
+  if (!item || item.sectionEndLine <= item.line + 1) {
+    appStore.statusMessage = item ? "当前标题下没有可折叠的正文。" : "光标不在标题章节中。";
+    return;
+  }
+  const collapsed = new Set(tab.collapsedHeadingKeys);
+  const collapsing = !collapsed.has(item.key);
+  if (collapsing) collapsed.add(item.key);
+  else collapsed.delete(item.key);
+  tab.collapsedHeadingKeys = Array.from(collapsed);
+  window.dispatchEvent(new CustomEvent("lightmark:heading-folds-changed", { detail: { paneId } }));
+  appStore.statusMessage = `${collapsing ? "已折叠" : "已展开"}：${item.text}`;
+  void persistConfig();
+}
+
+export function toggleHeadingFoldByKey(paneId: EditorPaneId, key: string) {
+  const tab = getPaneTab(paneId);
+  const item = getPaneStructuredOutline(paneId).find((candidate) => candidate.key === key);
+  if (!tab || tab.documentMode !== "normal" || !item || item.sectionEndLine <= item.line + 1) return;
+  const collapsed = new Set(tab.collapsedHeadingKeys);
+  const collapsing = !collapsed.has(key);
+  if (collapsing) collapsed.add(key);
+  else collapsed.delete(key);
+  tab.collapsedHeadingKeys = Array.from(collapsed);
+  window.dispatchEvent(new CustomEvent("lightmark:heading-folds-changed", { detail: { paneId } }));
+  appStore.statusMessage = `${collapsing ? "已折叠" : "已展开"}：${item.text}`;
+  void persistConfig();
+}
+
+export function expandAllHeadingFolds() {
+  const paneId = appStore.splitLayout.activePaneId;
+  const tab = getPaneTab(paneId);
+  if (!tab) {
+    appStore.statusMessage = "请先打开一个文档。";
+    return;
+  }
+  if (tab.documentMode === "large") {
+    appStore.statusMessage = "大文件模式暂不支持正文标题折叠。";
+    return;
+  }
+  tab.collapsedHeadingKeys = [];
+  window.dispatchEvent(new CustomEvent("lightmark:heading-folds-changed", { detail: { paneId } }));
+  appStore.statusMessage = "已展开当前文档全部标题。";
+  void persistConfig();
 }
 
 export function getPanePendingModeCursor(paneId: EditorPaneId) {
@@ -1806,6 +1948,8 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             isDirty: false,
             lastActiveAt: item.lastActiveAt,
             position: normalizeSessionPosition(item.position, "wysiwyg"),
+            collapsedOutlineKeys: item.collapsedOutlineKeys,
+            collapsedHeadingKeys: item.collapsedHeadingKeys,
           }),
         );
       } else {
@@ -1823,6 +1967,8 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             lastActiveAt: item.lastActiveAt,
             fileSnapshot,
             position: normalizeSessionPosition(item.position, normalizeEditorMode(item.editorMode) ?? appStore.settings.editor.defaultMode),
+            collapsedOutlineKeys: item.collapsedOutlineKeys,
+            collapsedHeadingKeys: item.collapsedHeadingKeys,
           }),
         );
       }
@@ -1852,6 +1998,8 @@ function buildSessionRestoreState(): SessionRestoreState | undefined {
       editorMode: tab.editorMode,
       lastActiveAt: tab.lastActiveAt,
       position: tab.kind === "normal" ? tab.position : undefined,
+      collapsedOutlineKeys: tab.collapsedOutlineKeys,
+      collapsedHeadingKeys: tab.kind === "normal" ? tab.collapsedHeadingKeys : [],
     }));
   if (openTabs.length === 0) return undefined;
   return {
@@ -1904,6 +2052,8 @@ function createTab(input: {
   lastActiveAt?: number;
   fileSnapshot?: FileSnapshot;
   position?: EditorPositionSnapshot;
+  collapsedOutlineKeys?: string[];
+  collapsedHeadingKeys?: string[];
 }) {
   const now = Date.now();
   const id = input.path ? tabIdForPath(input.path) : `untitled:${now}:${Math.random().toString(36).slice(2, 8)}`;
@@ -1918,6 +2068,8 @@ function createTab(input: {
     isDirty: input.isDirty,
     editorMode: input.editorMode,
     pendingModeCursor: null,
+    collapsedOutlineKeys: Array.from(new Set(input.collapsedOutlineKeys ?? [])),
+    collapsedHeadingKeys: Array.from(new Set(input.collapsedHeadingKeys ?? [])),
     wysiwygFormatHistory: { undo: [], redo: [] },
     position: input.position,
     fileSnapshot: input.fileSnapshot,
@@ -1961,6 +2113,8 @@ function ensureSecondarySplitTab() {
 function projectTabInPane(tab: DocumentTab, paneId: EditorPaneId) {
   appStore.splitLayout = splitLayoutForPaneActivation(appStore.splitLayout, paneId, tab.id, tabIds());
   appStore.paneContextLines[paneId] = Math.max(0, (tab.position?.markdownLine ?? 1) - 1);
+  appStore.paneOutlineAnchorLines[paneId] = Math.max(0, (tab.position?.markdownLine ?? 1) - 1);
+  appStore.paneOutlineAnchorSources[paneId] = "navigation";
   appStore.largeFileViewportLines[paneId] = 0;
   projectTab(tab);
 }

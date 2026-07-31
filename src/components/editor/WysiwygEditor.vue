@@ -23,11 +23,15 @@ import {
   getPaneContent,
   getPaneDocumentMode,
   getPaneEditorMode,
+  getPaneStructuredOutline,
   getPanePendingModeCursor,
   getPaneTab,
   openWikiLink,
+  revealHeadingAtLine,
   setPaneContent,
   setPanePendingModeCursor,
+  toggleHeadingFoldByKey,
+  updatePaneOutlineAnchor,
   updatePanePosition,
 } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
@@ -38,6 +42,7 @@ import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/
 import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { typewriterScrollDelta } from "../../utils/writingModes";
+import { resolveHeadingSection, structureOutline, type StructuredOutlineItem } from "../../utils/outline";
 import {
   parseWikiLinkHref,
   wikiCompletionCandidates as findWikiCompletionCandidates,
@@ -96,6 +101,7 @@ type EditorFindMatch = TextMatch & { docFrom: number; docTo: number };
 const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
 let suppressWysiwygUpdate = false;
 let wysiwygTypewriterFrame = 0;
+let wysiwygManualScrollUntil = 0;
 
 const contextMenu = ref({
   visible: false,
@@ -2481,6 +2487,7 @@ const editor = useEditor({
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
+    captureWysiwygSelectionAnchor(editor.view);
     updateWysiwygWikiCompletion(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
     scheduleWysiwygTypewriter(editor.view);
@@ -2489,6 +2496,7 @@ const editor = useEditor({
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
+    captureWysiwygSelectionAnchor(editor.view);
     updateWysiwygWikiCompletion(editor.view);
     scheduleWysiwygTypewriter(editor.view);
   },
@@ -2829,6 +2837,53 @@ function handleEditorShellScroll() {
   if (tableControl.value.visible) updateTableControl();
   if (wikiCompletion.value.visible) updateWysiwygWikiCompletion();
   captureWysiwygPosition();
+  if (Date.now() <= wysiwygManualScrollUntil) captureWysiwygScrollAnchor();
+}
+
+function markWysiwygManualScroll(duration = 500) {
+  wysiwygManualScrollUntil = Date.now() + duration;
+}
+
+function handleWysiwygScrollPointer(event: PointerEvent) {
+  const shell = editorShell.value;
+  if (!shell) return;
+  const rect = shell.getBoundingClientRect();
+  if (event.clientX >= rect.right - 18) markWysiwygManualScroll(1500);
+}
+
+function handleWysiwygScrollKey(event: KeyboardEvent) {
+  if (["PageDown", "PageUp", "Home", "End"].includes(event.key)) markWysiwygManualScroll();
+}
+
+function captureWysiwygSelectionAnchor(view = editor.value?.view) {
+  if (!view || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
+  const markdown = paneContent.value;
+  const offset = docPosToMarkdownOffset(view.state, view.state.selection.head, markdown);
+  updatePaneOutlineAnchor(props.paneId, markdownLineAtOffset(markdown, offset), "selection");
+}
+
+function captureWysiwygScrollAnchor() {
+  const shell = editorShell.value;
+  if (!shell) return;
+  const anchorY = shell.getBoundingClientRect().top + Math.min(96, shell.clientHeight * 0.2);
+  let activeLine = 0;
+  const headings = Array.from(
+    shell.querySelectorAll<HTMLElement>(".ProseMirror h1[data-outline-line],.ProseMirror h2[data-outline-line],.ProseMirror h3[data-outline-line],.ProseMirror h4[data-outline-line],.ProseMirror h5[data-outline-line],.ProseMirror h6[data-outline-line]"),
+  );
+  for (const heading of headings) {
+    if (heading.getBoundingClientRect().top > anchorY) break;
+    const line = Number.parseInt(heading.dataset.outlineLine || "", 10);
+    if (Number.isFinite(line)) activeLine = line;
+  }
+  updatePaneOutlineAnchor(props.paneId, activeLine, "scroll");
+}
+
+function markdownLineAtOffset(markdown: string, offset: number) {
+  let line = 0;
+  for (let index = 0; index < Math.min(Math.max(0, offset), markdown.length); index += 1) {
+    if (markdown.charCodeAt(index) === 10) line += 1;
+  }
+  return line;
 }
 
 function getSelectedTableInfo(view = editor.value?.view, explicitTable?: HTMLTableElement | null, explicitCell?: HTMLTableCellElement | null) {
@@ -3180,6 +3235,7 @@ onMounted(() => {
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.addEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
+  window.addEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
   syncWysiwygWritingModes();
 });
@@ -3197,11 +3253,33 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
   window.removeEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
+  window.removeEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
   window.cancelAnimationFrame(wysiwygTypewriterFrame);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
   editor.value?.destroy();
 });
+
+function handleWysiwygHeadingFoldsChanged(event: CustomEvent<{ paneId?: EditorPaneId }>) {
+  if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const tab = getPaneTab(props.paneId);
+  const outline = getPaneStructuredOutline(props.paneId);
+  const current = resolveHeadingSection(outline, appStore.paneOutlineAnchorLines[props.paneId]);
+  if (current && tab?.collapsedHeadingKeys.includes(current.key)) {
+    const heading = activeEditor.view.dom.querySelector<HTMLElement>(`[data-outline-key="${cssEscape(current.key)}"]`);
+    if (heading) {
+      const position = activeEditor.view.posAtDOM(heading, 0);
+      activeEditor.view.dispatch(
+        activeEditor.view.state.tr
+          .setSelection(TextSelection.near(activeEditor.view.state.doc.resolve(Math.min(position + 1, activeEditor.view.state.doc.content.size))))
+          .setMeta("addToHistory", false),
+      );
+    }
+  }
+  activeEditor.view.dispatch(activeEditor.view.state.tr.setMeta("lightmarkHeadingFolds", Date.now()).setMeta("addToHistory", false));
+}
 
 function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
   const activeEditor = editor.value;
@@ -3589,6 +3667,9 @@ function navigateWysiwygFind(delta: 1 | -1) {
 
   const current = normalizeMatchIndex(findReplaceStore.currentIndex + delta, matches.items.length);
   const match = matches.items[current];
+  const markdown = paneContent.value;
+  const targetLine = markdownLineAtOffset(markdown, docPosToMarkdownOffset(view.state, match.docFrom, markdown));
+  revealHeadingAtLine(props.paneId, targetLine);
   setFindResult(matches.items.length, current, "");
   view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, match.docFrom, match.docTo)).scrollIntoView());
 }
@@ -4669,19 +4750,111 @@ function createHeadingDecorations(state: any) {
 
 function createOutlineHeadingDecorations(state: any) {
   const decorations: any[] = [];
-  let index = 0;
-  state.doc.descendants((node: any, pos: number) => {
-    if (node.type.name !== "heading") return true;
-    const text = sanitizeOutlineText(node.textContent);
+  const blocks: Array<{ node: any; pos: number }> = [];
+  const headings: Array<{ node: any; pos: number; blockIndex: number }> = [];
+  state.doc.forEach((node: any, pos: number, blockIndex: number) => {
+    blocks.push({ node, pos });
+    if (node.type.name === "heading") headings.push({ node, pos, blockIndex });
+  });
+  const persistedOutline = getPaneStructuredOutline(props.paneId);
+  const structured = structureOutline(
+    headings.map((heading, index) => {
+      const text = sanitizeOutlineText(heading.node.textContent);
+      return {
+        id: persistedOutline[index]?.id ?? `heading-${index}-${slugify(text)}`,
+        text,
+        level: heading.node.attrs.level,
+        line: persistedOutline[index]?.line ?? index,
+      };
+    }),
+    Math.max(1, paneContent.value.split(/\r?\n/).length),
+  );
+  const collapsed = new Set(getPaneTab(props.paneId)?.collapsedHeadingKeys ?? []);
+  const hiddenBlockPositions = new Set<number>();
+
+  headings.forEach((heading, index) => {
+    const item = structured[index];
+    if (!item) return;
+    const isCollapsed = collapsed.has(item.key);
     decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, {
-        "data-outline-id": `heading-${index}-${slugify(text)}`,
+      Decoration.node(heading.pos, heading.pos + heading.node.nodeSize, {
+        "data-outline-id": item.id,
+        "data-outline-key": item.key,
+        "data-outline-line": String(item.line),
+        class: isCollapsed ? "lm-heading-is-collapsed" : "",
+      }),
+      Decoration.widget(
+        heading.pos,
+        () => createWysiwygHeadingFoldButton(item, isCollapsed),
+        {
+          side: -4,
+          key: `heading-fold-toggle-${item.key}-${isCollapsed ? "closed" : "open"}`,
+          ignoreSelection: true,
+          stopEvent: (event: Event) => event.target instanceof globalThis.Node,
+        },
+      ),
+    );
+    if (!isCollapsed) return;
+    let hiddenBlocks = 0;
+    for (let cursor = heading.blockIndex + 1; cursor < blocks.length; cursor += 1) {
+      const candidate = blocks[cursor];
+      if (candidate.node.type.name === "heading" && candidate.node.attrs.level <= item.level) break;
+      hiddenBlockPositions.add(candidate.pos);
+      hiddenBlocks += 1;
+    }
+    if (hiddenBlocks > 0) {
+      decorations.push(
+        Decoration.widget(
+          heading.pos + heading.node.nodeSize,
+          () => createWysiwygHeadingFoldSummary(hiddenBlocks),
+          {
+            side: 4,
+            key: `heading-fold-summary-${item.key}-${hiddenBlocks}`,
+            ignoreSelection: true,
+          },
+        ),
+      );
+    }
+  });
+  for (const block of blocks) {
+    if (!hiddenBlockPositions.has(block.pos)) continue;
+    decorations.push(
+      Decoration.node(block.pos, block.pos + block.node.nodeSize, {
+        class: "lm-heading-fold-hidden",
+        "aria-hidden": "true",
       }),
     );
-    index += 1;
-    return true;
-  });
+  }
   return decorations;
+}
+
+function createWysiwygHeadingFoldButton(item: StructuredOutlineItem, collapsed: boolean) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `lm-heading-fold-toggle${collapsed ? " collapsed" : ""}`;
+  button.contentEditable = "false";
+  button.tabIndex = 0;
+  button.textContent = collapsed ? "›" : "⌄";
+  button.title = `${collapsed ? "展开" : "折叠"} ${item.text}`;
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleHeadingFoldByKey(props.paneId, item.key);
+  });
+  return button;
+}
+
+function createWysiwygHeadingFoldSummary(hiddenBlocks: number) {
+  const summary = document.createElement("span");
+  summary.className = "lm-heading-fold-summary";
+  summary.contentEditable = "false";
+  summary.textContent = `… ${hiddenBlocks} 个块`;
+  return summary;
 }
 
 function sanitizeOutlineText(value: string) {
@@ -4739,6 +4912,7 @@ function scrollInternalLink(href: string) {
 function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string; line?: number; paneId?: EditorPaneId }>) {
   if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  if (typeof event.detail?.line === "number") revealHeadingAtLine(props.paneId, event.detail.line);
   const id = event.detail?.id;
   const target = id ? document.querySelector<HTMLElement>(`.ProseMirror [data-outline-id="${cssEscape(id)}"]`) : null;
   const fallback = event.detail?.text ? findHeadingByText(event.detail.text) : null;
@@ -4754,6 +4928,7 @@ function handleJumpHeading(event: CustomEvent<{ id?: string; text?: string; line
   if (typeof event.detail?.line === "number") {
     const line = Math.max(0, event.detail.line);
     appStore.paneContextLines[props.paneId] = line;
+    updatePaneOutlineAnchor(props.paneId, line, "navigation");
     window.requestAnimationFrame(() => {
       appStore.paneContextLines[props.paneId] = line;
     });
@@ -4771,6 +4946,8 @@ function handleKnowledgeOccurrence(event: CustomEvent<{ paneId?: EditorPaneId; l
     ? event.detail.from
     : markdownLineStartOffset(markdown, event.detail?.line ?? 0);
   const toOffset = typeof event.detail?.to === "number" ? event.detail.to : fromOffset;
+  const targetLine = Math.max(0, event.detail?.line ?? markdownLineAtOffset(markdown, fromOffset));
+  revealHeadingAtLine(props.paneId, targetLine);
   const from = markdownOffsetToDocPos(activeEditor.view.state, fromOffset, markdown);
   const to = markdownOffsetToDocPos(activeEditor.view.state, toOffset, markdown);
   activeEditor.view.dispatch(
@@ -4779,6 +4956,7 @@ function handleKnowledgeOccurrence(event: CustomEvent<{ paneId?: EditorPaneId; l
       .scrollIntoView(),
   );
   appStore.paneContextLines[props.paneId] = Math.max(0, event.detail?.line ?? 0);
+  updatePaneOutlineAnchor(props.paneId, targetLine, "navigation");
   activeEditor.view.focus();
 }
 
@@ -5422,6 +5600,10 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
     class="lm-editor-scroll relative h-full overflow-auto"
     @click="handleEditorShellClick"
     @scroll="handleEditorShellScroll"
+    @wheel.passive="markWysiwygManualScroll()"
+    @touchmove.passive="markWysiwygManualScroll()"
+    @pointerdown="handleWysiwygScrollPointer"
+    @keydown.capture="handleWysiwygScrollKey"
   >
     <EditorContent :editor="editor" />
     <div
