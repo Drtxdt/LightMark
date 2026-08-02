@@ -462,7 +462,7 @@ function extensions() {
         const files = getImageFilesFromClipboard(event.clipboardData);
         if (files.length > 0) {
           event.preventDefault();
-          void insertImageFilesIntoSource(files, currentView);
+          void insertImageFilesIntoSource(files, currentView, undefined, "clipboard");
           return true;
         }
         const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
@@ -507,7 +507,7 @@ function extensions() {
         if (files.length === 0) return false;
         event.preventDefault();
         const position = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
-        void insertImageFilesIntoSource(files, currentView, position ?? currentView.state.doc.length);
+        void insertImageFilesIntoSource(files, currentView, position ?? currentView.state.doc.length, "drop");
         return true;
       },
       mousedown(event, currentView) {
@@ -716,8 +716,13 @@ function moveSourceTableCell(currentView: EditorView, reverse: boolean) {
   return true;
 }
 
-async function insertImageFilesIntoSource(files: File[], currentView: EditorView, position?: number) {
-  const markdown = await saveImagesAsMarkdown(files);
+async function insertImageFilesIntoSource(
+  files: File[],
+  currentView: EditorView,
+  position?: number,
+  source: "clipboard" | "drop" = "drop",
+) {
+  const markdown = await saveImagesAsMarkdown(files, { source });
   if (!markdown) return;
   insertImageMarkdownIntoSource(markdown, currentView, position);
 }
@@ -1191,7 +1196,7 @@ function applySourceFindDecorations(currentIndex: number) {
   view.dispatch({ effects: setSourceFindDecorations.of(Decoration.set(decorations, true)) });
 }
 
-function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: string[]; position?: { x?: number; y?: number } }>) {
+function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: string[]; source?: "clipboard" | "drop"; position?: { x?: number; y?: number } }>) {
   if (props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
   const files = event.detail?.files || [];
   const paths = event.detail?.paths || [];
@@ -1204,7 +1209,7 @@ function handleGlobalImageInsert(event: CustomEvent<{ files?: File[]; paths?: st
     void insertImagePathsIntoSource(paths, view, position);
     return;
   }
-  void insertImageFilesIntoSource(files, view, position);
+  void insertImageFilesIntoSource(files, view, position, event.detail?.source || "drop");
 }
 </script>
 

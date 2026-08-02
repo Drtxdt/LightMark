@@ -1,5 +1,8 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { appStore, refreshFileTree } from "../stores/appStore";
+import { processPastedImage, type ProcessedPastedImage } from "./imageCompression";
+
+export type ImageAssetInputSource = "clipboard" | "drop";
 
 const imageExtensionByType: Record<string, string> = {
   "image/png": "png",
@@ -22,7 +25,10 @@ export function getImageFilesFromDrop(data: DataTransfer | null) {
   return Array.from(data.files).filter((file) => file.type.startsWith("image/"));
 }
 
-export async function saveImagesAsMarkdown(files: File[]) {
+export async function saveImagesAsMarkdown(
+  files: File[],
+  options: { source?: ImageAssetInputSource } = {},
+) {
   if (files.length === 0) return "";
   if (!appStore.currentFilePath) {
     appStore.statusMessage = "请先保存或打开 Markdown 文件，再粘贴图片。";
@@ -34,12 +40,18 @@ export async function saveImagesAsMarkdown(files: File[]) {
   }
 
   const snippets: string[] = [];
-  for (const file of files) {
-    const relativePath = await saveImageAsset(file);
-    snippets.push(`![${imageAlt(file)}](${formatMarkdownImagePath(relativePath)})`);
+  const processed: ProcessedPastedImage[] = [];
+  const timestamp = new Date();
+  for (const originalFile of files) {
+    const result = options.source === "clipboard"
+      ? await processPastedImage(originalFile, appStore.settings.image, timestamp)
+      : unchangedDroppedImage(originalFile);
+    processed.push(result);
+    const relativePath = await saveImageAsset(result.file);
+    snippets.push(`![${imageAlt(result.file)}](${formatMarkdownImagePath(relativePath)})`);
   }
   await refreshFileTree().catch(() => {});
-  appStore.statusMessage = `已保存 ${files.length} 张图片`;
+  appStore.statusMessage = imageSaveStatus(processed);
   return snippets.join("\n\n");
 }
 
@@ -179,4 +191,34 @@ function formatMarkdownImagePath(path: string) {
 
 function encodePathSegment(segment: string) {
   return encodeURIComponent(segment).replace(/%20/g, "%20");
+}
+
+function unchangedDroppedImage(file: File): ProcessedPastedImage {
+  return {
+    originalFile: file,
+    file,
+    originalBytes: file.size,
+    outputBytes: file.size,
+    originalDimensions: null,
+    outputDimensions: null,
+    compressed: false,
+    skipReason: "disabled",
+  };
+}
+
+function imageSaveStatus(results: ProcessedPastedImage[]) {
+  const originalBytes = results.reduce((total, item) => total + item.originalBytes, 0);
+  const outputBytes = results.reduce((total, item) => total + item.outputBytes, 0);
+  const compressed = results.filter((item) => item.compressed).length;
+  const warnings = results.filter((item) => item.warning).length;
+  const sizeSummary = compressed > 0 ? `（${formatBytes(originalBytes)} → ${formatBytes(outputBytes)}）` : "";
+  const compressionSummary = compressed > 0 ? `，压缩 ${compressed} 张${sizeSummary}` : "";
+  const warningSummary = warnings > 0 ? `，${warnings} 张压缩失败并保留原图` : "";
+  return `已保存 ${results.length} 张图片${compressionSummary}${warningSummary}`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

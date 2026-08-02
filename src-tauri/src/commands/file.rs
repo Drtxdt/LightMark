@@ -794,7 +794,7 @@ fn sanitize_asset_file_name(file_name: &str) -> String {
         .unwrap_or("image.png");
     let mut result = String::new();
     for ch in source.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+        if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_') {
             result.push(ch);
         } else {
             result.push('-');
@@ -1437,7 +1437,10 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode_path, resolve_asset_folder, similar_markdown_files, watch_path_key, write_text_file_safely};
+    use super::{
+        percent_decode_path, resolve_asset_folder, sanitize_asset_file_name,
+        similar_markdown_files, watch_path_key, write_text_file_safely,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1498,6 +1501,11 @@ mod tests {
     #[test]
     fn asset_reference_decodes_unicode_and_spaces() {
         assert_eq!(percent_decode_path("assets/%E5%9B%BE%20%E7%89%87.png"), "assets/图 片.png");
+    }
+
+    #[test]
+    fn asset_file_name_preserves_unicode_letters() {
+        assert_eq!(sanitize_asset_file_name("旅行 照片.jpg"), "旅行-照片.jpg");
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

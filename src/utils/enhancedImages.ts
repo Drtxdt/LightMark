@@ -87,6 +87,7 @@ export function unwrapEnhancedImageParagraphs(html: string) {
 }
 
 export function clampImageWidth(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Math.round(Number(value));
   if (!Number.isFinite(number)) return null;
   return Math.min(4096, Math.max(48, number));

@@ -37,7 +37,7 @@ import {
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
-import { mathTokenFromParts, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
+import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
@@ -59,6 +59,11 @@ import {
   readClipboardPayload,
   type PasteConversionResult,
 } from "../../utils/smartPaste";
+import {
+  buildClipboardCopyPayload,
+  writeClipboardPayloadToEvent,
+  type ClipboardCopyPayload,
+} from "../../utils/clipboardCopy";
 import {
   getImageFilesFromClipboard,
   getImageFilesFromDrop,
@@ -89,7 +94,7 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
 const lowlight = createLowlight(all);
 
 type ContextMenuMode = "default" | "code";
-type ImageInsertDetail = { files?: File[]; paths?: string[]; position?: { x?: number; y?: number } };
+type ImageInsertDetail = { files?: File[]; paths?: string[]; source?: "clipboard" | "drop"; position?: { x?: number; y?: number } };
 type ToolbarEditorCommand =
   | "bold"
   | "italic"
@@ -2375,6 +2380,17 @@ const editor = useEditor({
       return false;
     },
     handleDOMEvents: {
+      copy(view, event) {
+        const payload = selectionClipboardPayload(view.state);
+        return payload ? writeClipboardPayloadToEvent(event as ClipboardEvent, payload) : false;
+      },
+      cut(view, event) {
+        if (view.state.selection.empty) return false;
+        const payload = selectionClipboardPayload(view.state);
+        if (!payload || !writeClipboardPayloadToEvent(event as ClipboardEvent, payload)) return false;
+        view.dispatch(view.state.tr.deleteSelection().scrollIntoView());
+        return true;
+      },
       mousedown(view, event) {
         return convertPendingMarkdownBeforeMouseSelection(view, event as MouseEvent);
       },
@@ -2446,7 +2462,7 @@ const editor = useEditor({
         dragEvent.preventDefault();
         const position = view.posAtCoords({ left: dragEvent.clientX, top: dragEvent.clientY });
         const insertAt = position?.pos ?? view.state.doc.content.size;
-        void insertImageFilesIntoWysiwyg(files, insertAt, insertAt);
+        void insertImageFilesIntoWysiwyg(files, insertAt, insertAt, "drop");
         return true;
       },
       blur(view) {
@@ -2493,7 +2509,7 @@ const editor = useEditor({
       if (imageFiles.length > 0) {
         event.preventDefault();
         const { from, to } = view.state.selection;
-        void insertImageFilesIntoWysiwyg(imageFiles, from, to);
+        void insertImageFilesIntoWysiwyg(imageFiles, from, to, "clipboard");
         return true;
       }
       const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
@@ -3175,8 +3191,8 @@ function isWholeTableSelected(info: { pos: number; node: any }) {
   return !selection.empty && selection.from <= info.pos && selection.to >= info.pos + info.node.nodeSize;
 }
 
-async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number) {
-  const markdown = await saveImagesAsMarkdown(files);
+async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number, source: "clipboard" | "drop" = "drop") {
+  const markdown = await saveImagesAsMarkdown(files, { source });
   if (!markdown) return;
   insertImageMarkdownIntoWysiwyg(markdown, from, to);
 }
@@ -3836,7 +3852,7 @@ function handleGlobalImageInsert(event: CustomEvent<ImageInsertDetail>) {
     void insertImagePathsIntoWysiwyg(paths, insertAt, insertAt);
     return;
   }
-  void insertImageFilesIntoWysiwyg(files, insertAt, insertAt);
+  void insertImageFilesIntoWysiwyg(files, insertAt, insertAt, event.detail?.source || "drop");
 }
 
 function imageInsertPositionFromEventDetail(detail: ImageInsertDetail | undefined, fallback: number) {
@@ -3980,7 +3996,7 @@ function getSelectedHtml() {
 function getSelectedMarkdown() {
   const html = getSelectedHtml();
   if (!html) return "";
-  return editorHtmlToMarkdown(html).trim();
+  return editorHtmlToMarkdown(html);
 }
 
 function getSelectedPlainText() {
@@ -3991,27 +4007,60 @@ function getSelectedPlainText() {
 }
 
 async function cutSelection() {
-  await copySelectionAsMarkdown();
   const activeEditor = editor.value;
   if (!activeEditor) return;
   const { state } = activeEditor.view;
   if (state.selection.empty) return;
+  const payload = selectionClipboardPayload(state);
+  if (!payload) return;
+  await writeRichClipboard(payload);
   activeEditor.view.dispatch(state.tr.deleteSelection().scrollIntoView());
 }
 
 async function copySelectionAsMarkdown() {
-  const markdown = getSelectedMarkdown() || getSelectedPlainText();
-  await writeClipboard(markdown);
+  const payload = selectionClipboardPayload(editor.value?.state);
+  if (!payload) return;
+  await writeClipboard(payload.markdown || payload.plainText);
+  appStore.statusMessage = "已复制 Markdown";
 }
 
 async function copySelectionClean() {
-  await copySelectionAsMarkdown();
+  const payload = selectionClipboardPayload(editor.value?.state);
+  if (!payload) return;
+  await writeClipboard(payload.plainText);
+  appStore.statusMessage = "已复制纯文本";
 }
 
 async function copySelectionAsHtml() {
-  const html = getSelectedHtml();
-  const markdown = getSelectedMarkdown() || getSelectedPlainText();
-  await writeClipboard(markdown, html);
+  const payload = selectionClipboardPayload(editor.value?.state);
+  if (!payload) return;
+  await writeRichClipboard(payload);
+  appStore.statusMessage = "已复制干净 HTML";
+}
+
+function selectionClipboardPayload(state = editor.value?.state): ClipboardCopyPayload | null {
+  if (!state || state.selection.empty) return null;
+  const markdown = getSelectedMarkdown();
+  const plainText = getSelectedPlainText();
+  if (!markdown && !plainText) return null;
+  return buildClipboardCopyPayload({
+    markdown: markdown || plainText,
+    plainText,
+    mathPrelude: mathMacroPreludeBeforeSelection(state),
+  });
+}
+
+function mathMacroPreludeBeforeSelection(state: any) {
+  const markdown = paneContent.value;
+  const offset = docPosToMarkdownOffset(state, state.selection.from, markdown);
+  return parseMarkdownMath(markdown.slice(0, offset)).tokens
+    .filter((token) => extractMathMacroDefinitions(token.tex).length > 0)
+    .map((token) => token.raw)
+    .join("\n\n");
+}
+
+async function writeRichClipboard(payload: ClipboardCopyPayload) {
+  await writeClipboard(payload.markdown || payload.plainText, payload.html);
 }
 
 async function pasteFromClipboard(plainText: boolean) {
@@ -4024,7 +4073,7 @@ async function pasteFromClipboard(plainText: boolean) {
 async function pasteWysiwygFromClipboard(plainText: boolean, from: number, to: number) {
   const result = prepareSmartPaste(await readClipboardPayload(), { plainText });
   if (result.kind === "image-files") {
-    await insertImageFilesIntoWysiwyg(result.files, from, to);
+    await insertImageFilesIntoWysiwyg(result.files, from, to, "clipboard");
     return;
   }
   if (!result.markdown) return;
@@ -5882,7 +5931,7 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
           <button class="lm-menu-item">复制</button>
           <div class="lm-menu-pop">
             <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsMarkdown)">以 Markdown 复制</button>
-            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">简化格式并复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">复制为纯文本</button>
             <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsHtml)">以 HTML 复制</button>
           </div>
         </div>
@@ -5908,7 +5957,7 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
           <button class="lm-menu-item">复制</button>
           <div class="lm-menu-pop">
             <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsMarkdown)">以 Markdown 复制</button>
-            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">简化格式并复制</button>
+            <button class="lm-menu-item" @click="runMenuCommand(copySelectionClean)">复制为纯文本</button>
             <button class="lm-menu-item" @click="runMenuCommand(copySelectionAsHtml)">以 HTML 复制</button>
           </div>
         </div>

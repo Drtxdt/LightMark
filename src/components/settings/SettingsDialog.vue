@@ -62,7 +62,7 @@ const experimentalGroups: Array<{ title: string; items: string[]; note?: string 
   },
   {
     title: "资源与界面",
-    items: ["拖拽图片自动复制", "自定义资源目录与图片根路径", "界面语言切换"],
+    items: ["拖拽图片自动复制", "图片根路径", "界面语言切换"],
   },
   {
     title: "自定义与诊断",
@@ -71,6 +71,12 @@ const experimentalGroups: Array<{ title: string; items: string[]; note?: string 
 ];
 
 const activeSectionTitle = computed(() => sections.find((section) => section.id === activeSection.value)?.label ?? "");
+const compressionThresholdMiB = computed({
+  get: () => Number((localSettings.value.image.pasteCompressionThresholdBytes / (1024 * 1024)).toFixed(2)),
+  set: (value: number) => {
+    localSettings.value.image.pasteCompressionThresholdBytes = Math.round(Number(value) * 1024 * 1024);
+  },
+});
 const afterExportAction = computed<AfterExportAction>({
   get() {
     if (localSettings.value.export.openFileAfterExport) return "openFile";
@@ -98,6 +104,7 @@ onMounted(() => {
 async function persist() {
   try {
     saveState.value = "正在保存...";
+    localSettings.value.image.assetFolder = validateAssetFolder(localSettings.value.image.assetFolder);
     await updateSettings(cloneSettings(localSettings.value));
     saveState.value = "已保存";
     window.setTimeout(() => {
@@ -106,6 +113,15 @@ async function persist() {
   } catch (error) {
     saveState.value = String(error);
   }
+}
+
+function validateAssetFolder(value: string) {
+  const normalized = value.trim().replace(/\\/g, "/");
+  if (!normalized) return "assets";
+  if (/^(?:[a-z]:|\/|\\)/i.test(normalized) || normalized.split("/").includes("..")) {
+    throw new Error("附件目录必须是文档目录内的相对路径，不能包含“..”。");
+  }
+  return normalized.replace(/^\.\//, "").replace(/\/{2,}/g, "/");
 }
 
 async function refreshPandocStatus() {
@@ -256,6 +272,10 @@ function cloneSettings(settings: AppSettings): AppSettings {
           <div v-else-if="activeSection === 'image'" class="settings-stack">
             <div class="settings-group">
               <h4>插入图片</h4>
+              <label class="settings-row settings-row-column">
+                <span><b>附件目录</b><small>相对于当前 Markdown 文档；不允许绝对路径或“..”。</small></span>
+                <input v-model="localSettings.image.assetFolder" class="settings-input" placeholder="assets" @change="persist" />
+              </label>
               <label class="settings-row">
                 <span><b>优先使用相对路径</b><small>文件和 Markdown 在同一磁盘/路径体系内时生成相对引用。</small></span>
                 <input v-model="localSettings.image.useRelativePath" type="checkbox" @change="persist" />
@@ -267,6 +287,32 @@ function cloneSettings(settings: AppSettings): AppSettings {
               <label class="settings-row">
                 <span><b>自动转义图片路径</b><small>将空格和中文等字符编码为 URL 形式。</small></span>
                 <input v-model="localSettings.image.escapePath" type="checkbox" @change="persist" />
+              </label>
+            </div>
+            <div class="settings-group">
+              <h4>剪贴板图片压缩</h4>
+              <label class="settings-row">
+                <span><b>自动压缩粘贴的大图片</b><small>只处理剪贴板中的 PNG、JPEG 和 WebP；拖放文件保持原样。</small></span>
+                <input v-model="localSettings.image.pasteCompressionEnabled" type="checkbox" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>体积阈值（MiB）</b><small>超过该体积或最大边长时开始处理。</small></span>
+                <input v-model.number="compressionThresholdMiB" class="settings-number" type="number" min="0.25" max="100" step="0.25" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>最大边长（px）</b><small>按比例缩小，不改变图片宽高比。</small></span>
+                <input v-model.number="localSettings.image.pasteCompressionMaxDimension" class="settings-number" type="number" min="320" max="8192" step="160" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>JPEG / WebP 质量</b><small>PNG 始终使用无损编码。</small></span>
+                <input v-model.number="localSettings.image.pasteCompressionQuality" class="settings-number" type="number" min="40" max="100" step="1" @change="persist" />
+              </label>
+              <label class="settings-row">
+                <span><b>粘贴图片命名</b><small>泛化剪贴板名称始终替换为时间名称。</small></span>
+                <select v-model="localSettings.image.pastedImageNaming" class="select" @change="persist">
+                  <option value="preserve">优先保留原文件名</option>
+                  <option value="timestamp">全部使用日期时间</option>
+                </select>
               </label>
             </div>
           </div>

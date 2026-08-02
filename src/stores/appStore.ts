@@ -1785,6 +1785,11 @@ export function defaultSettings(): AppSettings {
       escapePath: true,
       assetFolder: "assets",
       rootUrl: "",
+      pasteCompressionEnabled: true,
+      pasteCompressionThresholdBytes: 2 * 1024 * 1024,
+      pasteCompressionMaxDimension: 2560,
+      pasteCompressionQuality: 85,
+      pastedImageNaming: "preserve",
     },
     appearance: {
       theme: "system",
@@ -1860,7 +1865,29 @@ function normalizeSettings(config: AppConfig) {
           ? source.markdown.mathNumbering
           : "none",
     },
-    image: { ...defaults.image, ...source.image },
+    image: {
+      ...defaults.image,
+      ...source.image,
+      pasteCompressionThresholdBytes: clampNumber(
+        source.image?.pasteCompressionThresholdBytes,
+        256 * 1024,
+        100 * 1024 * 1024,
+        defaults.image.pasteCompressionThresholdBytes,
+      ),
+      pasteCompressionMaxDimension: clampNumber(
+        source.image?.pasteCompressionMaxDimension,
+        320,
+        8192,
+        defaults.image.pasteCompressionMaxDimension,
+      ),
+      pasteCompressionQuality: clampNumber(
+        source.image?.pasteCompressionQuality,
+        40,
+        100,
+        defaults.image.pasteCompressionQuality,
+      ),
+      pastedImageNaming: source.image?.pastedImageNaming === "timestamp" ? "timestamp" : "preserve",
+    },
     appearance: {
       ...defaults.appearance,
       ...source.appearance,

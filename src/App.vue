@@ -271,7 +271,7 @@ function handleGlobalImagePaste(event: ClipboardEvent) {
   const files = getImageFilesFromClipboard(event.clipboardData);
   if (files.length === 0) return;
   event.preventDefault();
-  window.dispatchEvent(new CustomEvent("lightmark:insert-images", { detail: { files } }));
+  window.dispatchEvent(new CustomEvent("lightmark:insert-images", { detail: { files, source: "clipboard" } }));
 }
 
 function handleGlobalImageDragOver(event: DragEvent) {
@@ -285,7 +285,7 @@ function handleGlobalImageDrop(event: DragEvent) {
   const files = getImageFilesFromDrop(event.dataTransfer);
   if (files.length === 0) return;
   event.preventDefault();
-  window.dispatchEvent(new CustomEvent("lightmark:insert-images", { detail: { files } }));
+  window.dispatchEvent(new CustomEvent("lightmark:insert-images", { detail: { files, source: "drop" } }));
 }
 </script>
 

@@ -5,6 +5,7 @@ export type DocumentMode = "normal" | "large";
 export type DocumentTabKind = "normal" | "large" | "untitled";
 export type ExternalFileState = "clean" | "modified" | "deleted";
 export type ImageInsertBehavior = "reference" | "copyToAssets";
+export type PastedImageNaming = "preserve" | "timestamp";
 export type ExportDefaultFolder = "auto" | "sameFolder" | "custom";
 export type ExportTargetKind = "native-html" | "native-image" | "native-pdf" | "pandoc";
 export type ExportRunStatus = "idle" | "running" | "success" | "error";
@@ -185,6 +186,11 @@ export interface ImageSettings {
   escapePath: boolean;
   assetFolder: string;
   rootUrl: string;
+  pasteCompressionEnabled: boolean;
+  pasteCompressionThresholdBytes: number;
+  pasteCompressionMaxDimension: number;
+  pasteCompressionQuality: number;
+  pastedImageNaming: PastedImageNaming;
 }
 
 export interface AppearanceSettings {

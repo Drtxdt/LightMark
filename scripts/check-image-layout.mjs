@@ -19,6 +19,8 @@ try {
   assert.equal(images.clampImageWidth(5000), 4096);
   assert.equal(images.clampImageWidth("640"), 640);
   assert.equal(images.clampImageWidth("bad"), null);
+  assert.equal(images.clampImageWidth(null), null);
+  assert.equal(images.clampImageWidth(""), null);
   const standard = images.imageMarkdownOrFigure({
     src: "assets/图 片.png", alt: "替代", title: null, widthPx: null, alignment: "left", caption: "",
   });

@@ -311,6 +311,16 @@ pub struct ImageSettings {
     pub asset_folder: String,
     #[serde(default)]
     pub root_url: String,
+    #[serde(default = "default_true")]
+    pub paste_compression_enabled: bool,
+    #[serde(default = "default_paste_compression_threshold_bytes")]
+    pub paste_compression_threshold_bytes: u64,
+    #[serde(default = "default_paste_compression_max_dimension")]
+    pub paste_compression_max_dimension: u32,
+    #[serde(default = "default_paste_compression_quality")]
+    pub paste_compression_quality: u8,
+    #[serde(default = "default_pasted_image_naming")]
+    pub pasted_image_naming: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +625,11 @@ impl Default for ImageSettings {
             escape_path: true,
             asset_folder: default_asset_folder(),
             root_url: String::new(),
+            paste_compression_enabled: true,
+            paste_compression_threshold_bytes: default_paste_compression_threshold_bytes(),
+            paste_compression_max_dimension: default_paste_compression_max_dimension(),
+            paste_compression_quality: default_paste_compression_quality(),
+            pasted_image_naming: default_pasted_image_naming(),
         }
     }
 }
@@ -703,6 +718,22 @@ fn default_image_insert_behavior() -> String {
 
 fn default_asset_folder() -> String {
     "assets".to_string()
+}
+
+fn default_paste_compression_threshold_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+
+fn default_paste_compression_max_dimension() -> u32 {
+    2560
+}
+
+fn default_paste_compression_quality() -> u8 {
+    85
+}
+
+fn default_pasted_image_naming() -> String {
+    "preserve".to_string()
 }
 
 fn default_editor_width() -> u16 {
