@@ -15,6 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { all, createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { closeHistory } from "@tiptap/pm/history";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
@@ -39,7 +40,12 @@ import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMat
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
-import { codeBlockIndentEdits, decidePairAction } from "../../utils/inputRules";
+import {
+  codeBlockIndentEdits,
+  decidePairAction,
+  detectMarkdownShortcut,
+  type MarkdownShortcutMatch,
+} from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { typewriterScrollDelta } from "../../utils/writingModes";
 import { resolveHeadingSection, structureOutline, type StructuredOutlineItem } from "../../utils/outline";
@@ -339,21 +345,6 @@ const TyporaBlockquote = Node.create({
         find: /^\s*>\s$/,
         type: this.type,
         joinPredicate: () => false,
-      }),
-    ];
-  },
-});
-
-const GithubAlertInput = Extension.create({
-  name: "githubAlertInput",
-
-  addProseMirrorPlugins() {
-    return [
-      new Plugin({
-        appendTransaction(transactions, _oldState, newState) {
-          if (!transactions.some((transaction) => transaction.docChanged)) return null;
-          return convertBlockquoteMarkdown(newState, { force: true });
-        },
       }),
     ];
   },
@@ -1076,6 +1067,10 @@ const FootnotesNode = Node.create({
         parseHTML: (element) => element.innerHTML || "",
         rendered: false,
       },
+      editing: {
+        default: false,
+        rendered: false,
+      },
     };
   },
 
@@ -1088,7 +1083,7 @@ const FootnotesNode = Node.create({
   },
 
   addNodeView() {
-    return ({ node, editor }) => {
+    return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
       dom.className = "footnotes";
       dom.dataset.type = "footnotes";
@@ -1096,9 +1091,63 @@ const FootnotesNode = Node.create({
       dom.contentEditable = "false";
       let markdown = node.attrs.markdown || "";
       let fallbackHtml = node.attrs.html || "";
+      let editing = Boolean(node.attrs.editing);
+      let committing = false;
       let frame = 0;
-      const render = () => renderFootnotesView(dom, markdown, fallbackHtml);
+      const updateAttrs = (next: { markdown?: string; editing?: boolean }) => {
+        if (typeof getPos !== "function") return;
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { markdown, html: fallbackHtml, editing, ...next }));
+      };
+      const renderDisplay = () => {
+        dom.className = "footnotes";
+        dom.innerHTML = "";
+        renderFootnotesView(dom, markdown, fallbackHtml);
+      };
+      const commitEditor = (textarea?: HTMLTextAreaElement) => {
+        if (!editing || committing) return;
+        committing = true;
+        if (textarea) markdown = normalizeFootnoteSource(textarea.value);
+        editing = false;
+        dom.dataset.markdown = markdown;
+        updateAttrs({ markdown, editing: false });
+        renderDisplay();
+        window.setTimeout(() => {
+          committing = false;
+        }, 0);
+      };
+      const renderEditor = () => {
+        dom.className = "footnotes footnotes-editing";
+        dom.innerHTML = "";
+        const label = document.createElement("div");
+        label.className = "footnotes-editor-label";
+        label.textContent = "脚注定义";
+        const textarea = document.createElement("textarea");
+        textarea.className = "footnotes-editor";
+        textarea.value = markdown;
+        textarea.rows = Math.max(2, markdown.split(/\r?\n/).length);
+        textarea.spellcheck = false;
+        textarea.addEventListener("input", () => {
+          markdown = textarea.value;
+          textarea.rows = Math.max(2, markdown.split(/\r?\n/).length);
+        });
+        textarea.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" || (event.key === "Enter" && (event.ctrlKey || event.metaKey))) {
+            event.preventDefault();
+            commitEditor(textarea);
+          }
+        });
+        textarea.addEventListener("blur", () => commitEditor(textarea));
+        dom.append(label, textarea);
+        requestAnimationFrame(() => {
+          textarea.focus();
+          textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        });
+      };
+      const render = () => editing ? renderEditor() : renderDisplay();
       const scheduleRender = () => {
+        if (editing) return;
         if (frame) cancelAnimationFrame(frame);
         frame = requestAnimationFrame(() => {
           frame = 0;
@@ -1114,10 +1163,17 @@ const FootnotesNode = Node.create({
       dom.addEventListener("click", (event) => {
         const target = getEventElement(event);
         const link = target?.closest<HTMLAnchorElement>("a[href^='#'],button[data-footnote-target]");
-        if (!link) return;
+        if (link) {
+          event.preventDefault();
+          const href = link instanceof HTMLButtonElement ? link.dataset.footnoteTarget || "" : link.getAttribute("href") || "";
+          scrollInternalLink(href);
+          return;
+        }
+        if (editing) return;
         event.preventDefault();
-        const href = link instanceof HTMLButtonElement ? link.dataset.footnoteTarget || "" : link.getAttribute("href") || "";
-        scrollInternalLink(href);
+        editing = true;
+        updateAttrs({ editing: true });
+        renderEditor();
       });
       editor.on?.("update", scheduleRender);
       return {
@@ -1125,15 +1181,26 @@ const FootnotesNode = Node.create({
         update(nextNode: any) {
           markdown = nextNode.attrs.markdown || "";
           fallbackHtml = nextNode.attrs.html || "";
+          editing = Boolean(nextNode.attrs.editing);
           dom.dataset.markdown = markdown;
-          scheduleRender();
+          render();
           return true;
+        },
+        selectNode() {
+          if (editing) return;
+          editing = true;
+          updateAttrs({ editing: true });
+          renderEditor();
+        },
+        deselectNode() {
+          commitEditor();
         },
         destroy() {
           if (frame) cancelAnimationFrame(frame);
           editor.off?.("update", scheduleRender);
         },
         ignoreMutation: () => true,
+        stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
       };
     };
   },
@@ -1406,6 +1473,57 @@ const WritingFocusDecorations = Extension.create({
             });
             return DecorationSet.create(state.doc, decorations);
           },
+        },
+      }),
+    ];
+  },
+});
+
+const FootnoteMetadataSync = Extension.create({
+  name: "footnoteMetadataSync",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        appendTransaction(transactions, _oldState, newState) {
+          if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          const definitions = new Map<string, string>();
+          newState.doc.descendants((node: any) => {
+            if (node.type?.name !== "footnotes") return true;
+            for (const definition of parseFootnoteSource(String(node.attrs.markdown || ""))) {
+              if (!definitions.has(definition.id)) definitions.set(definition.id, definition.content.trim());
+            }
+            return true;
+          });
+
+          const indexes = new Map<string, number>();
+          const occurrences = new Map<string, number>();
+          let nextIndex = 1;
+          let tr = newState.tr;
+          let changed = false;
+          newState.doc.descendants((node: any, pos: number) => {
+            if (node.type?.name !== "footnoteRef") return true;
+            const id = String(node.attrs.id || "");
+            if (!indexes.has(id)) indexes.set(id, nextIndex++);
+            const occurrence = (occurrences.get(id) || 0) + 1;
+            occurrences.set(id, occurrence);
+            const attrs = {
+              ...node.attrs,
+              index: String(indexes.get(id)),
+              refId: `fnref-${id}-${occurrence}`,
+              preview: definitions.get(id) || "",
+            };
+            if (
+              node.attrs.index !== attrs.index ||
+              node.attrs.refId !== attrs.refId ||
+              node.attrs.preview !== attrs.preview
+            ) {
+              tr = tr.setNodeMarkup(pos, undefined, attrs);
+              changed = true;
+            }
+            return true;
+          });
+          return changed ? tr.setMeta("addToHistory", false) : null;
         },
       }),
     ];
@@ -2262,7 +2380,6 @@ const editor = useEditor({
       levels: [1, 2, 3, 4, 5, 6],
     }),
     TyporaBlockquote,
-    GithubAlertInput,
     Link.configure({ openOnClick: false, protocols: ["lightmark"] }),
     MarkdownImage,
     Table.configure({ resizable: true }),
@@ -2287,6 +2404,7 @@ const editor = useEditor({
     TableOfContentsNode,
     HtmlBlockNode,
     FootnotesNode,
+    FootnoteMetadataSync,
     LightMarkInlineCode,
     TyporaInlineCode,
     TyporaHorizontalRule,
@@ -2338,30 +2456,8 @@ const editor = useEditor({
           return true;
         }
 
-        if (convertMarkdownPipeTable(view)) {
+        if (handleWysiwygMarkdownShortcutEnter(view)) {
           event.preventDefault();
-          return true;
-        }
-
-        const blockquoteTr = convertBlockquoteMarkdown(view.state, {
-          force: true,
-          onlySelectionBlock: true,
-          insertParagraph: true,
-        });
-        if (blockquoteTr) {
-          event.preventDefault();
-          view.dispatch(blockquoteTr.scrollIntoView());
-          return true;
-        }
-
-        const horizontalRuleTr = convertHorizontalRuleMarkdown(view.state, {
-          force: true,
-          onlySelectionBlock: true,
-          insertParagraph: true,
-        });
-        if (horizontalRuleTr) {
-          event.preventDefault();
-          view.dispatch(horizontalRuleTr.scrollIntoView());
           return true;
         }
 
@@ -2378,6 +2474,9 @@ const editor = useEditor({
         window.setTimeout(() => clearStoredMarks(view, ["strike"]), 0);
       }
       return false;
+    },
+    handleTextInput(view, from, to, text) {
+      return handleWysiwygMarkdownShortcutText(view, from, to, text);
     },
     handleDOMEvents: {
       copy(view, event) {
@@ -5424,6 +5523,184 @@ function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: n
   return tr.setStoredMarks([]);
 }
 
+function markdownShortcutEnabled() {
+  return (
+    props.paneId === appStore.splitLayout.activePaneId &&
+    paneDocumentMode.value === "normal" &&
+    paneEditorMode.value === "wysiwyg"
+  );
+}
+
+function hasAncestorNode($pos: any, names: string[]) {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    if (names.includes($pos.node(depth)?.type?.name)) return true;
+  }
+  return false;
+}
+
+function isMarkdownShortcutProtected(state: any) {
+  const { $from } = state.selection;
+  return hasAncestorNode($from, [
+    "codeBlock",
+    "tableCell",
+    "tableHeader",
+    "frontMatter",
+    "htmlBlock",
+    "rawHtml",
+    "blockMath",
+    "mermaid",
+    "footnotes",
+  ]);
+}
+
+function handleWysiwygMarkdownShortcutText(view: any, from: number, to: number, text: string) {
+  if (!markdownShortcutEnabled() || from !== to || view.composing || isMarkdownShortcutProtected(view.state)) return false;
+  const { $from } = view.state.selection;
+  if (!$from.parent.isTextblock || $from.parentOffset !== $from.parent.content.size) return false;
+  const prefix = $from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc");
+  const insideListItem = hasAncestorNode($from, ["listItem"]);
+  const match = detectMarkdownShortcut({
+    text: prefix,
+    insertedText: text,
+    trigger: "text",
+    protectedContext: false,
+    insideListItem,
+  });
+  if (!match) return false;
+  view.dispatch(closeHistory(view.state.tr.insertText(text, from, to)));
+  if (match.kind === "task") {
+    convertTaskShortcut(view, match);
+    return true;
+  }
+  if (match.kind === "footnote-reference") {
+    convertFootnoteReferenceShortcut(view, match);
+    return true;
+  }
+  return false;
+}
+
+function handleWysiwygMarkdownShortcutEnter(view: any) {
+  const { state } = view;
+  if (!markdownShortcutEnabled() || !state.selection.empty || view.composing || isMarkdownShortcutProtected(state)) return false;
+  const { $from } = state.selection;
+  if (!$from.parent.isTextblock || $from.parentOffset !== $from.parent.content.size) return false;
+  const insideBlockquote = hasAncestorNode($from, ["blockquote"]);
+  const match = detectMarkdownShortcut({
+    text: $from.parent.textContent,
+    trigger: "enter",
+    atDocumentStart: $from.depth === 1 && $from.before(1) === 0,
+    insideBlockquote,
+  });
+  if (!match) return false;
+
+  // Keep the literal trigger as the previous history event. One undo then
+  // reveals exactly what the user typed instead of deleting the whole input.
+  view.dispatch(closeHistory(state.tr));
+  const conversionState = view.state;
+
+  if (match.kind === "table") return convertMarkdownPipeTable(view);
+  if (match.kind === "footnote-definition") return convertFootnoteDefinitionShortcut(view, match);
+  if (match.kind === "blockquote" || match.kind === "alert") {
+    const tr = convertBlockquoteMarkdown(conversionState, {
+      force: true,
+      onlySelectionBlock: true,
+      insertParagraph: true,
+    });
+    if (!tr) return false;
+    view.dispatch(tr.scrollIntoView());
+    return true;
+  }
+  if (match.kind === "horizontal-rule") {
+    const tr = convertHorizontalRuleMarkdown(conversionState, {
+      force: true,
+      onlySelectionBlock: true,
+      insertParagraph: true,
+    });
+    if (!tr) return false;
+    view.dispatch(tr.scrollIntoView());
+    return true;
+  }
+  return false;
+}
+
+function convertTaskShortcut(view: any, match: Extract<MarkdownShortcutMatch, { kind: "task" }>) {
+  const { state } = view;
+  const { $from } = state.selection;
+  if (!hasAncestorNode($from, ["listItem"])) return false;
+  const markType = state.schema.marks.taskState;
+  if (!markType) return false;
+  const mark = markType.create({ state: match.checked ? "checked" : "unchecked" });
+  const paragraphStart = $from.start();
+  const placeholder = state.schema.text(" ", [mark]);
+  const tr = state.tr.replaceWith(paragraphStart, $from.pos, placeholder);
+  tr.setSelection(TextSelection.create(tr.doc, paragraphStart + 1));
+  tr.setStoredMarks([mark]);
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function convertFootnoteReferenceShortcut(
+  view: any,
+  match: Extract<MarkdownShortcutMatch, { kind: "footnote-reference" }>,
+) {
+  const { state } = view;
+  const { $from } = state.selection;
+  const type = state.schema.nodes.footnoteRef;
+  if (!type) return false;
+  let index = 1;
+  let occurrence = 1;
+  state.doc.descendants((node: any) => {
+    if (node.type?.name !== "footnoteRef") return true;
+    index += 1;
+    if (node.attrs.id === match.id) occurrence += 1;
+    return true;
+  });
+  const start = $from.start() + match.from;
+  const node = type.create({
+    id: match.id,
+    index: String(index),
+    refId: `fnref-${match.id}-${occurrence}`,
+    preview: footnotePreviewFromState(state, match.id),
+  });
+  const tr = state.tr.replaceWith(start, $from.pos, node);
+  tr.setSelection(TextSelection.near(tr.doc.resolve(start + node.nodeSize), 1));
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function convertFootnoteDefinitionShortcut(
+  view: any,
+  match: Extract<MarkdownShortcutMatch, { kind: "footnote-definition" }>,
+) {
+  const { state } = view;
+  const { $from } = state.selection;
+  const type = state.schema.nodes.footnotes;
+  const paragraph = state.schema.nodes.paragraph;
+  if (!type || !paragraph) return false;
+  const markdown = `[^${match.id}]:${match.text ? ` ${match.text}` : ""}`;
+  const definition = type.create({ markdown, html: "", editing: false });
+  const from = $from.before();
+  const to = $from.after();
+  let tr = state.tr.replaceWith(from, to, definition);
+  const after = from + definition.nodeSize;
+  tr = tr.insert(after, paragraph.create());
+  tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function footnotePreviewFromState(state: any, id: string) {
+  let preview = "";
+  state.doc.descendants((node: any) => {
+    if (preview || node.type?.name !== "footnotes") return true;
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(node.attrs.markdown || "").match(new RegExp(`^ {0,3}\\[\\^${escaped}\\]:\\s*(.*)$`, "m"));
+    if (match) preview = match[1].trim();
+    return !preview;
+  });
+  return preview;
+}
+
 function convertMarkdownPipeTable(view: any) {
   const activeEditor = editor.value;
   if (!activeEditor) return false;
@@ -5473,7 +5750,7 @@ function convertBlockquoteMarkdown(
     const alertMatch = canConvertInnerAlert
       ? text.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i)
       : text.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i);
-    const quoteMatch = text.match(/^>\s+(.+)$/);
+    const quoteMatch = text.match(/^(>+)\s+(.*)$/);
 
     if (alertMatch) {
       const kind = alertMatch[1].toLowerCase();
@@ -5501,13 +5778,15 @@ function convertBlockquoteMarkdown(
     }
 
     if (!insideBlockquote && quoteMatch) {
-      const quote = blockquote.create(null, paragraph.create(null, state.schema.text(quoteMatch[1])));
+      const depth = quoteMatch[1].length;
+      const body = quoteMatch[2];
+      let quote = blockquote.create(null, [
+        body ? paragraph.create(null, state.schema.text(body)) : paragraph.create(),
+        paragraph.create(),
+      ]);
+      for (let level = 1; level < depth; level += 1) quote = blockquote.create(null, quote);
       tr = tr.replaceWith(pos, pos + node.nodeSize, quote);
-      if (insertParagraph) {
-        const after = pos + quote.nodeSize;
-        tr = tr.insert(after, paragraph.create());
-        tr = tr.setSelection(TextSelection.create(tr.doc, after + 1));
-      }
+      tr = tr.setSelection(TextSelection.near(tr.doc.resolve(pos + quote.nodeSize - 1), -1));
       converted = true;
       return false;
     }
@@ -5626,7 +5905,15 @@ function continueTaskItem(view: any) {
 
   const listItem = view.state.schema.nodes.listItem;
   if (!listItem) return false;
-  if (!view.state.selection.$from.parent.textContent.trim()) return false;
+  if (!view.state.selection.$from.parent.textContent.trim()) {
+    const { $from } = view.state.selection;
+    return Boolean(
+      (editor.value as any)?.chain()
+        .deleteRange({ from: $from.start(), to: $from.end() })
+        .liftListItem("listItem")
+        .run(),
+    );
+  }
 
   const splitCommand = (editor.value as any)?.commands?.splitListItem;
   if (typeof splitCommand === "function" && splitCommand("listItem")) {

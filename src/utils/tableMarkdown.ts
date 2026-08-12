@@ -131,9 +131,9 @@ export function markdownPipeRowToTableHtml(text: string) {
   const row = parseMarkdownTableRow(text);
   if (!row || row.cells.every((cell) => !cell.source)) return null;
   if (row.cells.every((cell) => delimiterAlignment(cell.source) !== null)) return null;
-  const firstRow = row.cells.map((cell) => `<td><p>${escapeTableCellHtml(cell.source)}</p></td>`).join("");
+  const firstRow = row.cells.map((cell) => `<th><p>${escapeTableCellHtml(cell.source)}</p></th>`).join("");
   const emptyRow = row.cells.map(() => "<td><p></p></td>").join("");
-  return `<table><tbody><tr>${firstRow}</tr><tr>${emptyRow}</tr></tbody></table>`;
+  return `<table><thead><tr>${firstRow}</tr></thead><tbody><tr>${emptyRow}</tr></tbody></table>`;
 }
 
 export function tableCellVisibleWidth(value: string) {

@@ -834,6 +834,42 @@ sub {
   font-size: 0.92em;
 }
 
+.footnotes.footnotes-editing {
+  margin-top: 1rem;
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(120, 113, 108, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.footnotes-editor-label {
+  margin-bottom: 6px;
+  color: #8f6b3d;
+  font: 600 11px/1.4 var(--lm-ui-font-family);
+  letter-spacing: 0.04em;
+}
+
+.footnotes-editor {
+  display: block;
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #403a33;
+  font: 13px/1.65 var(--lm-editor-code-font-family);
+}
+
+.dark .footnotes.footnotes-editing {
+  border-color: rgba(214, 211, 209, 0.22);
+  background: rgba(41, 37, 36, 0.55);
+}
+
+.dark .footnotes-editor {
+  color: #eee7dc;
+}
+
 .dark mark,
 .dark .ProseMirror mark,
 .dark .markdown-preview mark {
