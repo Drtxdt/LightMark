@@ -42,12 +42,13 @@ import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingMode
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
 import { extractOutlineWithLines, structureOutline } from "../../utils/outline";
+import { expandSnippet } from "../../utils/snippets";
 import {
   clipboardPayloadFromDataTransfer,
   prepareSmartPaste,
   readClipboardPayload,
 } from "../../utils/smartPaste";
-import type { EditorPaneId } from "../../types";
+import type { CapturedEditorTarget, EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
@@ -777,6 +778,8 @@ onMounted(() => {
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.addEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
+    window.addEventListener("lightmark:capture-editor-target", captureSourceEditorTarget as EventListener);
+    window.addEventListener("lightmark:insert-snippet", insertSnippetIntoSource as EventListener);
     window.addEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
     window.addEventListener("keydown", handleSourcePlainPasteCapture, true);
 });
@@ -809,6 +812,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:math-settings-changed", handleMathSettingsChanged);
   window.removeEventListener("lightmark:writing-modes-changed", handleSourceWritingModesChanged);
+  window.removeEventListener("lightmark:capture-editor-target", captureSourceEditorTarget as EventListener);
+  window.removeEventListener("lightmark:insert-snippet", insertSnippetIntoSource as EventListener);
     window.removeEventListener("lightmark:heading-folds-changed", handleSourceHeadingFoldsChanged as EventListener);
     window.removeEventListener("keydown", handleSourcePlainPasteCapture, true);
   window.cancelAnimationFrame(typewriterFrame);
@@ -1003,6 +1008,45 @@ function scheduleSourceTypewriter(currentView = view) {
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     });
   });
+}
+
+function captureSourceEditorTarget(event: CustomEvent<{ target: CapturedEditorTarget | null }>) {
+  const tab = getPaneTab(props.paneId);
+  if (!view || props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !tab) return;
+  const selection = view.state.selection.main;
+  event.detail.target = {
+    paneId: props.paneId,
+    tabId: tab.id,
+    documentMode: "normal",
+    editorMode: "source",
+    anchor: selection.anchor,
+    head: selection.head,
+    selection: view.state.sliceDoc(selection.from, selection.to),
+    capturedAt: Date.now(),
+  };
+}
+
+function insertSnippetIntoSource(event: CustomEvent<{ snippetId: string; target: CapturedEditorTarget }>) {
+  const target = event.detail?.target;
+  const tab = getPaneTab(props.paneId);
+  const snippet = appStore.settings.snippets.items.find((item) => item.id === event.detail?.snippetId && item.enabled);
+  if (!view || !target || !snippet || target.paneId !== props.paneId || target.tabId !== tab?.id || target.editorMode !== "source" || target.documentMode !== "normal") return;
+  const from = Math.max(0, Math.min(target.anchor, target.head, view.state.doc.length));
+  const to = Math.max(from, Math.min(Math.max(target.anchor, target.head), view.state.doc.length));
+  const currentSelection = view.state.sliceDoc(from, to);
+  if (currentSelection !== target.selection) {
+    appStore.statusMessage = "片段插入位置已经变化，请重试。";
+    return;
+  }
+  const expansion = expandSnippet(snippet.markdown, { selection: target.selection });
+  view.dispatch({
+    changes: { from, to, insert: expansion.markdown },
+    selection: { anchor: from + expansion.cursorOffset },
+    scrollIntoView: true,
+    annotations: isolateHistory.of("full"),
+  });
+  view.focus();
+  appStore.statusMessage = `已插入片段：${snippet.name}`;
 }
 
 function handleFindCommand(event: CustomEvent<string>) {

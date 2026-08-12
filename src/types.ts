@@ -138,6 +138,61 @@ export interface AppSettings {
   export: ExportSettings;
   shortcuts: ShortcutSettings;
   advanced: AdvancedSettings;
+  snippets: SnippetSettings;
+}
+
+export interface SnippetDefinition {
+  id: string;
+  name: string;
+  trigger: string;
+  description: string;
+  markdown: string;
+  enabled: boolean;
+}
+
+export interface SnippetSettings {
+  items: SnippetDefinition[];
+}
+
+export interface SnippetExpansionContext {
+  selection: string;
+  now?: Date;
+}
+
+export interface SnippetExpansionResult {
+  markdown: string;
+  cursorOffset: number;
+  usedSelection: boolean;
+}
+
+export interface SlashCommandDefinition {
+  id: string;
+  label: string;
+  description: string;
+  keywords: string[];
+  category: "基础" | "结构" | "插入" | "警示框" | "片段";
+  kind: "builtin" | "snippet";
+  action?: string;
+  value?: string | number;
+  snippetId?: string;
+}
+
+export interface CapturedEditorTarget {
+  paneId: EditorPaneId;
+  tabId: string;
+  documentMode: DocumentMode;
+  editorMode: EditorMode;
+  anchor: number;
+  head: number;
+  selection: string;
+  capturedAt: number;
+  large?: {
+    sessionId: string;
+    startLine: number;
+    endLine: number;
+    startColumn: number;
+    endColumn: number;
+  };
 }
 
 export interface GeneralSettings {

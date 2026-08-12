@@ -198,6 +198,28 @@ mod session_tests {
         let serialized = serde_json::to_value(configured).expect("settings should serialize");
         assert_eq!(serialized["settings"]["markdown"]["mathNumbering"], "all-display");
     }
+
+    #[test]
+    fn snippets_default_and_roundtrip() {
+        let legacy: AppConfig = serde_json::from_value(json!({ "recentFiles": [], "settings": {} }))
+            .expect("legacy settings should deserialize");
+        assert!(legacy.settings.snippets.items.is_empty());
+
+        let configured: AppConfig = serde_json::from_value(json!({
+            "recentFiles": [],
+            "settings": { "snippets": { "items": [{
+                "id": "meeting",
+                "name": "会议纪要",
+                "trigger": "meeting",
+                "description": "template",
+                "markdown": "# ${date}",
+                "enabled": true
+            }] } }
+        }))
+        .expect("snippet settings should deserialize");
+        let serialized = serde_json::to_value(configured).expect("settings should serialize");
+        assert_eq!(serialized["settings"]["snippets"]["items"][0]["trigger"], "meeting");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +241,32 @@ pub struct AppSettings {
     pub shortcuts: ShortcutSettings,
     #[serde(default)]
     pub advanced: AdvancedSettings,
+    #[serde(default)]
+    pub snippets: SnippetSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetSettings {
+    #[serde(default)]
+    pub items: Vec<SnippetDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetDefinition {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub markdown: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,6 +609,7 @@ impl Default for AppSettings {
             export: ExportSettings::default(),
             shortcuts: ShortcutSettings::default(),
             advanced: AdvancedSettings::default(),
+            snippets: SnippetSettings::default(),
         }
     }
 }

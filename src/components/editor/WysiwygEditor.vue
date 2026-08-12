@@ -50,6 +50,12 @@ import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdo
 import { typewriterScrollDelta } from "../../utils/writingModes";
 import { resolveHeadingSection, structureOutline, type StructuredOutlineItem } from "../../utils/outline";
 import {
+  builtinSlashCommands,
+  expandSnippet,
+  filterSlashCommands,
+  snippetSlashCommands,
+} from "../../utils/snippets";
+import {
   parseWikiLinkHref,
   wikiCompletionCandidates as findWikiCompletionCandidates,
   wikiLinkHref,
@@ -90,7 +96,7 @@ import { BlockMath, InlineMath } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { EscapedDollarNode } from "../../extensions/EscapedDollarNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
-import type { EditorPaneId, WysiwygFormatHistoryEntry } from "../../types";
+import type { CapturedEditorTarget, EditorPaneId, SlashCommandDefinition, WysiwygFormatHistoryEntry } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
@@ -98,6 +104,23 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
 });
 
 const lowlight = createLowlight(all);
+
+const slashMenu = ref({
+  visible: false,
+  query: "",
+  from: 0,
+  to: 0,
+  blockFrom: 0,
+  blockTo: 0,
+  x: 0,
+  y: 0,
+  highlightedIndex: 0,
+  flipY: false,
+});
+const slashCandidates = computed(() => filterSlashCommands([
+  ...builtinSlashCommands,
+  ...snippetSlashCommands(appStore.settings.snippets.items),
+], slashMenu.value.query));
 
 type ContextMenuMode = "default" | "code";
 type ImageInsertDetail = { files?: File[]; paths?: string[]; source?: "clipboard" | "drop"; position?: { x?: number; y?: number } };
@@ -2420,6 +2443,7 @@ const editor = useEditor({
       class: "prose prose-stone dark:prose-invert mx-auto min-h-full max-w-[var(--lm-editor-width)] px-8 pb-12 pt-6 focus:outline-none",
     },
     handleKeyDown(view, event) {
+      if (handleSlashMenuKeydown(view, event)) return true;
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") {
         event.preventDefault();
         const { from, to } = view.state.selection;
@@ -2476,6 +2500,7 @@ const editor = useEditor({
       return false;
     },
     handleTextInput(view, from, to, text) {
+      scheduleSlashMenuUpdate(view);
       return handleWysiwygMarkdownShortcutText(view, from, to, text);
     },
     handleDOMEvents: {
@@ -2633,6 +2658,7 @@ const editor = useEditor({
     captureWysiwygPosition(editor.view);
     captureWysiwygSelectionAnchor(editor.view);
     updateWysiwygWikiCompletion(editor.view);
+    updateSlashMenu(editor.view);
     if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
     scheduleWysiwygTypewriter(editor.view);
   },
@@ -2642,6 +2668,7 @@ const editor = useEditor({
     captureWysiwygPosition(editor.view);
     captureWysiwygSelectionAnchor(editor.view);
     updateWysiwygWikiCompletion(editor.view);
+    updateSlashMenu(editor.view);
     scheduleWysiwygTypewriter(editor.view);
   },
   onFocus({ editor }) {
@@ -2652,12 +2679,204 @@ const editor = useEditor({
   onBlur() {
     window.setTimeout(() => {
       closeWysiwygWikiCompletion();
+      if (!document.activeElement?.closest?.(".slash-command-menu")) closeSlashMenu();
       if (codeLanguageControl.value.open) return;
       codeLanguageControl.value.visible = false;
       if (!tableControl.value.resizeOpen && !tableControl.value.moreOpen) tableControl.value.visible = false;
     }, 120);
   },
 });
+
+function scheduleSlashMenuUpdate(view: EditorView) {
+  window.setTimeout(() => updateSlashMenu(view), 0);
+}
+
+function updateSlashMenu(view = editor.value?.view) {
+  if (!view || view.composing || props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") {
+    closeSlashMenu();
+    return;
+  }
+  const { selection } = view.state;
+  const { $from } = selection;
+  if (!selection.empty || $from.depth !== 1 || $from.parent.type.name !== "paragraph") {
+    closeSlashMenu();
+    return;
+  }
+  const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\0");
+  const match = before.match(/^\s*\/([^\s/]*)$/u);
+  if (!match || $from.parentOffset !== $from.parent.content.size) {
+    closeSlashMenu();
+    return;
+  }
+  const coords = view.coordsAtPos(selection.from);
+  const shell = editorShell.value;
+  const rect = shell?.getBoundingClientRect();
+  const x = rect && shell ? coords.left - rect.left + shell.scrollLeft : coords.left;
+  const below = rect && shell ? coords.bottom - rect.top + shell.scrollTop + 6 : coords.bottom + 6;
+  const menuHeight = 330;
+  const availableBelow = rect ? rect.bottom - coords.bottom : window.innerHeight - coords.bottom;
+  slashMenu.value = {
+    visible: true,
+    query: match[1],
+    from: selection.from - match[0].length,
+    to: selection.from,
+    blockFrom: $from.before(),
+    blockTo: $from.after(),
+    x: Math.max(8, Math.min(x, Math.max(8, (shell?.clientWidth ?? window.innerWidth) - 328))),
+    y: availableBelow < menuHeight && coords.top > menuHeight
+      ? (rect && shell ? coords.top - rect.top + shell.scrollTop - 6 : coords.top - 6)
+      : below,
+    highlightedIndex: Math.min(slashMenu.value.highlightedIndex, Math.max(0, slashCandidates.value.length - 1)),
+    flipY: availableBelow < menuHeight && coords.top > menuHeight,
+  };
+  closeWysiwygWikiCompletion();
+}
+
+function handleSlashMenuKeydown(view: EditorView, event: KeyboardEvent) {
+  if (!slashMenu.value.visible) {
+    if (["Backspace", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) scheduleSlashMenuUpdate(view);
+    return false;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const total = slashCandidates.value.length;
+    if (total > 0) slashMenu.value.highlightedIndex = (slashMenu.value.highlightedIndex + (event.key === "ArrowDown" ? 1 : -1) + total) % total;
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    const candidate = slashCandidates.value[slashMenu.value.highlightedIndex];
+    if (!candidate) return false;
+    event.preventDefault();
+    executeSlashCommand(candidate);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSlashMenu();
+    return true;
+  }
+  if (event.key === " " || event.key === "/") {
+    closeSlashMenu();
+    return false;
+  }
+  if (["Backspace", "Delete", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) scheduleSlashMenuUpdate(view);
+  return false;
+}
+
+function closeSlashMenu() {
+  slashMenu.value.visible = false;
+  slashMenu.value.query = "";
+  slashMenu.value.highlightedIndex = 0;
+}
+
+function executeSlashCommand(command: SlashCommandDefinition) {
+  const activeEditor = editor.value;
+  if (!activeEditor || !slashMenu.value.visible) return;
+  const { blockFrom, blockTo } = slashMenu.value;
+  closeSlashMenu();
+  if (command.kind === "snippet") {
+    const snippet = appStore.settings.snippets.items.find((item) => item.id === command.snippetId && item.enabled);
+    if (!snippet) return;
+    const expansion = expandSnippet(snippet.markdown, { selection: "" });
+    replaceWysiwygRangeWithMarkdown(blockFrom, blockTo, expansion.markdown, expansion.cursorOffset, undefined, true);
+    appStore.statusMessage = `已插入片段：${snippet.name}`;
+    return;
+  }
+  const template = slashBuiltinMarkdown(command);
+  if (!template) return;
+  const expansion = expandSnippet(template.markdown, { selection: "" });
+  replaceWysiwygRangeWithMarkdown(blockFrom, blockTo, expansion.markdown, expansion.cursorOffset, template.selectText, true);
+}
+
+function slashBuiltinMarkdown(command: SlashCommandDefinition): { markdown: string; selectText?: string } | null {
+  switch (command.action) {
+    case "paragraph": return { markdown: "${cursor}" };
+    case "heading": return { markdown: `${"#".repeat(Number(command.value) || 1)} \${cursor}` };
+    case "bulletList": return { markdown: "- ${cursor}" };
+    case "orderedList": return { markdown: "1. ${cursor}" };
+    case "taskList": return { markdown: "- [ ] ${cursor}" };
+    case "blockquote": return { markdown: "> ${cursor}" };
+    case "codeBlock": return { markdown: "```\n${cursor}\n```" };
+    case "mathBlock": return { markdown: "$$\n${cursor}\n$$" };
+    case "table": return { markdown: "| 标题 1 | 标题 2 |\n| --- | --- |\n| ${cursor} |  |" };
+    case "horizontalRule": return { markdown: "---\n\n${cursor}" };
+    case "image": return { markdown: "![图片描述](image-url)", selectText: "图片描述" };
+    case "toc": return { markdown: "[TOC]\n\n${cursor}" };
+    case "alert": return { markdown: `> [!${String(command.value || "note").toUpperCase()}]\n> \${cursor}` };
+    default: return null;
+  }
+}
+
+function captureWysiwygEditorTarget(event: CustomEvent<{ target: CapturedEditorTarget | null }>) {
+  const activeEditor = editor.value;
+  const tab = getPaneTab(props.paneId);
+  if (!activeEditor || !tab || props.paneId !== appStore.splitLayout.activePaneId || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
+  const { anchor, head } = activeEditor.state.selection;
+  event.detail.target = {
+    paneId: props.paneId,
+    tabId: tab.id,
+    documentMode: "normal",
+    editorMode: "wysiwyg",
+    anchor,
+    head,
+    selection: getSelectedMarkdown(),
+    capturedAt: Date.now(),
+  };
+}
+
+function insertSnippetIntoWysiwyg(event: CustomEvent<{ snippetId: string; target: CapturedEditorTarget }>) {
+  const target = event.detail?.target;
+  const activeEditor = editor.value;
+  const tab = getPaneTab(props.paneId);
+  const snippet = appStore.settings.snippets.items.find((item) => item.id === event.detail?.snippetId && item.enabled);
+  if (!activeEditor || !target || !snippet || target.paneId !== props.paneId || target.tabId !== tab?.id || target.editorMode !== "wysiwyg" || target.documentMode !== "normal") return;
+  const from = Math.max(0, Math.min(target.anchor, target.head, activeEditor.state.doc.content.size));
+  const to = Math.max(from, Math.min(Math.max(target.anchor, target.head), activeEditor.state.doc.content.size));
+  activeEditor.view.dispatch(activeEditor.state.tr.setSelection(TextSelection.create(activeEditor.state.doc, from, to)).setMeta("addToHistory", false));
+  if (getSelectedMarkdown() !== target.selection) {
+    appStore.statusMessage = "片段插入位置已经变化，请重试。";
+    return;
+  }
+  const expansion = expandSnippet(snippet.markdown, { selection: target.selection });
+  replaceWysiwygRangeWithMarkdown(from, to, expansion.markdown, expansion.cursorOffset);
+  appStore.statusMessage = `已插入片段：${snippet.name}`;
+}
+
+function replaceWysiwygRangeWithMarkdown(from: number, to: number, markdown: string, cursorOffset: number, selectText?: string, closedBlock = false) {
+  const activeEditor = editor.value;
+  if (!activeEditor) return;
+  const state = activeEditor.view.state;
+  const container = document.createElement("div");
+  container.innerHTML = renderMarkdownForEditorWithAssets(markdown || " ");
+  const parsed = ProseMirrorDOMParser.fromSchema(state.schema).parse(container);
+  const slice = closedBlock ? new Slice(parsed.content, 0, 0) : Slice.maxOpen(parsed.content);
+  let transaction = state.tr.replaceRange(from, to, slice);
+  const insertedFrom = transaction.mapping.map(from, -1);
+  const insertedTo = transaction.mapping.map(to, 1);
+  let selectionFrom = insertedTo;
+  let selectionTo = insertedTo;
+  if (selectText) {
+    transaction.doc.nodesBetween(Math.max(0, insertedFrom), Math.min(transaction.doc.content.size, insertedTo), (node, position) => {
+      if (selectionFrom !== insertedTo || !node.isText || !node.text) return;
+      const index = node.text.indexOf(selectText);
+      if (index >= 0) {
+        selectionFrom = position + index;
+        selectionTo = selectionFrom + selectText.length;
+      }
+    });
+  } else {
+    const local = markdownOffsetToDocPos({ doc: parsed }, Math.min(cursorOffset, markdown.length), markdown || " ");
+    selectionFrom = Math.max(insertedFrom, Math.min(insertedTo, insertedFrom + Math.max(0, local - 1)));
+    selectionTo = selectionFrom;
+  }
+  try {
+    transaction = transaction.setSelection(TextSelection.create(transaction.doc, selectionFrom, selectionTo));
+  } catch {
+    transaction = transaction.setSelection(TextSelection.near(transaction.doc.resolve(Math.min(insertedTo, transaction.doc.content.size))));
+  }
+  activeEditor.view.dispatch(transaction.scrollIntoView());
+  activeEditor.view.focus();
+}
 
 function updateWysiwygWikiCompletion(view = editor.value?.view) {
   if (!view || !appStore.currentWorkspace || paneEditorMode.value !== "wysiwyg") {
@@ -3371,6 +3590,8 @@ onMounted(() => {
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.addEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.addEventListener("lightmark:capture-editor-target", captureWysiwygEditorTarget as EventListener);
+  window.addEventListener("lightmark:insert-snippet", insertSnippetIntoWysiwyg as EventListener);
   window.addEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.addEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.addEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
@@ -3378,6 +3599,7 @@ onMounted(() => {
   window.addEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.addEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.addEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
+  window.addEventListener("lightmark:close-transient-editor-ui", closeSlashMenu);
   window.addEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.addEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
@@ -3390,6 +3612,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
+  window.removeEventListener("lightmark:capture-editor-target", captureWysiwygEditorTarget as EventListener);
+  window.removeEventListener("lightmark:insert-snippet", insertSnippetIntoWysiwyg as EventListener);
   window.removeEventListener("lightmark:editor-command", handleToolbarEditorCommand as EventListener);
   window.removeEventListener("lightmark:find-command", handleFindCommand as EventListener);
   window.removeEventListener("lightmark:jump-heading", handleJumpHeading as EventListener);
@@ -3397,6 +3621,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:jump-knowledge-occurrence", handleKnowledgeOccurrence as EventListener);
   window.removeEventListener("lightmark:apply-markdown-format", handleApplyMarkdownFormat as EventListener);
   window.removeEventListener("lightmark:close-transient-editor-ui", closeWysiwygWikiCompletion);
+  window.removeEventListener("lightmark:close-transient-editor-ui", closeSlashMenu);
   window.removeEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.removeEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
@@ -4678,6 +4903,7 @@ function editorHtmlToMarkdown(html: string) {
     const token = `@@LIGHTMARK_TURNDOWN_HTML_BLOCK_${index}@@`;
     markdown = markdown.split(token).join(source.replace(/^\n+|\n+$/g, ""));
   });
+  markdown = markdown.replace(/^(\s*(?:[-*+]|\d+[.)]))[ \t]*\u00a0(?=\[[ xX]\])/gm, "$1 ");
   return normalizeLeadingImageWhitespace(markdown);
 }
 
@@ -6062,6 +6288,41 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
     @keydown.capture="handleWysiwygScrollKey"
   >
     <EditorContent :editor="editor" />
+    <div
+      v-if="slashMenu.visible"
+      class="slash-command-menu absolute z-50 w-80 overflow-hidden rounded-lg border border-paper-200 bg-paper-50 shadow-[0_16px_42px_rgba(31,30,27,0.18)] dark:border-paper-800 dark:bg-paper-900"
+      :class="{ 'slash-command-menu-flip': slashMenu.flipY }"
+      :style="{ left: `${slashMenu.x}px`, top: `${slashMenu.y}px` }"
+      role="listbox"
+      aria-label="斜杠命令"
+      @mousedown.prevent
+    >
+      <div class="slash-command-header">
+        <span>{{ slashMenu.query ? `搜索“${slashMenu.query}”` : "插入内容" }}</span>
+        <kbd>Esc</kbd>
+      </div>
+      <div v-if="slashCandidates.length" class="slash-command-list">
+        <button
+          v-for="(command, index) in slashCandidates"
+          :key="command.id"
+          type="button"
+          class="slash-command-item"
+          :class="{ active: index === slashMenu.highlightedIndex }"
+          role="option"
+          :aria-selected="index === slashMenu.highlightedIndex"
+          @mouseenter="slashMenu.highlightedIndex = index"
+          @click="executeSlashCommand(command)"
+        >
+          <span class="slash-command-icon">{{ command.kind === "snippet" ? "S" : command.category.slice(0, 1) }}</span>
+          <span class="min-w-0 flex-1">
+            <b>{{ command.label }}</b>
+            <small>{{ command.description }}</small>
+          </span>
+          <span class="slash-command-category">{{ command.category }}</span>
+        </button>
+      </div>
+      <div v-else class="slash-command-empty">没有匹配的命令</div>
+    </div>
     <div
       v-if="wikiCompletion.visible && wysiwygWikiCandidates.length > 0"
       class="wiki-completion-menu absolute z-50 max-h-64 w-72 overflow-auto rounded-lg border border-paper-200 bg-paper-50 p-1.5 shadow-[0_14px_36px_rgba(31,30,27,0.16)] dark:border-paper-800 dark:bg-paper-900"

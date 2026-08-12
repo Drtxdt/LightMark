@@ -5,6 +5,7 @@ import { alertDialog, showDialog } from "./dialogStore";
 import type {
   AppConfig,
   AppSettings,
+  CapturedEditorTarget,
   ClosedTabRecord,
   DirtyState,
   DocumentTab,
@@ -36,6 +37,7 @@ import type {
 import { buildTextDiffSummary } from "../utils/textDiff";
 import { buildMarkdownFormatDiff, formatMarkdown, type MarkdownFormatResult } from "../utils/markdownFormat";
 import { mergeEditorPosition } from "../utils/editorPosition";
+import { normalizeSnippets } from "../utils/snippets";
 import {
   extractOutlineWithLines,
   reconcileCollapsedKeys,
@@ -107,6 +109,7 @@ export const appStore = reactive({
   settings: defaultSettings(),
   settingsOpen: false,
   commandPaletteOpen: false,
+  capturedEditorTarget: null as CapturedEditorTarget | null,
   wordCountOpen: false,
   distractionFreeMode: false,
   distractionHintVisible: false,
@@ -898,12 +901,27 @@ export function closeGoToLine() {
 }
 
 export function openCommandPalette() {
+  const capture: { target: CapturedEditorTarget | null } = { target: null };
+  window.dispatchEvent(new CustomEvent("lightmark:capture-editor-target", { detail: capture }));
+  appStore.capturedEditorTarget = capture.target;
   closeTransientPalettes("commandPalette");
   appStore.commandPaletteOpen = true;
 }
 
 export function closeCommandPalette() {
   appStore.commandPaletteOpen = false;
+}
+
+export function insertSnippetById(snippetId: string) {
+  const snippet = appStore.settings.snippets.items.find((item) => item.id === snippetId && item.enabled);
+  const target = appStore.capturedEditorTarget;
+  const tab = target ? getPaneTab(target.paneId) : null;
+  if (!snippet || !target || !tab || tab.id !== target.tabId || tab.documentMode !== target.documentMode) {
+    appStore.statusMessage = "插入位置已经变化，请重新打开命令面板。";
+    return false;
+  }
+  window.dispatchEvent(new CustomEvent("lightmark:insert-snippet", { detail: { snippetId, target } }));
+  return true;
 }
 
 export function openFormulaJump() {
@@ -1830,6 +1848,7 @@ export function defaultSettings(): AppSettings {
       debugMode: false,
       experimentalFeatures: false,
     },
+    snippets: { items: [] },
   };
 }
 
@@ -1912,6 +1931,7 @@ function normalizeSettings(config: AppConfig) {
     },
     shortcuts: { ...defaults.shortcuts, ...source.shortcuts },
     advanced: { ...defaults.advanced, ...source.advanced },
+    snippets: { items: normalizeSnippets(source.snippets?.items) },
   } satisfies AppSettings;
 }
 

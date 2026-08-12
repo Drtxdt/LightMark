@@ -4,12 +4,14 @@ import { appStore, defaultSettings, resetSettings, updateSettings } from "../../
 import { confirmDialog } from "../../stores/dialogStore";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { detectPandoc } from "../../utils/export";
-import type { AppSettings, PandocStatus } from "../../types";
+import { validateSnippet } from "../../utils/snippets";
+import type { AppSettings, PandocStatus, SnippetDefinition } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
 
 type SettingsSection =
   | "general"
   | "editor"
+  | "snippets"
   | "image"
   | "appearance"
   | "export"
@@ -22,6 +24,8 @@ const activeSection = ref<SettingsSection>("general");
 const localSettings = ref<AppSettings>(cloneSettings(appStore.settings));
 const saveState = ref("");
 const pandocStatus = ref<PandocStatus | null>(null);
+const snippetDraft = ref<SnippetDefinition | null>(null);
+const snippetError = ref("");
 const backdrop = ref<HTMLElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
 useOverlayFocus({ backdrop, panel, initialFocus: panel, close });
@@ -29,6 +33,7 @@ useOverlayFocus({ backdrop, panel, initialFocus: panel, close });
 const sections: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "general", label: "基础", description: "会话、最近文件和草稿保存" },
   { id: "editor", label: "编辑体验", description: "默认模式与状态栏信息" },
+  { id: "snippets", label: "片段", description: "管理 / 命令中的 Markdown 模板" },
   { id: "image", label: "图片与资源", description: "图片引用与路径格式" },
   { id: "appearance", label: "外观", description: "主题、字体和编辑区" },
   { id: "export", label: "导出", description: "HTML、Pandoc 与导出行为" },
@@ -143,6 +148,62 @@ async function resetAll() {
   if (!confirmed) return;
   localSettings.value = defaultSettings();
   await resetSettings();
+}
+
+function editSnippet(item?: SnippetDefinition) {
+  snippetError.value = "";
+  snippetDraft.value = item
+    ? { ...item }
+    : {
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `snippet-${Date.now()}`,
+        name: "",
+        trigger: "",
+        description: "",
+        markdown: "${selection}${cursor}",
+        enabled: true,
+      };
+}
+
+async function saveSnippet() {
+  if (!snippetDraft.value) return;
+  const candidate = {
+    ...snippetDraft.value,
+    name: snippetDraft.value.name.trim(),
+    trigger: snippetDraft.value.trigger.trim(),
+    description: snippetDraft.value.description.trim(),
+  };
+  snippetError.value = validateSnippet(candidate, localSettings.value.snippets.items);
+  if (snippetError.value) return;
+  const index = localSettings.value.snippets.items.findIndex((item) => item.id === candidate.id);
+  if (index >= 0) localSettings.value.snippets.items.splice(index, 1, candidate);
+  else localSettings.value.snippets.items.push(candidate);
+  snippetDraft.value = null;
+  await persist();
+}
+
+async function removeSnippet(item: SnippetDefinition) {
+  const confirmed = await confirmDialog({
+    title: "删除片段？",
+    message: `“${item.name}”将从 / 命令和命令面板中移除。`,
+    confirmLabel: "删除",
+    tone: "danger",
+  });
+  if (!confirmed) return;
+  localSettings.value.snippets.items = localSettings.value.snippets.items.filter((candidate) => candidate.id !== item.id);
+  if (snippetDraft.value?.id === item.id) snippetDraft.value = null;
+  await persist();
+}
+
+async function moveSnippet(index: number, delta: -1 | 1) {
+  const target = index + delta;
+  if (target < 0 || target >= localSettings.value.snippets.items.length) return;
+  const [item] = localSettings.value.snippets.items.splice(index, 1);
+  localSettings.value.snippets.items.splice(target, 0, item);
+  await persist();
+}
+
+async function toggleSnippet() {
+  await persist();
 }
 
 function close() {
@@ -266,6 +327,61 @@ function cloneSettings(settings: AppSettings): AppSettings {
                   <option value="all-display">所有块级公式</option>
                 </select>
               </label>
+            </div>
+          </div>
+
+          <div v-else-if="activeSection === 'snippets'" class="settings-stack" data-settings-snippets>
+            <div class="settings-group">
+              <div class="snippet-settings-heading flex items-start justify-between gap-4">
+                <div>
+                  <h4>全局 Markdown 片段</h4>
+                  <p class="mt-1 text-xs text-ink-500 dark:text-ink-300">WYSIWYG 可输入 / 调用；三种编辑模式均可从命令面板插入。</p>
+                </div>
+                <button class="btn-small" type="button" @click="editSnippet()">新增片段</button>
+              </div>
+              <div v-if="localSettings.snippets.items.length" class="snippet-settings-list">
+                <article v-for="(snippet, index) in localSettings.snippets.items" :key="snippet.id" class="snippet-settings-card">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <b class="truncate text-sm text-ink-900 dark:text-ink-100">{{ snippet.name }}</b>
+                      <code class="snippet-trigger">/{{ snippet.trigger }}</code>
+                    </div>
+                    <p class="mt-1 truncate text-xs text-ink-500 dark:text-ink-300">{{ snippet.description || "无描述" }}</p>
+                  </div>
+                  <label class="snippet-enable"><span>启用</span><input v-model="snippet.enabled" type="checkbox" @change="toggleSnippet" /></label>
+                  <div class="snippet-card-actions">
+                    <button type="button" title="上移" :disabled="index === 0" @click="moveSnippet(index, -1)">↑</button>
+                    <button type="button" title="下移" :disabled="index === localSettings.snippets.items.length - 1" @click="moveSnippet(index, 1)">↓</button>
+                    <button type="button" @click="editSnippet(snippet)">编辑</button>
+                    <button type="button" class="danger" @click="removeSnippet(snippet)">删除</button>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="settings-empty-state">还没有自定义片段。</div>
+            </div>
+
+            <div v-if="snippetDraft" class="settings-group snippet-editor" data-snippet-editor>
+              <div class="flex items-center justify-between gap-3">
+                <h4>{{ localSettings.snippets.items.some((item) => item.id === snippetDraft?.id) ? "编辑片段" : "新建片段" }}</h4>
+                <button class="settings-close" type="button" title="取消" aria-label="取消编辑片段" @click="snippetDraft = null">
+                  <UiIcon name="x" :size="16" />
+                </button>
+              </div>
+              <div class="snippet-fields-two">
+                <label><span>名称</span><input v-model="snippetDraft.name" class="settings-input" maxlength="80" placeholder="会议纪要" /></label>
+                <label><span>触发词</span><input v-model="snippetDraft.trigger" class="settings-input" maxlength="40" placeholder="meeting" /></label>
+              </div>
+              <label class="snippet-field"><span>描述</span><input v-model="snippetDraft.description" class="settings-input" maxlength="160" placeholder="插入会议标题、日期和待办结构" /></label>
+              <label class="snippet-field">
+                <span>Markdown 正文</span>
+                <textarea v-model="snippetDraft.markdown" class="snippet-markdown-input" rows="9" spellcheck="false" />
+              </label>
+              <p class="snippet-variable-help"><code>${cursor}</code> 最终光标 · <code>${selection}</code> 当前选区 · <code>${date}</code> 日期 · <code>${time}</code> 时间</p>
+              <p v-if="snippetError" class="snippet-error" role="alert">{{ snippetError }}</p>
+              <div class="flex justify-end gap-2">
+                <button class="btn-small" type="button" @click="snippetDraft = null">取消</button>
+                <button class="btn-primary" type="button" @click="saveSnippet">保存片段</button>
+              </div>
             </div>
           </div>
 
@@ -703,7 +819,34 @@ function cloneSettings(settings: AppSettings): AppSettings {
 .experimental-card li::before { position: absolute; left: 0; top: 0.55em; width: 4px; height: 4px; border-radius: 50%; background: var(--lm-ink-muted); content: ""; }
 .experimental-card p { margin: 11px 0 0; border-top: 1px solid var(--lm-border); padding-top: 10px; color: var(--lm-ink-muted); font-size: 12px; line-height: 1.55; }
 
+.snippet-settings-list { display: grid; gap: 8px; padding: 0 14px 14px; }
+.snippet-settings-heading { padding: 12px 14px; }
+.settings-group .snippet-settings-heading h4 { border: 0; padding: 0; }
+.snippet-settings-card { display: flex; align-items: center; gap: 12px; border: 1px solid var(--lm-border); border-radius: var(--lm-radius-sm); padding: 10px; background: var(--lm-surface); }
+.snippet-trigger { flex: none; border-radius: 5px; padding: 1px 6px; color: var(--lm-ink-muted); background: var(--lm-accent-soft); font-size: 11px; }
+.snippet-enable { display: inline-flex; align-items: center; gap: 5px; color: var(--lm-ink-muted); font-size: 11px; }
+.snippet-card-actions { display: flex; flex: none; gap: 4px; }
+.snippet-card-actions button { min-width: 28px; border-radius: 5px; padding: 4px 7px; color: var(--lm-ink-muted); font-size: 12px; }
+.snippet-card-actions button:hover:not(:disabled) { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.snippet-card-actions button:disabled { opacity: .35; }
+.snippet-card-actions .danger { color: #b64b47; }
+.settings-empty-state { margin: 0 14px 14px; border: 1px dashed var(--lm-border); border-radius: var(--lm-radius-sm); padding: 20px; text-align: center; color: var(--lm-ink-muted); font-size: 13px; }
+.snippet-editor { padding: 14px; overflow: visible; }
+.snippet-editor h4, .snippet-settings-list + h4 { border: 0; padding: 0; }
+.snippet-fields-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .7fr); gap: 12px; margin-top: 12px; }
+.snippet-fields-two label, .snippet-field { display: grid; gap: 6px; color: var(--lm-ink-muted); font-size: 12px; }
+.snippet-field { margin-top: 12px; }
+.snippet-fields-two .settings-input, .snippet-field .settings-input { width: 100%; }
+.snippet-markdown-input { width: 100%; resize: vertical; border: 1px solid var(--lm-border-strong); border-radius: var(--lm-radius-sm); background: var(--lm-surface); padding: 9px 10px; color: var(--lm-ink); font-family: var(--lm-editor-code-font-family); font-size: 12px; line-height: 1.55; outline: none; }
+.snippet-markdown-input:focus { border-color: var(--lm-accent); box-shadow: 0 0 0 3px var(--lm-focus); }
+.snippet-variable-help { margin: 10px 0; color: var(--lm-ink-muted); font-size: 11px; }
+.snippet-variable-help code { margin-right: 2px; color: var(--lm-ink); }
+.snippet-error { margin: 8px 0; color: #b64b47; font-size: 12px; }
+
 @media (max-width: 960px) {
   .experimental-card ul { grid-template-columns: 1fr; }
+  .snippet-settings-card { align-items: flex-start; flex-wrap: wrap; }
+  .snippet-card-actions { width: 100%; justify-content: flex-end; }
+  .snippet-fields-two { grid-template-columns: 1fr; }
 }
 </style>

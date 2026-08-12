@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { appStore, applyLargeFileEdits, readLargeFileChunk, updateLargeFileViewportLine } from "../../stores/appStore";
+import { appStore, applyLargeFileEdits, getPaneTab, readLargeFileChunk, updateLargeFileViewportLine } from "../../stores/appStore";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
-import type { DirtyState, EditorPaneId, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
+import type { CapturedEditorTarget, DirtyState, EditorPaneId, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
+import { expandSnippet } from "../../utils/snippets";
 import {
   clipboardPayloadFromDataTransfer,
   prepareSmartPaste,
@@ -48,6 +49,7 @@ const loadedEndLine = ref(0);
 let activeRequestId = 0;
 let queuedStartLine: number | null = null;
 let scrollFrame = 0;
+let largeEditQueue: Promise<void> = Promise.resolve();
 const renderCache = new Map<string, string>();
 const findCommandListener = (event: Event) => {
   void handleFindCommand(event as CustomEvent<string>);
@@ -82,11 +84,15 @@ watch(
 onMounted(() => {
   window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.addEventListener("lightmark:find-command", findCommandListener);
+  window.addEventListener("lightmark:capture-editor-target", captureLargeEditorTarget as EventListener);
+  window.addEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor as EventListener);
 });
 
 onUnmounted(() => {
   window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
   window.removeEventListener("lightmark:find-command", findCommandListener);
+  window.removeEventListener("lightmark:capture-editor-target", captureLargeEditorTarget as EventListener);
+  window.removeEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor as EventListener);
   if (scrollFrame) cancelAnimationFrame(scrollFrame);
 });
 
@@ -224,7 +230,68 @@ async function commitEditing(block: MarkdownBlock) {
   const edit = blockEdit(block, nextText);
   applyLocalEdit(edit);
   updateLargeOutline(edit, block.text);
-  await applyLargeFileEdits([edit]);
+  await queueLargeEdit(edit);
+}
+
+function queueLargeEdit(edit: TextEdit) {
+  largeEditQueue = largeEditQueue.then(() => applyLargeFileEdits([edit]));
+  return largeEditQueue;
+}
+
+function captureLargeEditorTarget(event: CustomEvent<{ target: CapturedEditorTarget | null }>) {
+  const tab = getPaneTab(props.paneId);
+  const textarea = document.querySelector<HTMLTextAreaElement>("[data-large-editor-input]");
+  const block = blocks.value.find((item) => item.key === editingKey.value);
+  if (!textarea || !block || !tab || props.paneId !== appStore.splitLayout.activePaneId || tab.documentMode !== "large" || !largeFile.value) return;
+  const from = Math.min(textarea.selectionStart, textarea.selectionEnd);
+  const to = Math.max(textarea.selectionStart, textarea.selectionEnd);
+  const start = largeOffsetPosition(editingText.value, block.startLine, from);
+  const end = largeOffsetPosition(editingText.value, block.startLine, to);
+  event.detail.target = {
+    paneId: props.paneId,
+    tabId: tab.id,
+    documentMode: "large",
+    editorMode: "wysiwyg",
+    anchor: from,
+    head: to,
+    selection: editingText.value.slice(from, to),
+    capturedAt: Date.now(),
+    large: {
+      sessionId: largeFile.value.sessionId,
+      startLine: start.line,
+      endLine: end.line,
+      startColumn: start.column,
+      endColumn: end.column,
+    },
+  };
+}
+
+function insertSnippetIntoLargeEditor(event: CustomEvent<{ snippetId: string; target: CapturedEditorTarget }>) {
+  const target = event.detail?.target;
+  const location = target?.large;
+  const tab = getPaneTab(props.paneId);
+  const snippet = appStore.settings.snippets.items.find((item) => item.id === event.detail?.snippetId && item.enabled);
+  if (!target || !location || !snippet || target.paneId !== props.paneId || target.tabId !== tab?.id || location.sessionId !== largeFile.value?.sessionId) return;
+  const expansion = expandSnippet(snippet.markdown, { selection: target.selection });
+  const edit: TextEdit = {
+    startLine: location.startLine,
+    startColumn: location.startColumn,
+    endLine: location.endLine,
+    endColumn: location.endColumn,
+    text: expansion.markdown,
+  };
+  applyLocalEdit(edit);
+  void queueLargeEdit(edit).then(() => {
+    appStore.statusMessage = `已插入片段：${snippet.name}`;
+  }).catch((error) => {
+    appStore.statusMessage = String(error);
+  });
+}
+
+function largeOffsetPosition(value: string, startLine: number, offset: number) {
+  const before = value.slice(0, Math.max(0, Math.min(offset, value.length)));
+  const lines = before.split(/\r?\n/);
+  return { line: startLine + lines.length - 1, column: lines[lines.length - 1]?.length ?? 0 };
 }
 
 async function toggleTask(line: number) {

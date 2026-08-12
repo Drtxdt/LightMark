@@ -5,6 +5,7 @@ import {
   closeCommandPalette,
   expandAllHeadingFolds,
   formatCurrentMarkdown,
+  insertSnippetById,
   openFile,
   openFileInOtherPane,
   openGoToLine,
@@ -64,7 +65,13 @@ const coreCommands = [
 ];
 
 const commands = computed(() => {
-  const all = [...coreCommands, ...pluginCommands];
+  const snippetCommands = appStore.settings.snippets.items
+    .filter((snippet) => snippet.enabled)
+    .map((snippet) => ({
+      name: `插入片段：${snippet.name}（/${snippet.trigger}）`,
+      handler: () => insertSnippetById(snippet.id),
+    }));
+  const all = [...coreCommands, ...snippetCommands, ...pluginCommands];
   const text = query.value.trim().toLowerCase();
   return text ? all.filter((command) => command.name.toLowerCase().includes(text)) : all;
 });
