@@ -40,7 +40,16 @@ import { publishDocumentDerivedState, registerDocumentSession } from "../../edit
 import { WysiwygSnapshotCache } from "../../editor/wysiwygSnapshot";
 import { createWysiwygDerivedPlugin, getWysiwygDerivedState } from "../../editor/wysiwygDerived";
 import { createWysiwygFocusPlugin } from "../../editor/wysiwygFocus";
-import { exposeHeadingMarkdown } from "../../editor/wysiwygMarkdownEditing";
+import {
+  clearExposeMarkdownMeta,
+  exposeHeadingMarkdown,
+  exposeMarkdownAtCursor,
+  exposeInlineMarkdown,
+  exposeMarkdownMeta,
+  headingPositionAt,
+  markdownMarkRangeAt,
+  type ExposedMarkdownRange,
+} from "../../editor/wysiwygMarkdownEditing";
 import {
   formatMarkdownTable as formatMarkdownTableFromDom,
   markdownTableDividerForAlign,
@@ -1270,6 +1279,25 @@ const FootnotesNode = Node.create({
   },
 });
 
+const exposedMarkdownLifecycleKey = new PluginKey<boolean>("lightmarkExposedMarkdownLifecycle");
+
+const ExposedMarkdownLifecycle = Extension.create({
+  name: "exposedMarkdownLifecycle",
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      key: exposedMarkdownLifecycleKey,
+      state: {
+        init: () => false,
+        apply: (transaction, active) => {
+          if (transaction.getMeta(clearExposeMarkdownMeta)) return false;
+          if (transaction.getMeta(exposeMarkdownMeta)) return true;
+          return active;
+        },
+      },
+    })];
+  },
+});
+
 const TyporaSourceMarkers = Extension.create({
   name: "typoraSourceMarkers",
 
@@ -1324,6 +1352,8 @@ const TyporaSourceMarkers = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          if (transactions.some((transaction) => transaction.getMeta(exposeMarkdownMeta))) return null;
+          if (exposedMarkdownLifecycleKey.getState(newState)) return null;
           return convertInlineMarkdownSyntax(newState, { onlySelectionBlock: true });
         },
       }),
@@ -1364,6 +1394,8 @@ const TyporaInlineCode = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          if (transactions.some((transaction) => transaction.getMeta(exposeMarkdownMeta))) return null;
+          if (exposedMarkdownLifecycleKey.getState(newState)) return null;
           return convertInlineCodeSyntax(newState, { onlySelectionBlock: true });
         },
       }),
@@ -2431,6 +2463,7 @@ const editor = useEditor({
     FencedCodeBlockInput,
     FindReplaceDecorations,
     WritingFocusDecorations,
+    ExposedMarkdownLifecycle,
     TyporaSourceMarkers,
   ],
   content: renderMarkdownForEditorWithAssets(paneContent.value),
@@ -2461,10 +2494,7 @@ const editor = useEditor({
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
         return true;
       }
-      if (event.key === "ArrowRight" && moveOutOfMarkAtRightBoundary(view, typoraInlineMarkNames)) {
-        event.preventDefault();
-        return true;
-      }
+      scheduleMarkdownExposureAfterCursorMove(view, event);
       if (event.key === "Enter") {
         if ((event.ctrlKey || event.metaKey) && insertTableRowAfterAndFocusFirstCell(view)) {
           event.preventDefault();
@@ -2512,7 +2542,22 @@ const editor = useEditor({
         return true;
       },
       mousedown(view, event) {
-        return convertPendingMarkdownBeforeMouseSelection(view, event as MouseEvent);
+        const mouseEvent = event as MouseEvent;
+        const marker = getEventElement(mouseEvent)?.closest<HTMLElement>(".md-live-marker");
+        if (marker) {
+          const heading = marker.closest<HTMLElement>("h1,h2,h3,h4,h5,h6");
+          if (heading) {
+            mouseEvent.preventDefault();
+            editHeadingAsMarkdown(view, heading, mouseEvent);
+            return true;
+          }
+          const clickPos = view.posAtCoords({ left: mouseEvent.clientX, top: mouseEvent.clientY });
+          if (clickPos && editInlineSyntaxAsMarkdown(view, marker, clickPos.pos)) {
+            mouseEvent.preventDefault();
+            return true;
+          }
+        }
+        return convertPendingMarkdownBeforeMouseSelection(view, mouseEvent);
       },
       contextmenu(view, event) {
         const mouseEvent = event as MouseEvent;
@@ -2599,7 +2644,7 @@ const editor = useEditor({
         return false;
       },
     },
-    handleClick(view, _pos, event) {
+    handleClick(view, pos, event) {
       const target = getEventElement(event);
       const table = target?.closest<HTMLTableElement>("table");
       if (table && view.dom.contains(table)) {
@@ -2611,6 +2656,11 @@ const editor = useEditor({
       if (heading && view.dom.contains(heading)) {
         event.preventDefault();
         editHeadingAsMarkdown(view, heading, event as MouseEvent);
+        return true;
+      }
+
+      if (target && view.dom.contains(target) && editInlineSyntaxAsMarkdown(view, target, pos)) {
+        event.preventDefault();
         return true;
       }
 
@@ -2641,6 +2691,7 @@ const editor = useEditor({
     },
   },
   onUpdate({ editor, transaction }) {
+    updateExposedMarkdownRange(editor.view, transaction);
     if (suppressWysiwygUpdate || transaction.getMeta("lightmarkLowlightRefresh")) return;
     getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
     wysiwygRevision += 1;
@@ -2667,6 +2718,7 @@ const editor = useEditor({
     scheduleWysiwygTypewriter(editor.view);
   },
   onSelectionUpdate({ editor }) {
+    if (restoreExposedMarkdownWhenOutside(editor.view)) return;
     updateCodeLanguageControl(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
@@ -2680,7 +2732,8 @@ const editor = useEditor({
     updateTableControl(editor.view);
     scheduleWysiwygTypewriter(editor.view);
   },
-  onBlur() {
+  onBlur({ editor }) {
+    restoreExposedMarkdownWhenOutside(editor.view, true);
     window.setTimeout(() => {
       closeWysiwygWikiCompletion();
       if (!document.activeElement?.closest?.(".slash-command-menu")) closeSlashMenu();
@@ -5638,31 +5691,61 @@ function getActiveMarkRange(state: any, markName: string) {
   return { from, to, mark: activeMark };
 }
 
-function moveOutOfMarkAtRightBoundary(view: any, markNames: string[]) {
-  const { state } = view;
-  if (!state.selection.empty) return false;
-  const { $from } = state.selection;
-  if (!$from.parent.isTextblock) return false;
+let markdownCursorExposureToken = 0;
+const exposedMarkdownRanges = new WeakMap<object, ExposedMarkdownRange>();
 
-  for (const markName of markNames) {
-    const markType = state.schema.marks[markName];
-    if (!markType) continue;
-
-    const cursorOffset = $from.parentOffset;
-    let boundary = false;
-    $from.parent.forEach((node: any, offset: number) => {
-      if (boundary || cursorOffset !== offset + node.nodeSize) return;
-      boundary = node.marks.some((mark: any) => mark.type === markType);
-    });
-    if (!boundary) continue;
-
-    let tr = state.tr.setSelection(TextSelection.create(state.doc, state.selection.from));
-    tr = tr.removeStoredMark(markType).setStoredMarks([]);
-    view.dispatch(tr.scrollIntoView());
-    return true;
+function updateExposedMarkdownRange(view: any, transaction: any) {
+  const exposed = transaction.getMeta(exposeMarkdownMeta) as ExposedMarkdownRange | undefined;
+  if (exposed) {
+    exposedMarkdownRanges.set(view, exposed);
+    return;
   }
+  const current = exposedMarkdownRanges.get(view);
+  if (!current || !transaction.docChanged) return;
+  exposedMarkdownRanges.set(view, {
+    ...current,
+    from: transaction.mapping.map(current.from, -1),
+    to: transaction.mapping.map(current.to, 1),
+    blockFrom: transaction.mapping.map(current.blockFrom, -1),
+  });
+}
 
-  return false;
+function restoreExposedMarkdownWhenOutside(view: any, force = false) {
+  const exposed = exposedMarkdownRanges.get(view);
+  if (!exposed) return false;
+  const { from, to } = view.state.selection;
+  if (!force && from === to && from > exposed.from && from < exposed.to) return false;
+
+  exposedMarkdownRanges.delete(view);
+  const options = { targetBlockFrom: exposed.blockFrom };
+  const tr = exposed.kind === "heading"
+    ? convertMarkdownHeading(view.state, { force: true, ...options })
+    : convertInlineCodeSyntax(view.state, options) || convertInlineMarkdownSyntax(view.state, options);
+  if (!tr) {
+    view.dispatch(view.state.tr.setMeta(clearExposeMarkdownMeta, true));
+    return false;
+  }
+  view.dispatch(tr.setMeta(clearExposeMarkdownMeta, true).scrollIntoView());
+  return true;
+}
+
+function scheduleMarkdownExposureAfterCursorMove(view: any, event: KeyboardEvent) {
+  const directions = {
+    ArrowLeft: "left",
+    ArrowRight: "right",
+    ArrowUp: "up",
+    ArrowDown: "down",
+  } as const;
+  const direction = directions[event.key as keyof typeof directions];
+  if (!direction || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (!view.state.selection.empty) return;
+
+  const token = ++markdownCursorExposureToken;
+  window.setTimeout(() => {
+    if (token !== markdownCursorExposureToken || view.isDestroyed || !view.state.selection.empty) return;
+    const tr = exposeMarkdownAtCursor(view.state, direction);
+    if (tr) view.dispatch(tr.scrollIntoView());
+  }, 0);
 }
 
 function exitEmptyStoredFormattingOnBackspace(view: any) {
@@ -5702,14 +5785,18 @@ function createMarkerSpec(side: -1 | 1, key: string) {
 function createSourceMarker(text: string) {
   const marker = document.createElement("span");
   marker.className = "md-live-marker";
+  marker.dataset.markdownMarker = text;
   marker.textContent = text;
   marker.contentEditable = "false";
   marker.draggable = false;
   return marker;
 }
 
-function convertInlineMarkdownSyntax(state: any, options: { onlySelectionBlock?: boolean } = {}) {
-  const { onlySelectionBlock = false } = options;
+function convertInlineMarkdownSyntax(
+  state: any,
+  options: { onlySelectionBlock?: boolean; targetBlockFrom?: number } = {},
+) {
+  const { onlySelectionBlock = false, targetBlockFrom } = options;
   const linkMark = state.schema.marks.link;
   const converters = [
     {
@@ -5766,6 +5853,7 @@ function convertInlineMarkdownSyntax(state: any, options: { onlySelectionBlock?:
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
     if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const text = node.textContent;
@@ -5813,8 +5901,11 @@ function convertPendingInlineMarkdown(view: any) {
   return converted;
 }
 
-function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boolean } = {}) {
-  const { onlySelectionBlock = false } = options;
+function convertInlineCodeSyntax(
+  state: any,
+  options: { onlySelectionBlock?: boolean; targetBlockFrom?: number } = {},
+) {
+  const { onlySelectionBlock = false, targetBlockFrom } = options;
   const codeMark = state.schema.marks.code;
   if (!codeMark) return null;
 
@@ -5830,6 +5921,7 @@ function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boo
     if (converted) return false;
     if (!node.isTextblock) return true;
     if (node.type.name === "codeBlock") return false;
+    if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
     if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const text = node.textContent;
@@ -6166,9 +6258,9 @@ function findParentBlockquote($pos: any) {
 
 function convertMarkdownHeading(
   state: any,
-  options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean } = {},
+  options: { force?: boolean; onlySelectionBlock?: boolean; insertParagraph?: boolean; targetBlockFrom?: number } = {},
 ) {
-  const { force = false, onlySelectionBlock = false, insertParagraph = false } = options;
+  const { force = false, onlySelectionBlock = false, insertParagraph = false, targetBlockFrom } = options;
   const heading = state.schema.nodes.heading;
   if (!heading) return null;
 
@@ -6180,6 +6272,7 @@ function convertMarkdownHeading(
   state.doc.descendants((node: any, pos: number) => {
     if (converted) return false;
     if (!node.isTextblock || node.type.name === "codeBlock") return true;
+    if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
     if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
     const match = node.textContent.match(/^(#{1,6})\s+(.+)$/);
@@ -6205,15 +6298,60 @@ function convertMarkdownHeading(
   return converted ? tr : null;
 }
 
-function editHeadingAsMarkdown(view: any, element: HTMLElement, event?: MouseEvent) {
-  const pos = view.posAtDOM(element, 0);
-  const clicked = event
-    ? view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos
-    : undefined;
-  const tr = exposeHeadingMarkdown(view.state, pos, clicked);
+function editHeadingAsMarkdown(view: any, element: HTMLElement, _event?: MouseEvent) {
+  const insidePos = view.posAtDOM(element, 0);
+  const pos = headingPositionAt(view.state, insidePos);
+  if (pos == null) return;
+  const tr = exposeHeadingMarkdown(view.state, pos, pos + 1);
   if (!tr) return;
   view.dispatch(tr.scrollIntoView());
   view.focus();
+}
+
+function editInlineSyntaxAsMarkdown(view: any, target: HTMLElement, pos: number) {
+  const definitions: Record<string, { open: string; close: (mark: any) => string }> = {
+    bold: { open: "**", close: () => "**" },
+    italic: { open: "*", close: () => "*" },
+    code: { open: "`", close: () => "`" },
+    strike: { open: "~~", close: () => "~~" },
+    highlight: { open: "==", close: () => "==" },
+    superscript: { open: "^", close: () => "^" },
+    subscript: { open: "~", close: () => "~" },
+    link: { open: "[", close: (mark) => `](${mark.attrs.href || ""})` },
+  };
+  const tagDefinitions: Array<[string, string]> = [
+    ["a[href]", "link"],
+    ["strong,b", "bold"],
+    ["em,i", "italic"],
+    ["s,del", "strike"],
+    ["code", "code"],
+    ["mark", "highlight"],
+    ["sup", "superscript"],
+    ["sub", "subscript"],
+  ];
+  const markerText = target.closest<HTMLElement>(".md-live-marker")?.dataset.markdownMarker || "";
+  const tagMark = tagDefinitions.find(([selector]) => target.closest(selector))?.[1];
+  for (const [markName, definition] of Object.entries(definitions)) {
+    if (tagMark && tagMark !== markName) continue;
+    const range = markdownMarkRangeAt(view.state, pos, markName) || getActiveMarkRange(view.state, markName);
+    if (!range) continue;
+    const close = definition.close(range.mark);
+    if (markerText && markerText !== definition.open && markerText !== close) continue;
+    const tr = exposeInlineMarkdown(
+      view.state,
+      range.from,
+      range.to,
+      range.mark.type,
+      definition.open,
+      close,
+      markerText === close ? "close" : "open",
+    );
+    if (!tr) return false;
+    view.dispatch(tr.scrollIntoView());
+    view.focus();
+    return true;
+  }
+  return false;
 }
 
 function convertHorizontalRuleMarkdown(

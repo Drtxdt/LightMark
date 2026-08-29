@@ -967,7 +967,8 @@ sub {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.92em;
   font-weight: 400;
-  pointer-events: none;
+  cursor: text;
+  pointer-events: auto;
   user-select: none;
   white-space: pre;
 }
