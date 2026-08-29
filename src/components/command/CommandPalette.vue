@@ -23,7 +23,7 @@ import {
 } from "../../stores/appStore";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { pluginCommands } from "../../plugins/registry";
-import { exportTargets, runDocumentExport } from "../../utils/export";
+import { exportTargets } from "../../utils/exportTargets";
 
 const query = ref("");
 const backdrop = ref<HTMLElement | null>(null);
@@ -58,6 +58,7 @@ const coreCommands = [
   ...exportTargets.map((target) => ({
     name: `导出：${target.label}`,
     handler: async () => {
+      const { runDocumentExport } = await import("../../utils/export");
       await runDocumentExport(target);
     },
   })),

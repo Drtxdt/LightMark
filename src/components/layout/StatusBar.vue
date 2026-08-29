@@ -6,11 +6,25 @@ import { getWordStats } from "../../plugins/wordCountPlugin";
 import { extractOutlineWithLines, resolveHeadingBreadcrumb, type BreadcrumbItem } from "../../utils/outline";
 import UiIcon from "../ui/UiIcon.vue";
 
-const stats = computed(() => (appStore.documentMode === "large" ? null : getWordStats(appStore.currentContent)));
+const stats = computed(() => {
+  if (appStore.documentMode === "large") return null;
+  const runtime = appStore.runtimeDerivedByTab[appStore.activeTabId];
+  if (runtime?.words != null && runtime.chars != null && runtime.lines != null) {
+    return { words: runtime.words, chars: runtime.chars, lines: runtime.lines };
+  }
+  const fallback = getWordStats(appStore.currentContent);
+  return {
+    words: runtime?.words ?? fallback.words,
+    chars: runtime?.chars ?? fallback.chars,
+    lines: runtime?.lines ?? fallback.lines,
+  };
+});
 const activePaneId = computed(() => appStore.splitLayout.activePaneId);
 const activeTab = computed(() => getPaneTab(activePaneId.value));
 const outline = computed(() => {
   if (activeTab.value?.documentMode === "large") return activeTab.value.largeFile?.outline ?? [];
+  const runtime = activeTab.value ? appStore.runtimeDerivedByTab[activeTab.value.id]?.outline : undefined;
+  if (runtime) return runtime;
   return extractOutlineWithLines(activeTab.value?.content ?? appStore.currentContent);
 });
 const contextLine = computed(() => {

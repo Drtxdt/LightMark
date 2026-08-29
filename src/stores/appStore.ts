@@ -1,5 +1,18 @@
-import { computed, reactive } from "vue";
+import { computed, nextTick, reactive } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  clearDocumentRuntimeState,
+  documentSessionForTab,
+  publishDocumentDerivedPatch,
+  rebindDocumentSession,
+  snapshotDocumentTab,
+  waitForDocumentSession,
+  type MarkdownSnapshot,
+  type SnapshotReason,
+} from "../editor/documentRuntime";
+import { DocumentSnapshotCoordinator } from "../editor/documentSnapshotCoordinator";
+import { installRuntimeProjection, type RuntimeDerivedProjection } from "./runtimeProjection";
+import { workspaceIndexClient, type WorkspaceIndexStatus } from "./workspaceIndexClient";
 import { checkDraftForOpenedFile, clearActiveDraft, flushCurrentDraft } from "./draftStore";
 import { alertDialog, showDialog } from "./dialogStore";
 import type {
@@ -56,18 +69,13 @@ import {
   splitLayoutForPaneActivation,
 } from "../utils/splitLayout";
 import {
-  backlinksFromIndex,
   createWikiWorkspaceIndex,
-  flattenMarkdownFiles,
-  knowledgeTags,
   prepareUnlinkedMentionConversion,
-  removeWikiIndexEntry,
   resolveWikiLink,
   scoreKnowledgeQuickOpenEntry,
-  unlinkedMentionsForPath,
-  updateWikiIndexEntry,
   wikiPageFileName,
   type BacklinkItem,
+  type KnowledgeTagItem,
   type UnlinkedMentionItem,
   type WikiDocumentEntry,
   type WikiLinkTarget,
@@ -121,6 +129,10 @@ export const appStore = reactive({
   wikiIndex: createWikiWorkspaceIndex([]) as WikiWorkspaceIndex,
   wikiIndexBusy: false,
   wikiIndexError: "",
+  workspaceIndexReady: false,
+  workspaceIndexGeneration: 0,
+  workspaceIndexTags: [] as KnowledgeTagItem[],
+  runtimeDerivedByTab: {} as RuntimeDerivedProjection,
   wikiUnlinkedMentions: [] as UnlinkedMentionItem[],
   wikiMentionsForPath: "",
   pendingModeCursor: null as PendingModeCursor | null,
@@ -139,14 +151,18 @@ let externalFileWatcherRunning = false;
 let externalFileWatcherAvailable = true;
 let backlinkRefreshTimer = 0;
 let backlinkRefreshGeneration = 0;
-let wikiIndexRefreshTimer = 0;
-let wikiIndexGeneration = 0;
 let wikiIndexHydrationPromise: Promise<void> | null = null;
 let workspaceKnowledgeRefreshTimer = 0;
 let distractionHintTimer = 0;
-const pendingWikiIndexUpdates = new Map<string, { path: string; content: string }>();
+const documentSnapshotCoordinator = new DocumentSnapshotCoordinator();
+const documentRuntimeMetadata = new Map<string, {
+  revision: number;
+  derived: { words?: number; chars?: number; lines?: number };
+}>();
 const workspaceKnowledgePendingPaths = new Set<string>();
 const watchedFilePaths = new Map<string, string>();
+
+installRuntimeProjection(appStore.runtimeDerivedByTab);
 
 export const currentFileName = computed(() => {
   const tab = getActiveTab();
@@ -167,7 +183,9 @@ export const quickOpenCandidates = computed(() => {
   return recentMatches.length > 0 || query ? recentMatches : recentFiles;
 });
 
-export const workspaceKnowledgeTags = computed(() => knowledgeTags(appStore.wikiIndex));
+export const workspaceKnowledgeTags = computed(() => (
+  appStore.workspaceIndexReady ? appStore.workspaceIndexTags : []
+));
 
 export function setContent(content: string, dirty = true) {
   setPaneContent(appStore.splitLayout.activePaneId, content, dirty);
@@ -184,6 +202,7 @@ export async function formatCurrentMarkdown() {
     appStore.statusMessage = "大文件模式暂不支持 Markdown 格式化。";
     return false;
   }
+  await flushDocumentSnapshot(tab.id, "externalDiff");
   const source = getPaneContent(paneId);
   const result = formatMarkdown(source);
   if (!result.changed) {
@@ -217,13 +236,14 @@ export async function formatCurrentMarkdown() {
   return true;
 }
 
-export function setPaneContent(paneId: EditorPaneId, content: string, dirty = true) {
+export function setPaneContent(paneId: EditorPaneId, content: string, dirty = true, replaceRuntime = true) {
   const tab = getPaneTab(paneId);
   if (tab?.documentMode === "large") return;
   if (!tab && paneId === appStore.splitLayout.activePaneId) ensureEditableTab();
   const target = getPaneTab(paneId);
   if (!target || target.documentMode === "large") return;
   target.content = content;
+  delete appStore.runtimeDerivedByTab[target.id];
   target.isDirty = dirty;
   target.documentMode = "normal";
   if (paneId === appStore.splitLayout.activePaneId || target.id === appStore.activeTabId) {
@@ -233,6 +253,76 @@ export function setPaneContent(paneId: EditorPaneId, content: string, dirty = tr
   }
   scheduleKnowledgeRefresh();
   scheduleWikiIndexEntryRefresh(target.path, content);
+  const session = replaceRuntime ? documentSessionForTab(target.id) : null;
+  if (session) {
+    void session.replaceMarkdown(content).catch((error) => {
+      appStore.statusMessage = `编辑器内容替换失败：${error}`;
+    });
+  }
+}
+
+export function markDocumentChanged(
+  tabId: string,
+  revision: number,
+  derived: { words?: number; chars?: number; lines?: number; outline?: StructuredOutlineItem[] } = {},
+) {
+  const tab = appStore.tabs.find((item) => item.id === tabId);
+  if (!tab || tab.documentMode === "large") return;
+  tab.isDirty = true;
+  if (tab.id === appStore.activeTabId) appStore.isDirty = true;
+  documentRuntimeMetadata.set(tabId, { revision, derived });
+  publishDocumentDerivedPatch(tabId, { revision, ...derived });
+  scheduleDocumentSnapshot(tabId);
+}
+
+function scheduleDocumentSnapshot(tabId: string) {
+  const tab = appStore.tabs.find((item) => item.id === tabId);
+  if (!tab?.path || !appStore.currentWorkspace || !appStore.workspaceIndexReady) return;
+  documentSnapshotCoordinator.schedule(
+    tabId,
+    async (signal) => { await flushDocumentSnapshot(tabId, "indexIdle", signal); },
+    (error) => { appStore.statusMessage = `后台文档快照失败：${error}`; },
+  );
+}
+
+export async function flushDocumentSnapshot(tabId: string, reason: SnapshotReason, signal?: AbortSignal) {
+  documentSnapshotCoordinator.prepare(tabId, reason);
+  const snapshot = await snapshotDocumentTab(tabId, reason, { signal });
+  if (!snapshot) {
+    if (documentRuntimeMetadata.has(tabId)) throw new Error("活动编辑器会话不可用，已阻止使用旧正文。");
+    return appStore.tabs.find((item) => item.id === tabId)?.content ?? "";
+  }
+  return commitDocumentSnapshot(snapshot);
+}
+
+function commitDocumentSnapshot(snapshot: MarkdownSnapshot) {
+  const tabId = snapshot.tabId;
+  const tab = appStore.tabs.find((item) => item.id === tabId);
+  if (!tab) throw new Error("快照对应的标签页已不存在。");
+  tab.content = snapshot.markdown;
+  tab.isDirty = snapshot.dirty;
+  if (tab.id === appStore.activeTabId) {
+    appStore.currentContent = snapshot.markdown;
+    appStore.isDirty = snapshot.dirty;
+  }
+  scheduleWikiIndexEntryRefresh(tab.path, snapshot.markdown);
+  scheduleKnowledgeRefresh();
+  const runtime = documentRuntimeMetadata.get(tabId);
+  if (tab.path && appStore.workspaceIndexReady) {
+    void workspaceIndexClient.updateOpenDocument(
+      tab.path,
+      runtime?.revision ?? snapshot.revision,
+      snapshot.markdown,
+    ).then((status) => applyRustWorkspaceIndexStatus(status)).catch((error) => {
+      appStore.wikiIndexError = `Rust 工作区索引更新失败：${error}`;
+    });
+  }
+  return snapshot.markdown;
+}
+
+export async function flushPaneDocumentSnapshot(paneId: EditorPaneId, reason: SnapshotReason) {
+  const tab = getPaneTab(paneId);
+  return tab ? flushDocumentSnapshot(tab.id, reason) : "";
 }
 
 export function getPaneTab(paneId: EditorPaneId) {
@@ -284,6 +374,8 @@ export function getPaneStructuredOutline(paneId: EditorPaneId): StructuredOutlin
   if (tab.documentMode === "large") {
     return structureOutline(tab.largeFile?.outline ?? [], tab.largeFile?.totalLines ?? 1);
   }
+  const runtimeOutline = appStore.runtimeDerivedByTab[tab.id]?.outline;
+  if (runtimeOutline) return runtimeOutline;
   const content = tab.content;
   return structureOutline(extractOutlineWithLines(content), content.split(/\r?\n/).length);
 }
@@ -482,6 +574,8 @@ export async function refreshFileTree() {
     appStore.fileTree = [];
     appStore.wikiIndex = createWikiWorkspaceIndex([]);
     appStore.wikiIndexError = "";
+    appStore.workspaceIndexReady = false;
+    appStore.workspaceIndexTags = [];
     return;
   }
   appStore.fileTree = await invoke<FileNode[]>("list_markdown_files", {
@@ -489,54 +583,55 @@ export async function refreshFileTree() {
   });
   appStore.wikiIndex = createWikiWorkspaceIndex(appStore.fileTree, appStore.currentWorkspace);
   appStore.wikiIndexError = "";
-  const hydration = hydrateWikiWorkspaceIndex();
+  const hydration = hydrateRustWorkspaceIndex().catch((error) => {
+    appStore.workspaceIndexReady = false;
+    appStore.wikiIndexBusy = false;
+    appStore.wikiIndexError = `Rust 工作区索引不可用：${error}`;
+  });
   wikiIndexHydrationPromise = hydration;
   void hydration.finally(() => {
     if (wikiIndexHydrationPromise === hydration) wikiIndexHydrationPromise = null;
   });
 }
 
-async function hydrateWikiWorkspaceIndex() {
-  const generation = ++wikiIndexGeneration;
-  const index = appStore.wikiIndex;
+async function hydrateRustWorkspaceIndex() {
   appStore.wikiIndexBusy = true;
-  appStore.wikiIndexError = "";
-  try {
-    const entries = [...index.entries];
-    for (let offset = 0; offset < entries.length; offset += 12) {
-      if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex) return;
-      const batch = entries.slice(offset, offset + 12);
-      const contents = await Promise.all(batch.map(async (entry) => [entry.path, await contentForWikiIndex(entry.path)] as const));
-      for (const [path, content] of contents) updateWikiIndexEntry(index, path, content);
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    }
-    scheduleKnowledgeRefresh();
-  } catch (error) {
-    if (generation === wikiIndexGeneration) appStore.wikiIndexError = String(error);
-  } finally {
-    if (generation === wikiIndexGeneration) appStore.wikiIndexBusy = false;
+  const workspace = appStore.currentWorkspace;
+  let status = await workspaceIndexClient.open(workspace);
+  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+  const delays = [100, 250, 500];
+  let poll = 0;
+  while (status.busy && isSamePath(workspace, appStore.currentWorkspace)) {
+    await new Promise((resolve) => window.setTimeout(resolve, delays[Math.min(poll, delays.length - 1)]));
+    status = await workspaceIndexClient.status();
+    poll += 1;
   }
+  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+  if (status.error) throw new Error(status.error);
+  await applyRustWorkspaceIndexStatus(status);
 }
 
-async function contentForWikiIndex(path: string) {
-  const tab = appStore.tabs.find((item) => item.path && isSamePath(item.path, path));
-  if (tab?.kind === "normal") return tab.content;
-  return await invoke<string>("read_text_file", { path }).catch(() => "");
+async function applyRustWorkspaceIndexStatus(status: WorkspaceIndexStatus) {
+  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+  const byPath = new Map(appStore.wikiIndex.entries.map((entry) => [normalizePathKey(entry.path), entry]));
+  for (const candidate of status.candidates) {
+    const entry = byPath.get(normalizePathKey(candidate.path));
+    if (!entry) continue;
+    entry.aliases = candidate.aliases;
+    entry.normalizedAliases = candidate.aliases.map((alias) => alias.trim().toLocaleLowerCase());
+    entry.indexed = true;
+  }
+  const tags = await workspaceIndexClient.tags();
+  if (tags.generation !== status.generation) return;
+  appStore.workspaceIndexTags = tags.data;
+  appStore.workspaceIndexGeneration = status.generation;
+  appStore.workspaceIndexReady = true;
+  appStore.wikiIndexBusy = false;
 }
 
-function scheduleWikiIndexEntryRefresh(path: string, content: string) {
+function scheduleWikiIndexEntryRefresh(path: string, _content: string) {
   if (!path || typeof window === "undefined") return;
-  pendingWikiIndexUpdates.set(normalizePathKey(path), { path, content });
-  if (wikiIndexRefreshTimer) window.clearTimeout(wikiIndexRefreshTimer);
-  wikiIndexRefreshTimer = window.setTimeout(() => {
-    wikiIndexRefreshTimer = 0;
-    const updates = [...pendingWikiIndexUpdates.values()];
-    pendingWikiIndexUpdates.clear();
-    for (const update of updates) {
-      updateWikiIndexEntry(appStore.wikiIndex, update.path, update.content);
-    }
-    scheduleKnowledgeRefresh();
-  }, 250);
+  scheduleKnowledgeRefresh();
 }
 
 export async function openWorkspace(folder?: string) {
@@ -587,38 +682,24 @@ export function scheduleWorkspaceKnowledgeRefresh(paths: string[] = []) {
   }, 250);
 }
 
-async function refreshChangedKnowledgePaths(paths: string[], expectedWorkspace: string) {
+async function refreshChangedKnowledgePaths(_paths: string[], expectedWorkspace: string) {
   if (!isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
-  const generation = wikiIndexGeneration;
-  const index = appStore.wikiIndex;
   appStore.wikiIndexBusy = true;
   appStore.wikiIndexError = "";
   try {
     const nextTree = await invoke<FileNode[]>("list_markdown_files", { folder: expectedWorkspace });
-    if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex || !isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
+    if (!isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
     appStore.fileTree = nextTree;
-    const nextPaths = flattenMarkdownFiles(nextTree);
-    const nextKeys = new Set(nextPaths.map(normalizePathKey));
-    for (const entry of [...index.entries]) {
-      if (!nextKeys.has(normalizePathKey(entry.path))) removeWikiIndexEntry(index, entry.path);
-    }
-    const changedKeys = new Set(paths.filter(isMarkdownFilePath).map(normalizePathKey));
-    const targets = nextPaths.filter((path) => {
-      const existing = index.entries.find((entry) => isSamePath(entry.path, path));
-      return !existing?.indexed || changedKeys.size === 0 || changedKeys.has(normalizePathKey(path));
-    });
-    for (let offset = 0; offset < targets.length; offset += 12) {
-      const batch = targets.slice(offset, offset + 12);
-      const contents = await Promise.all(batch.map(async (path) => [path, await contentForWikiIndex(path)] as const));
-      if (generation !== wikiIndexGeneration || index !== appStore.wikiIndex) return;
-      contents.forEach(([path, content]) => updateWikiIndexEntry(index, path, content));
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    }
+    appStore.wikiIndex = createWikiWorkspaceIndex(nextTree, expectedWorkspace);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 150));
+    const status = await workspaceIndexClient.status();
+    if (status.error) throw new Error(status.error);
+    await applyRustWorkspaceIndexStatus(status);
     scheduleKnowledgeRefresh();
   } catch (error) {
-    if (generation === wikiIndexGeneration) appStore.wikiIndexError = String(error);
+    if (isSamePath(appStore.currentWorkspace, expectedWorkspace)) appStore.wikiIndexError = String(error);
   } finally {
-    if (generation === wikiIndexGeneration) appStore.wikiIndexBusy = false;
+    if (isSamePath(appStore.currentWorkspace, expectedWorkspace)) appStore.wikiIndexBusy = false;
   }
 }
 
@@ -837,15 +918,23 @@ export async function refreshBacklinks() {
   appStore.wikiBacklinksBusy = true;
   appStore.wikiBacklinksError = "";
   try {
-    if (appStore.wikiIndexBusy && wikiIndexHydrationPromise) await wikiIndexHydrationPromise;
-    const backlinks = backlinksFromIndex(targetPath, appStore.wikiIndex);
-    const mentions = unlinkedMentionsForPath(targetPath, appStore.wikiIndex);
-    if (generation !== backlinkRefreshGeneration || !isSamePath(appStore.currentFilePath, targetPath)) return;
-    appStore.wikiBacklinks = backlinks.sort((left, right) => {
-      return left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN") || left.line - right.line;
-    });
-    appStore.wikiUnlinkedMentions = mentions;
-    appStore.wikiMentionsForPath = targetPath;
+    if (appStore.workspaceIndexReady) {
+      const expectedGeneration = appStore.workspaceIndexGeneration;
+      const [backlinks, mentions] = await Promise.all([
+        workspaceIndexClient.backlinks(targetPath),
+        workspaceIndexClient.mentions(targetPath),
+      ]);
+      const expectedRevision = documentRuntimeMetadata.get(appStore.activeTabId)?.revision;
+      if (backlinks.generation !== expectedGeneration || mentions.generation !== expectedGeneration) return;
+      if (expectedRevision != null && (backlinks.documentRevision ?? expectedRevision) !== expectedRevision) return;
+      if (expectedGeneration !== appStore.workspaceIndexGeneration || generation !== backlinkRefreshGeneration || !isSamePath(appStore.currentFilePath, targetPath)) return;
+      appStore.wikiBacklinks = backlinks.data;
+      appStore.wikiUnlinkedMentions = mentions.data;
+      appStore.wikiMentionsForPath = targetPath;
+      return;
+    }
+    if (wikiIndexHydrationPromise) await wikiIndexHydrationPromise;
+    if (!appStore.workspaceIndexReady) throw new Error(appStore.wikiIndexError || "工作区索引仍在构建中，请稍后重试。");
   } catch (error) {
     if (generation !== backlinkRefreshGeneration) return;
     appStore.wikiBacklinks = [];
@@ -1012,6 +1101,9 @@ export async function saveCurrentFile() {
     return true;
   }
 
+  const liveTab = getActiveTab();
+  if (liveTab) await flushDocumentSnapshot(liveTab.id, "save");
+
   if (!appStore.currentFilePath) {
     const selected = await invoke<string | null>("save_markdown_file_dialog", {
       defaultFileName: defaultMarkdownFileName(),
@@ -1094,6 +1186,8 @@ async function resolveChangedFileBeforeSave(originalPath: string) {
 }
 
 async function conflictDiffDetails(path: string) {
+  const tab = getActiveTab();
+  if (tab) await flushDocumentSnapshot(tab.id, "externalDiff");
   const disk = await invoke<string>("read_text_file", { path }).catch(() => "");
   return buildTextDiffSummary(appStore.currentContent, disk);
 }
@@ -1119,14 +1213,14 @@ async function chooseSaveAsTarget(avoidPath?: string) {
 async function reloadActiveFileFromDisk(path: string) {
   const content = await invoke<string>("read_text_file", { path });
   const snapshot = await getFileSnapshot(path);
-  appStore.currentContent = content;
-  appStore.isDirty = false;
   const tab = getActiveTab();
   if (tab) {
-    tab.content = content;
-    tab.isDirty = false;
+    setPaneContent(appStore.splitLayout.activePaneId, content, false);
     tab.fileSnapshot = snapshot;
     clearTabExternalState(tab);
+  } else {
+    appStore.currentContent = content;
+    appStore.isDirty = false;
   }
   await clearActiveDraft();
   appStore.statusMessage = "已重载磁盘版本";
@@ -1232,6 +1326,8 @@ export async function saveCurrentFileAsExternalCopy() {
 
 export async function saveConflictCopyForCurrentFile() {
   if (!appStore.currentFilePath) return false;
+  const tab = getActiveTab();
+  if (tab) await flushDocumentSnapshot(tab.id, "saveAs");
   const target = conflictCopyPath(appStore.currentFilePath);
   await invoke("write_text_file", {
     path: target,
@@ -1265,7 +1361,9 @@ export async function rebindCurrentFileToCandidate(path: string) {
   }
   const snapshot = await getFileSnapshot(path);
   const previousPath = appStore.currentFilePath;
+  const previousTabId = tab.id;
   tab.id = tabIdForPath(path);
+  rebindDocumentRuntime(previousTabId, tab.id);
   tab.path = path;
   tab.name = fileNameFromPath(path);
   tab.fileSnapshot = snapshot;
@@ -1374,10 +1472,14 @@ export async function activateTab(tabId: string) {
 
 export async function activateTabInPane(paneId: EditorPaneId, tabId: string) {
   if (tabId === appStore.activeTabId && paneId === appStore.splitLayout.activePaneId) return;
+  const previous = getPaneTab(paneId);
+  if (previous && previous.documentMode === "normal") await flushDocumentSnapshot(previous.id, "tabSwitch");
   syncActiveTabFromProjection();
   const tab = appStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
   projectTabInPane(tab, paneId);
+  await nextTick();
+  if (tab.documentMode === "normal") await waitForDocumentSession(tab.id, tab.editorMode);
   void refreshBacklinks();
   await persistConfig();
 }
@@ -1515,7 +1617,7 @@ export async function createNewFile() {
   await openFile(path);
 }
 
-export function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+export async function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
   const tab = getPaneTab(paneId);
   if (!tab) return;
   if (tab.documentMode === "large") {
@@ -1524,6 +1626,7 @@ export function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.spl
     return;
   }
   if (mode === tab.editorMode) return;
+  await flushDocumentSnapshot(tab.id, "modeSwitch");
   if (typeof window !== "undefined") {
     window.dispatchEvent(
       new CustomEvent("lightmark:capture-mode-cursor", {
@@ -1537,6 +1640,8 @@ export function switchMode(mode: EditorMode, paneId: EditorPaneId = appStore.spl
     syncActiveTabFromProjection();
   }
   dispatchWritingModesChanged();
+  await nextTick();
+  await waitForDocumentSession(tab.id, mode);
 }
 
 function dispatchWritingModesChanged() {
@@ -1650,8 +1755,17 @@ async function closeTabInternal(
   const index = appStore.tabs.findIndex((item) => item.id === tabId);
   if (index < 0 || !closingTab) return false;
   rememberClosedTab(closingTab);
+  if (closingTab.path && closingTab.documentMode === "normal" && appStore.workspaceIndexReady) {
+    await workspaceIndexClient.releaseOpenDocument(closingTab.path).catch((error) => {
+      appStore.wikiIndexError = `释放工作区文档索引失败：${error}`;
+    });
+  }
   await closeLargeFileSession();
   appStore.tabs.splice(index, 1);
+  documentSnapshotCoordinator.cancel(tabId);
+  documentRuntimeMetadata.delete(tabId);
+  delete appStore.runtimeDerivedByTab[tabId];
+  clearDocumentRuntimeState(tabId);
   appStore.splitLayout = resolveClosedTabSplitLayout(appStore.splitLayout, tabId, tabIds());
 
   if (appStore.tabs.length === 0) {
@@ -2203,7 +2317,9 @@ function syncActiveTabFromProjection() {
 function retargetActiveTab(path: string) {
   const tab = getActiveTab();
   if (!tab) return;
+  const previousTabId = tab.id;
   tab.id = tabIdForPath(path);
+  rebindDocumentRuntime(previousTabId, tab.id);
   tab.kind = "normal";
   tab.path = path;
   tab.name = fileNameFromPath(path);
@@ -2219,6 +2335,17 @@ function getActiveTab() {
 
 function findFileTab(path: string) {
   return appStore.tabs.find((tab) => tab.path && isSamePath(tab.path, path)) ?? null;
+}
+
+function rebindDocumentRuntime(previousTabId: string, nextTabId: string) {
+  rebindDocumentSession(previousTabId, nextTabId);
+  const metadata = documentRuntimeMetadata.get(previousTabId);
+  if (metadata) {
+    documentRuntimeMetadata.delete(previousTabId);
+    documentRuntimeMetadata.set(nextTabId, metadata);
+  }
+  documentSnapshotCoordinator.cancel(previousTabId);
+  if (metadata) scheduleDocumentSnapshot(nextTabId);
 }
 
 function tabIds() {
@@ -2556,4 +2683,30 @@ function mergeLoadedRanges(
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+if (
+  typeof import.meta.env !== "undefined"
+  && import.meta.env.VITE_LIGHTMARK_PERF_QA === "1"
+  && typeof window !== "undefined"
+) {
+  const qa = (window as typeof window & { __LIGHTMARK_PERFORMANCE_QA__?: Record<string, unknown> })
+    .__LIGHTMARK_PERFORMANCE_QA__;
+  if (qa) {
+    qa.prepare = async (mode: EditorMode) => {
+      if (appStore.splitLayout.enabled) await toggleSplitLayout();
+      await setActivePane("main");
+      appStore.settings.editor.focusMode = false;
+      appStore.settings.editor.typewriterMode = false;
+      window.dispatchEvent(new CustomEvent("lightmark:writing-modes-changed"));
+      await switchMode(mode, "main");
+      const tab = getPaneTab("main");
+      if (tab) {
+        tab.path = "";
+        tab.fileSnapshot = undefined;
+      }
+      appStore.currentFilePath = "";
+      return tab?.id ?? "";
+    };
+  }
 }

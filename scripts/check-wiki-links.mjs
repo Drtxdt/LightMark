@@ -199,6 +199,7 @@ try {
   );
 
   const storeSource = fs.readFileSync(path.resolve("src/stores/appStore.ts"), "utf8");
+  const workspaceClientSource = fs.readFileSync(path.resolve("src/stores/workspaceIndexClient.ts"), "utf8");
   const sidebarSource = fs.readFileSync(path.resolve("src/components/layout/Sidebar.vue"), "utf8");
   const quickOpenSource = fs.readFileSync(path.resolve("src/components/command/QuickOpenPalette.vue"), "utf8");
   const watcherSource = fs.readFileSync(path.resolve("src-tauri/src/commands/file.rs"), "utf8");
@@ -210,8 +211,11 @@ try {
   assert.match(sidebarSource, />知识</);
   assert.match(sidebarSource, /workspaceKnowledgeTags/);
   assert.match(sidebarSource, /convertUnlinkedMention/);
-  assert.match(storeSource, /backlinksFromIndex/);
-  assert.match(storeSource, /unlinkedMentionsForPath/);
+  assert.doesNotMatch(storeSource, /backlinksFromIndex|unlinkedMentionsForPath/,
+    "the JS knowledge analyzer must remain a test oracle, not a production workspace scanner");
+  assert.match(workspaceClientSource, /workspace_query_backlinks/);
+  assert.match(workspaceClientSource, /workspace_query_mentions/);
+  assert.match(storeSource, /workspaceIndexClient\.backlinks/);
   assert.match(storeSource, /watch_markdown_workspace/);
   assert.match(storeSource, /scoreKnowledgeQuickOpenEntry/);
   assert.match(quickOpenSource, /别名：/);

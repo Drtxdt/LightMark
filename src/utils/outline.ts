@@ -5,6 +5,64 @@ export interface OutlineItemWithLine extends OutlineItem {
 
 export interface BreadcrumbItem extends OutlineItemWithLine {}
 
+export interface OutlineScanState {
+  fence: { marker: string; length: number } | null;
+  frontMatter: boolean;
+  mathBlock: boolean;
+  htmlBlock: boolean;
+}
+
+export function createOutlineScanState(firstLine = ""): OutlineScanState {
+  return {
+    fence: null,
+    frontMatter: firstLine.trim() === "---",
+    mathBlock: false,
+    htmlBlock: false,
+  };
+}
+
+export function scanOutlineLine(line: string, lineIndex: number, state: OutlineScanState): OutlineItemWithLine | null {
+  if (state.frontMatter) {
+    if (lineIndex > 0 && /^(---|\.\.\.)\s*$/.test(line)) state.frontMatter = false;
+    return null;
+  }
+  if (state.fence) {
+    const close = line.match(/^\s*(`+|~+)\s*$/);
+    if (close && close[1][0] === state.fence.marker && close[1].length >= state.fence.length) state.fence = null;
+    return null;
+  }
+  const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+  if (fenceMatch) {
+    state.fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length };
+    return null;
+  }
+  if (state.mathBlock) {
+    if (/^\s*\$\$\s*$/.test(line)) state.mathBlock = false;
+    return null;
+  }
+  if (/^\s*\$\$\s*$/.test(line)) {
+    state.mathBlock = true;
+    return null;
+  }
+  if (state.htmlBlock) {
+    if (!line.trim() || /-->\s*$/.test(line) || /<\/[^>]+>\s*$/.test(line)) state.htmlBlock = false;
+    return null;
+  }
+  if (isHtmlBlockStart(line)) {
+    state.htmlBlock = !(/-->\s*$/.test(line) || /<\/[^>]+>\s*$/.test(line));
+    return null;
+  }
+  const match = line.match(/^(#{1,6})\s+(.+)$/);
+  if (!match) return null;
+  const text = match[2].replace(/[#*_`[\]()]/g, "").trim();
+  return {
+    id: `heading-${lineIndex}-${slugify(text)}`,
+    text,
+    level: match[1].length as OutlineItem["level"],
+    line: lineIndex,
+  };
+}
+
 export interface StructuredOutlineItem extends OutlineItemWithLine {
   key: string;
   parentKey: string | null;
@@ -20,52 +78,11 @@ export function extractOutline(markdown: string): OutlineItem[] {
 export function extractOutlineWithLines(markdown: string): OutlineItemWithLine[] {
   const items: OutlineItemWithLine[] = [];
   const lines = markdown.split(/\r?\n/);
-  let fence: { marker: string; length: number } | null = null;
-  let frontMatter = lines[0]?.trim() === "---";
-  let mathBlock = false;
-  let htmlBlock = false;
+  const state = createOutlineScanState(lines[0]);
 
   lines.forEach((line, lineIndex) => {
-    if (frontMatter) {
-      if (lineIndex > 0 && /^(---|\.\.\.)\s*$/.test(line)) frontMatter = false;
-      return;
-    }
-    if (fence) {
-      const close = line.match(/^\s*(`+|~+)\s*$/);
-      if (close && close[1][0] === fence.marker && close[1].length >= fence.length) fence = null;
-      return;
-    }
-    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length };
-      return;
-    }
-    if (mathBlock) {
-      if (/^\s*\$\$\s*$/.test(line)) mathBlock = false;
-      return;
-    }
-    if (/^\s*\$\$\s*$/.test(line)) {
-      mathBlock = true;
-      return;
-    }
-    if (htmlBlock) {
-      if (!line.trim() || /-->\s*$/.test(line) || /<\/[^>]+>\s*$/.test(line)) htmlBlock = false;
-      return;
-    }
-    if (isHtmlBlockStart(line)) {
-      htmlBlock = !(/-->\s*$/.test(line) || /<\/[^>]+>\s*$/.test(line));
-      return;
-    }
-
-    const match = line.match(/^(#{1,6})\s+(.+)$/);
-    if (!match) return;
-    const text = match[2].replace(/[#*_`[\]()]/g, "").trim();
-    items.push({
-      id: `heading-${items.length}-${slugify(text)}`,
-      text,
-      level: match[1].length as OutlineItem["level"],
-      line: lineIndex,
-    });
+    const item = scanOutlineLine(line, lineIndex, state);
+    if (item) items.push(item);
   });
   return items;
 }
@@ -98,16 +115,14 @@ export function structureOutline(
     ancestors.push(structured);
   }
 
+  const openSections: StructuredOutlineItem[] = [];
   for (let index = 0; index < result.length; index += 1) {
     const item = result[index];
-    const next = result[index + 1];
-    item.hasChildren = Boolean(next && next.level > item.level);
-    for (let cursor = index + 1; cursor < result.length; cursor += 1) {
-      if (result[cursor].level <= item.level) {
-        item.sectionEndLine = result[cursor].line;
-        break;
-      }
+    item.hasChildren = Boolean(result[index + 1] && result[index + 1].level > item.level);
+    while (openSections.length > 0 && openSections[openSections.length - 1].level >= item.level) {
+      openSections.pop()!.sectionEndLine = item.line;
     }
+    openSections.push(item);
   }
 
   return result;

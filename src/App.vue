@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, watch } from "vue";
+import { defineAsyncComponent, onMounted, onUnmounted, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
-import CommandPalette from "./components/command/CommandPalette.vue";
-import GoToLinePalette from "./components/command/GoToLinePalette.vue";
-import HeadingJumpPalette from "./components/command/HeadingJumpPalette.vue";
-import FormulaJumpPalette from "./components/command/FormulaJumpPalette.vue";
-import QuickOpenPalette from "./components/command/QuickOpenPalette.vue";
 import AppDialog from "./components/dialog/AppDialog.vue";
-import SettingsDialog from "./components/settings/SettingsDialog.vue";
-import WordCountPanel from "./components/plugin/WordCountPanel.vue";
+const CommandPalette = defineAsyncComponent(() => import("./components/command/CommandPalette.vue"));
+const GoToLinePalette = defineAsyncComponent(() => import("./components/command/GoToLinePalette.vue"));
+const HeadingJumpPalette = defineAsyncComponent(() => import("./components/command/HeadingJumpPalette.vue"));
+const FormulaJumpPalette = defineAsyncComponent(() => import("./components/command/FormulaJumpPalette.vue"));
+const QuickOpenPalette = defineAsyncComponent(() => import("./components/command/QuickOpenPalette.vue"));
+const SettingsDialog = defineAsyncComponent(() => import("./components/settings/SettingsDialog.vue"));
+const WordCountPanel = defineAsyncComponent(() => import("./components/plugin/WordCountPanel.vue"));
 import { activatePlugins } from "./plugins/registry";
 import { wordCountPlugin } from "./plugins/wordCountPlugin";
 import {

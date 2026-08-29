@@ -13,7 +13,7 @@ import { TableHeader } from "@tiptap/extension-table-header";
 import { TableRow } from "@tiptap/extension-table-row";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
-import { all, createLowlight } from "lowlight";
+import { createLowlight } from "lowlight";
 import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { closeHistory } from "@tiptap/pm/history";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
@@ -27,6 +27,7 @@ import {
   getPaneStructuredOutline,
   getPanePendingModeCursor,
   getPaneTab,
+  markDocumentChanged,
   openWikiLink,
   revealHeadingAtLine,
   setPaneContent,
@@ -35,11 +36,35 @@ import {
   updatePaneOutlineAnchor,
   updatePanePosition,
 } from "../../stores/appStore";
+import { publishDocumentDerivedState, registerDocumentSession } from "../../editor/documentRuntime";
+import { WysiwygSnapshotCache } from "../../editor/wysiwygSnapshot";
+import { createWysiwygDerivedPlugin, getWysiwygDerivedState } from "../../editor/wysiwygDerived";
+import { createWysiwygFocusPlugin } from "../../editor/wysiwygFocus";
+import { exposeHeadingMarkdown } from "../../editor/wysiwygMarkdownEditing";
+import {
+  formatMarkdownTable as formatMarkdownTableFromDom,
+  markdownTableDividerForAlign,
+  parseTableCellAlign,
+  renderTableCellAlign,
+  resizedTableElement,
+  tableColumnAlignments,
+  tableResizeWouldDropContent,
+} from "../../editor/wysiwygTables";
+import {
+  createWysiwygFindPlugin,
+  getWysiwygFindState,
+  refreshWysiwygFindDecorations,
+  setWysiwygFindQuery,
+  type WysiwygFindMatch,
+} from "../../editor/wysiwygFind";
+import { ensureLowlightLanguage, installLowlightPlainTextFallback } from "../../editor/lowlightLanguages";
+import { incrementalLowlightPlugin } from "../../editor/incrementalLowlight";
+import { recordStartupStage } from "../../editor/startupMetrics";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
-import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
+import { normalizeMatchIndex, replacementForMatch } from "../../utils/findReplace";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
-import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
+import { buildEditorPositionSnapshot, normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import {
   codeBlockIndentEdits,
   decidePairAction,
@@ -48,7 +73,7 @@ import {
 } from "../../utils/inputRules";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { typewriterScrollDelta } from "../../utils/writingModes";
-import { resolveHeadingSection, structureOutline, type StructuredOutlineItem } from "../../utils/outline";
+import { extractOutlineWithLines, resolveHeadingSection, structureOutline, type StructuredOutlineItem } from "../../utils/outline";
 import {
   builtinSlashCommands,
   expandSnippet,
@@ -103,7 +128,18 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
 });
 
-const lowlight = createLowlight(all);
+const lowlight = installLowlightPlainTextFallback(createLowlight());
+let wysiwygRevision = 0;
+let unregisterDocumentSession = () => {};
+let snapshotCache: WysiwygSnapshotCache | null = null;
+let cachedWysiwygFind: { items: WysiwygFindMatch[]; error: string } = { items: [], error: "" };
+let outlineDecorationEpoch = 0;
+let outlineDecorationCache: { state: object; epoch: number; collapsed: string; value: Decoration[] } | null = null;
+const outlineHeadingDecorationsKey = new PluginKey<{
+  decorations: DecorationSet;
+  epoch: number;
+  collapsed: string;
+}>("lightmarkOutlineHeadingDecorations");
 
 const slashMenu = ref({
   visible: false,
@@ -137,8 +173,6 @@ type ToolbarEditorCommand =
   | "image"
   | "alert";
 type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
-type EditorFindMatch = TextMatch & { docFrom: number; docTo: number };
-
 const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
 let suppressWysiwygUpdate = false;
 let wysiwygTypewriterFrame = 0;
@@ -600,6 +634,13 @@ const FencedCodeBlockInput = Extension.create({
 });
 
 const LightMarkCodeBlock = CodeBlockLowlight.extend({
+  addProseMirrorPlugins() {
+    return [incrementalLowlightPlugin({
+      name: this.name,
+      lowlight: this.options.lowlight,
+      defaultLanguage: this.options.defaultLanguage,
+    })];
+  },
   addAttributes() {
     const parentAttributes = this.parent?.() ?? {};
     const languageAttribute = (parentAttributes as Record<string, any>).language ?? {};
@@ -1235,11 +1276,34 @@ const TyporaSourceMarkers = Extension.create({
   addProseMirrorPlugins() {
     return [
       new Plugin({
+        key: outlineHeadingDecorationsKey,
+        state: {
+          init: (_, state) => buildOutlineHeadingDecorationState(state),
+          apply: (transaction, previous, oldState, newState) => {
+            const collapsed = currentCollapsedHeadingSignature();
+            if (previous.epoch !== outlineDecorationEpoch || previous.collapsed !== collapsed) {
+              return buildOutlineHeadingDecorationState(newState);
+            }
+            if (!transaction.docChanged) return previous;
+            if (canMapOutlineHeadingDecorations(oldState, newState)) {
+              return {
+                ...previous,
+                decorations: previous.decorations.map(transaction.mapping, transaction.doc),
+              };
+            }
+            return buildOutlineHeadingDecorationState(newState);
+          },
+        },
         props: {
           decorations(state) {
-            const decorations = [
-              ...createOutlineHeadingDecorations(state),
-            ];
+            return outlineHeadingDecorationsKey.getState(state)?.decorations ?? null;
+          },
+        },
+      }),
+      new Plugin({
+        props: {
+          decorations(state) {
+            const decorations: Decoration[] = [];
 
             if (state.selection.empty) {
               decorations.push(
@@ -1260,7 +1324,7 @@ const TyporaSourceMarkers = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-          return convertInlineMarkdownSyntax(newState);
+          return convertInlineMarkdownSyntax(newState, { onlySelectionBlock: true });
         },
       }),
     ];
@@ -1272,22 +1336,9 @@ const FindReplaceDecorations = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin({
-        key: new PluginKey("lightmarkFindReplace"),
-        props: {
-          decorations(state) {
-            if (!findReplaceStore.open || !findReplaceStore.query) return null;
-            const matches = collectWysiwygFindMatches(state);
-            if (matches.error || matches.items.length === 0) return null;
-            const current = normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
-            const decorations = matches.items.map((match, index) =>
-              Decoration.inline(match.docFrom, match.docTo, {
-                class: index === current ? "lm-find-match lm-find-match-current" : "lm-find-match",
-              }),
-            );
-            return DecorationSet.create(state.doc, decorations);
-          },
-        },
+      createWysiwygFindPlugin({
+        active: () => Boolean(findReplaceStore.open && findReplaceStore.query),
+        currentIndex: () => findReplaceStore.currentIndex,
       }),
     ];
   },
@@ -1313,7 +1364,7 @@ const TyporaInlineCode = Extension.create({
         },
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-          return convertInlineCodeSyntax(newState);
+          return convertInlineCodeSyntax(newState, { onlySelectionBlock: true });
         },
       }),
     ];
@@ -1441,62 +1492,15 @@ const WritingFocusDecorations = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin({
-        key: new PluginKey(`lightmarkWritingFocus-${props.paneId}`),
-        props: {
-          decorations(state) {
-            if (
-              !appStore.settings.editor.focusMode ||
-              props.paneId !== appStore.splitLayout.activePaneId ||
-              paneEditorMode.value !== "wysiwyg" ||
-              paneDocumentMode.value !== "normal"
-            ) {
-              return null;
-            }
-            const { $from } = state.selection;
-            const topPos = $from.depth > 0 ? $from.before(1) : 0;
-            const findMatches = findReplaceStore.open ? collectWysiwygFindMatches(state).items : [];
-            const containsFindMatch = (from: number, to: number) =>
-              findMatches.some((match) => match.docFrom < to && match.docTo > from);
-            let outerListItemPos: number | null = null;
-            for (let depth = 1; depth <= $from.depth; depth += 1) {
-              if ($from.node(depth).type.name === "listItem") {
-                outerListItemPos = $from.before(depth);
-                break;
-              }
-            }
-            const decorations: Decoration[] = [];
-            state.doc.forEach((node, offset) => {
-              if (
-                offset === topPos &&
-                outerListItemPos !== null &&
-                (node.type.name === "bulletList" || node.type.name === "orderedList")
-              ) {
-                node.forEach((item, itemOffset) => {
-                  const itemPos = offset + 1 + itemOffset;
-                  decorations.push(
-                    Decoration.node(itemPos, itemPos + item.nodeSize, {
-                      class:
-                        itemPos === outerListItemPos || containsFindMatch(itemPos, itemPos + item.nodeSize)
-                          ? "lm-focus-active"
-                          : "lm-focus-dimmed",
-                    }),
-                  );
-                });
-                return;
-              }
-              decorations.push(
-                Decoration.node(offset, offset + node.nodeSize, {
-                  class:
-                    offset === topPos || containsFindMatch(offset, offset + node.nodeSize)
-                      ? "lm-focus-active"
-                      : "lm-focus-dimmed",
-                }),
-              );
-            });
-            return DecorationSet.create(state.doc, decorations);
-          },
-        },
+      createWysiwygDerivedPlugin(),
+      createWysiwygFocusPlugin({
+        enabled: () => Boolean(
+          appStore.settings.editor.focusMode
+          && props.paneId === appStore.splitLayout.activePaneId
+          && paneEditorMode.value === "wysiwyg"
+          && paneDocumentMode.value === "normal"
+        ),
+        matches: () => findReplaceStore.open ? cachedWysiwygFind.items : [],
       }),
     ];
   },
@@ -1510,6 +1514,13 @@ const FootnoteMetadataSync = Extension.create({
       new Plugin({
         appendTransaction(transactions, _oldState, newState) {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          const $head = newState.selection.$head;
+          const nearFootnote = [
+            $head.parent.type?.name,
+            $head.nodeBefore?.type?.name,
+            $head.nodeAfter?.type?.name,
+          ].some((name) => name === "footnoteRef" || name === "footnotes");
+          if (!nearFootnote && !transactions.some((transaction) => transaction.getMeta("lightmarkFootnoteSync"))) return null;
           const definitions = new Map<string, string>();
           newState.doc.descendants((node: any) => {
             if (node.type?.name !== "footnotes") return true;
@@ -1617,21 +1628,6 @@ turndown.addRule("taskState", {
     return `${checked ? "[x]" : "[ ]"}${text ? ` ${text}` : ""}`;
   },
 });
-
-function normalizeTableAlign(value: unknown): "left" | "center" | "right" | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "left" || normalized === "center" || normalized === "right" ? normalized : null;
-}
-
-function parseTableCellAlign(element: HTMLElement) {
-  return normalizeTableAlign(element.style.textAlign || element.getAttribute("align") || "");
-}
-
-function renderTableCellAlign(attributes: Record<string, unknown>) {
-  const textAlign = normalizeTableAlign(attributes.textAlign);
-  return textAlign ? { style: `text-align: ${textAlign};` } : {};
-}
 
 const LightMarkTableCell = TableCell.extend({
   addAttributes() {
@@ -2614,7 +2610,7 @@ const editor = useEditor({
       const heading = target?.closest<HTMLElement>("h1,h2,h3,h4,h5,h6");
       if (heading && view.dom.contains(heading)) {
         event.preventDefault();
-        editHeadingAsMarkdown(view, heading);
+        editHeadingAsMarkdown(view, heading, event as MouseEvent);
         return true;
       }
 
@@ -2644,22 +2640,30 @@ const editor = useEditor({
       return true;
     },
   },
-  onUpdate({ editor }) {
-    if (suppressWysiwygUpdate) return;
+  onUpdate({ editor, transaction }) {
+    if (suppressWysiwygUpdate || transaction.getMeta("lightmarkLowlightRefresh")) return;
     getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
-    const previousMarkdown = getPaneContent(props.paneId);
-    setPaneContent(
-      props.paneId,
-      preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(editor.getHTML()), previousMarkdown),
-      true,
-    );
+    wysiwygRevision += 1;
+    snapshotCache?.invalidate();
+    const tab = getPaneTab(props.paneId);
+    const derived = getWysiwygDerivedState(editor.state);
+    if (tab) markDocumentChanged(tab.id, wysiwygRevision, {
+      words: derived.words,
+      chars: derived.chars,
+      lines: derived.lines,
+      outline: derived.outlineChanged ? wysiwygStructuredOutline(editor.state) : undefined,
+    });
+    syncWysiwygFindState(editor.state);
+    if (transactionChangesMathDependencies(transaction)) {
+      window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
+    }
     updateCodeLanguageControl(editor.view);
+    void ensureSelectedCodeLanguage(editor.view);
     updateTableControl(editor.view);
     captureWysiwygPosition(editor.view);
     captureWysiwygSelectionAnchor(editor.view);
     updateWysiwygWikiCompletion(editor.view);
     updateSlashMenu(editor.view);
-    if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshWysiwygFind, 0);
     scheduleWysiwygTypewriter(editor.view);
   },
   onSelectionUpdate({ editor }) {
@@ -3203,6 +3207,48 @@ function handleEditorShellScroll() {
   if (Date.now() <= wysiwygManualScrollUntil) captureWysiwygScrollAnchor();
 }
 
+async function ensureSelectedCodeLanguage(view: EditorView) {
+  const active = getSelectedCodeBlock(view);
+  const language = String(active?.node.attrs.language || "");
+  if (!active || !language) return;
+  const loaded = await ensureLowlightLanguage(lowlight, language);
+  if (!loaded || editor.value?.view !== view) return;
+  refreshLowlightCodeBlock(view, active.pos, language);
+}
+
+async function ensureInitialCodeLanguages(view = editor.value?.view) {
+  if (!view) return;
+  const languages = new Set<string>();
+  const positions = new Map<string, number>();
+  view.state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name !== "codeBlock") return true;
+    const language = String(node.attrs.language || "");
+    if (language) {
+      languages.add(language);
+      if (!positions.has(language)) positions.set(language, pos);
+    }
+    return false;
+  });
+  const loaded = await Promise.all([...languages].map(async (language) => ({
+    language,
+    loaded: await ensureLowlightLanguage(lowlight, language),
+  })));
+  if (editor.value?.view !== view) return;
+  const first = loaded.find((item) => item.loaded);
+  if (first) refreshLowlightCodeBlock(view, positions.get(first.language) ?? 0, first.language);
+}
+
+function refreshLowlightCodeBlock(view: EditorView, position: number, language: string) {
+  const node = view.state.doc.nodeAt(position);
+  if (node?.type.name !== "codeBlock" || String(node.attrs.language || "") !== language) return;
+  view.dispatch(
+    view.state.tr
+      .replaceWith(position, position + node.nodeSize, node)
+      .setMeta("addToHistory", false)
+      .setMeta("lightmarkLowlightRefresh", language),
+  );
+}
+
 function markWysiwygManualScroll(duration = 500) {
   wysiwygManualScrollUntil = Date.now() + duration;
 }
@@ -3220,9 +3266,31 @@ function handleWysiwygScrollKey(event: KeyboardEvent) {
 
 function captureWysiwygSelectionAnchor(view = editor.value?.view) {
   if (!view || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
-  const markdown = paneContent.value;
-  const offset = docPosToMarkdownOffset(view.state, view.state.selection.head, markdown);
-  updatePaneOutlineAnchor(props.paneId, markdownLineAtOffset(markdown, offset), "selection");
+  const derived = getWysiwygDerivedState(view.state);
+  const selectionHead = view.state.selection.head;
+  let low = 0;
+  let high = derived.headings.length - 1;
+  let activeIndex = -1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    if (derived.headings[middle].pos <= selectionHead) {
+      activeIndex = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (activeIndex < 0) {
+    updatePaneOutlineAnchor(props.paneId, 0, "selection");
+    return;
+  }
+  const tab = getPaneTab(props.paneId);
+  const projected = tab ? appStore.runtimeDerivedByTab[tab.id]?.outline : undefined;
+  updatePaneOutlineAnchor(
+    props.paneId,
+    projected?.[activeIndex]?.line ?? derived.headings[activeIndex].blockIndex,
+    "selection",
+  );
 }
 
 function captureWysiwygScrollAnchor() {
@@ -3414,55 +3482,6 @@ function applyTableSize(targetRows: number, targetColumns: number) {
   window.setTimeout(() => updateTableControl(), 0);
 }
 
-function resizedTableElement(source: HTMLTableElement, targetRows: number, targetColumns: number) {
-  const table = source.cloneNode(true) as HTMLTableElement;
-  while (table.rows.length > targetRows) table.deleteRow(table.rows.length - 1);
-  while (table.rows.length < targetRows) {
-    const row = table.insertRow();
-    const useHeader = table.rows.length === 1 && source.rows[0]?.cells[0]?.tagName.toLowerCase() === "th";
-    for (let column = 0; column < targetColumns; column += 1) {
-      const cell = document.createElement(useHeader ? "th" : "td");
-      cell.innerHTML = "";
-      row.appendChild(cell);
-    }
-  }
-  Array.from(table.rows).forEach((row) => {
-    while (row.cells.length > targetColumns) row.deleteCell(row.cells.length - 1);
-    while (row.cells.length < targetColumns) {
-      const template = row.cells[row.cells.length - 1] || source.rows[0]?.cells[row.cells.length] || source.rows[0]?.cells[0];
-      const cell = document.createElement(row.rowIndex === 0 && template?.tagName.toLowerCase() === "th" ? "th" : "td");
-      const align = template ? parseTableCellAlign(template as HTMLElement) : null;
-      if (align) {
-        cell.style.textAlign = align;
-        cell.setAttribute("align", align);
-      }
-      cell.innerHTML = "";
-      row.appendChild(cell);
-    }
-  });
-  return table;
-}
-
-function tableResizeWouldDropContent(table: HTMLTableElement, targetRows: number, targetColumns: number) {
-  const rows = Array.from(table.rows);
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    const row = rows[rowIndex];
-    if (rowIndex >= targetRows && rowHasContent(row)) return true;
-    for (let columnIndex = targetColumns; columnIndex < row.cells.length; columnIndex += 1) {
-      if (cellHasContent(row.cells[columnIndex])) return true;
-    }
-  }
-  return false;
-}
-
-function rowHasContent(row: HTMLTableRowElement) {
-  return Array.from(row.cells).some(cellHasContent);
-}
-
-function cellHasContent(cell: HTMLTableCellElement) {
-  return Boolean(cell.textContent?.trim() || cell.querySelector("img,video,iframe,math,.math-node,.typora-image-node"));
-}
-
 function applyTableAlignment(align: "left" | "center" | "right") {
   const info = getSelectedTableInfo();
   if (!info) return;
@@ -3559,6 +3578,8 @@ watch(
   () => {
     closeWysiwygWikiCompletion();
     editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
+    registerWysiwygDocumentSession();
+    void ensureInitialCodeLanguages();
     schedulePendingWysiwygPositionRestore();
   },
 );
@@ -3569,6 +3590,7 @@ watch(
     closeWysiwygWikiCompletion();
     if (paneEditorMode.value === "wysiwyg") {
       editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
+      void ensureInitialCodeLanguages();
       schedulePendingWysiwygCursorRestore();
       schedulePendingWysiwygPositionRestore();
     }
@@ -3578,6 +3600,7 @@ watch(
 watch(
   () => editor.value,
   () => {
+    registerWysiwygDocumentSession();
     schedulePendingWysiwygCursorRestore();
     schedulePendingWysiwygPositionRestore();
   },
@@ -3605,9 +3628,13 @@ onMounted(() => {
   window.addEventListener("resize", handleEditorShellScroll);
   window.addEventListener("keydown", handleWysiwygPlainPasteCapture, true);
   syncWysiwygWritingModes();
+  void ensureInitialCodeLanguages();
+  requestAnimationFrame(() => recordStartupStage("wysiwyg"));
 });
 
 onBeforeUnmount(() => {
+  unregisterDocumentSession();
+  snapshotCache = null;
   document.removeEventListener("pointerdown", handleDocumentTablePointerDown, true);
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
@@ -3631,8 +3658,125 @@ onBeforeUnmount(() => {
   editor.value?.destroy();
 });
 
+function registerWysiwygDocumentSession() {
+  unregisterDocumentSession();
+  const activeEditor = editor.value;
+  const tab = getPaneTab(props.paneId);
+  if (!activeEditor || !tab) return;
+  const tabId = tab.id;
+  snapshotCache = new WysiwygSnapshotCache({
+    tabId: () => getPaneTab(props.paneId)?.id ?? tabId,
+    revision: () => wysiwygRevision,
+    dirty: () => getPaneTab(props.paneId)?.isDirty ?? false,
+    previousMarkdown: () => getPaneContent(props.paneId),
+    blocks: () => {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      const blocks: object[] = [];
+      currentEditor.state.doc.forEach((node: object) => blocks.push(node));
+      return blocks;
+    },
+    serializeBlock: (block) => {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      const container = document.createElement("div");
+      container.appendChild(DOMSerializer.fromSchema(currentEditor.state.schema).serializeNode(block as any));
+      return container.innerHTML;
+    },
+    convertBlock: (html) => editorHtmlToMarkdown(html).replace(/^\n+|\n+$/g, ""),
+    combineBlocks: (blocks, previousMarkdown, sourceBlocks) => preserveMarkdownTerminalNewlines(
+      blocks
+        .map((block, index) => {
+          const nodeType = (sourceBlocks[index] as { type?: { name?: string } })?.type?.name;
+          const listNeedsFollowingBlockPadding = index < blocks.length - 1
+            && (nodeType === "bulletList" || nodeType === "orderedList");
+          if (listNeedsFollowingBlockPadding) return `${block}\n    `;
+          if (index > 0 && nodeType === "footnotes") return `\n\n${block}`;
+          return block;
+        })
+        .filter((block) => block.length > 0)
+        .join("\n\n"),
+      previousMarkdown,
+    ),
+    oracle: (previousMarkdown) => {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      return preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(currentEditor.getHTML()), previousMarkdown);
+    },
+    verifyIncremental: () => window.localStorage.getItem("lightmark:verify-wysiwyg-snapshot") === "1",
+  });
+  unregisterDocumentSession = registerDocumentSession({
+    tabId,
+    paneId: props.paneId,
+    mode: "wysiwyg",
+    get revision() {
+      return wysiwygRevision;
+    },
+    async snapshot(reason, options) {
+      if (!snapshotCache) throw new Error("所见即所得快照会话已经关闭。");
+      const snapshot = await snapshotCache.snapshot(reason, options);
+      if (editor.value?.view && wysiwygRevision === snapshot.revision) {
+        captureExactWysiwygPosition(editor.value.view, snapshot.markdown);
+        const derived = getWysiwygDerivedState(editor.value.view.state);
+        publishDocumentDerivedState(tabId, {
+          revision: wysiwygRevision,
+          words: derived.words,
+          chars: derived.chars,
+          lines: derived.lines,
+          outline: structureOutline(
+            extractOutlineWithLines(snapshot.markdown),
+            snapshot.markdown.split(/\r?\n/).length,
+          ),
+          findMatches: cachedWysiwygFind.items.length,
+          snapshotDiagnostics: snapshotCache.diagnostics(),
+        });
+      }
+      return snapshot;
+    },
+    derivedState() {
+      const currentEditor = editor.value;
+      if (!currentEditor) return { revision: wysiwygRevision };
+      const derived = getWysiwygDerivedState(currentEditor.state);
+      return {
+        revision: wysiwygRevision,
+        words: derived.words,
+        chars: derived.chars,
+        lines: derived.lines,
+        outline: wysiwygStructuredOutline(currentEditor.state),
+        findMatches: cachedWysiwygFind.items.length,
+        snapshotDiagnostics: snapshotCache?.diagnostics(),
+      };
+    },
+    async replaceMarkdown(markdown) {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      currentEditor.commands.setContent(renderMarkdownForEditorWithAssets(markdown), { emitUpdate: false });
+      wysiwygRevision += 1;
+      snapshotCache?.invalidate();
+      outlineDecorationEpoch += 1;
+      void ensureInitialCodeLanguages(currentEditor.view);
+    },
+    navigate(target) {
+      const currentEditor = editor.value;
+      if (!currentEditor) return;
+      let requested = target.position;
+      if (requested == null && target.offset != null) {
+        requested = markdownOffsetToDocPos(currentEditor.state, target.offset, getPaneContent(props.paneId));
+      }
+      if (requested == null && target.line != null) {
+        const targetLine = target.line;
+        const outline = wysiwygStructuredOutline(currentEditor.state) as Array<StructuredOutlineItem & { position?: number }>;
+        requested = [...outline].reverse().find((item) => item.line <= targetLine)?.position;
+      }
+      const position = Math.max(1, Math.min(currentEditor.state.doc.content.size, requested ?? 1));
+      currentEditor.chain().focus().setTextSelection(position).scrollIntoView().run();
+    },
+  });
+}
+
 function handleWysiwygHeadingFoldsChanged(event: CustomEvent<{ paneId?: EditorPaneId }>) {
   if (event.detail?.paneId && event.detail.paneId !== props.paneId) return;
+  outlineDecorationEpoch += 1;
   const activeEditor = editor.value;
   if (!activeEditor) return;
   const tab = getPaneTab(props.paneId);
@@ -3709,7 +3853,7 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
   suppressWysiwygUpdate = false;
   // The visual document is semantic HTML; retain the formatter's canonical
   // Markdown in the tab instead of immediately re-serializing table padding.
-  setPaneContent(props.paneId, event.detail.result.text, true);
+  setPaneContent(props.paneId, event.detail.result.text, true, false);
   activeEditor.view.focus();
 }
 
@@ -3759,18 +3903,35 @@ function restoreExactMarkdownSnapshot(
   suppressWysiwygUpdate = true;
   view.dispatch(transaction);
   suppressWysiwygUpdate = false;
-  setPaneContent(props.paneId, markdown, true);
+  setPaneContent(props.paneId, markdown, true, false);
   view.focus();
 }
 
 function captureWysiwygPosition(view = editor.value?.view) {
   if (!view || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const shell = editorShell.value;
-  const markdown = paneContent.value || editorHtmlToMarkdown(editor.value?.getHTML() || "");
+  const previous = getPaneTab(props.paneId)?.position;
   const { anchor, head } = view.state.selection;
-  updatePanePosition(
-    props.paneId,
-    buildEditorPositionSnapshot({
+  const scroll = normalizeScrollSnapshot(shell?.scrollTop ?? 0, shell?.scrollHeight ?? 0, shell?.clientHeight ?? 0);
+  updatePanePosition(props.paneId, {
+    editorMode: "wysiwyg",
+    editorAnchor: anchor,
+    editorHead: head,
+    markdownAnchor: previous?.markdownAnchor ?? 0,
+    markdownHead: previous?.markdownHead ?? previous?.markdownAnchor ?? 0,
+    markdownLine: previous?.markdownLine ?? 1,
+    markdownColumn: previous?.markdownColumn ?? 0,
+    markdownLineText: previous?.markdownLineText ?? "",
+    ...scroll,
+    updatedAt: Date.now(),
+  });
+}
+
+function captureExactWysiwygPosition(view: EditorView, markdown: string) {
+  const shell = editorShell.value;
+  const { anchor, head } = view.state.selection;
+  updatePanePosition(props.paneId, {
+    ...buildEditorPositionSnapshot({
       editorMode: "wysiwyg",
       markdown,
       markdownAnchor: docPosToMarkdownOffset(view.state, anchor, markdown),
@@ -3779,7 +3940,9 @@ function captureWysiwygPosition(view = editor.value?.view) {
       scrollHeight: shell?.scrollHeight ?? 0,
       clientHeight: shell?.clientHeight ?? 0,
     }),
-  );
+    editorAnchor: anchor,
+    editorHead: head,
+  });
 }
 
 function schedulePendingWysiwygPositionRestore() {
@@ -3801,8 +3964,12 @@ function restoreWysiwygPosition(position: any) {
   window.requestAnimationFrame(() => {
     const view = editor.value?.view;
     if (!view) return;
-    const docPos = markdownOffsetToDocPos(view.state, position.markdownAnchor, paneContent.value);
-    const headPos = markdownOffsetToDocPos(view.state, position.markdownHead, paneContent.value);
+    const docPos = typeof position.editorAnchor === "number"
+      ? clampDocPos(position.editorAnchor, view.state.doc.content.size)
+      : markdownOffsetToDocPos(view.state, position.markdownAnchor, paneContent.value);
+    const headPos = typeof position.editorHead === "number"
+      ? clampDocPos(position.editorHead, view.state.doc.content.size)
+      : markdownOffsetToDocPos(view.state, position.markdownHead, paneContent.value);
     try {
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, clampDocPos(docPos, view.state.doc.content.size), clampDocPos(headPos, view.state.doc.content.size))));
     } catch {
@@ -4020,19 +4187,56 @@ function handleFindCommand(event: CustomEvent<string>) {
 function refreshWysiwygFind() {
   const view = editor.value?.view;
   if (!view) return;
-  const matches = collectWysiwygFindMatches(view.state);
+  const options = findOptions();
+  view.dispatch(setWysiwygFindQuery(view.state, findReplaceStore.open && findReplaceStore.query
+    ? { search: findReplaceStore.query, ...options }
+    : null));
+  syncWysiwygFindState(view.state);
+}
+
+function syncWysiwygFindState(state: any) {
+  const matches = getWysiwygFindState(state);
+  cachedWysiwygFind = { items: matches.items, error: matches.error };
   const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
   setFindResult(matches.items.length, current, matches.error);
-  view.dispatch(view.state.tr.setMeta("lightmarkFindRefresh", Date.now()));
+}
+
+function transactionChangesMathDependencies(transaction: any) {
+  let changed = false;
+  transaction.mapping.maps.forEach((stepMap: any, index: number) => {
+    if (changed) return;
+    const before = transaction.docs[index];
+    const after = transaction.docs[index + 1] ?? transaction.doc;
+    stepMap.forEach((oldFrom: number, oldTo: number, newFrom: number, newTo: number) => {
+      if (changed) return;
+      changed = rangeContainsMathMacro(before, oldFrom, oldTo) || rangeContainsMathMacro(after, newFrom, newTo);
+    });
+  });
+  return changed;
+}
+
+function rangeContainsMathMacro(doc: any, rawFrom: number, rawTo: number) {
+  if (!doc) return false;
+  const from = Math.max(0, Math.min(doc.content.size, rawFrom));
+  const to = Math.max(from, Math.min(doc.content.size, rawTo));
+  let found = false;
+  doc.nodesBetween(Math.max(0, from - 1), Math.min(doc.content.size, to + 1), (node: any) => {
+    if ((node.type?.name === "inlineMath" || node.type?.name === "blockMath") && extractMathMacroDefinitions(String(node.attrs.tex || "")).length > 0) {
+      found = true;
+      return false;
+    }
+    return !found;
+  });
+  return found;
 }
 
 function navigateWysiwygFind(delta: 1 | -1) {
   const view = editor.value?.view;
   if (!view) return;
-  const matches = collectWysiwygFindMatches(view.state);
+  const matches = getWysiwygFindState(view.state);
   if (matches.error || matches.items.length === 0) {
     setFindResult(0, -1, matches.error);
-    view.dispatch(view.state.tr.setMeta("lightmarkFindRefresh", Date.now()));
+    view.dispatch(refreshWysiwygFindDecorations(view.state));
     return;
   }
 
@@ -4048,7 +4252,7 @@ function navigateWysiwygFind(delta: 1 | -1) {
 function replaceCurrentWysiwygFind() {
   const view = editor.value?.view;
   if (!view) return;
-  const matches = collectWysiwygFindMatches(view.state);
+  const matches = getWysiwygFindState(view.state);
   const current = normalizeMatchIndex(findReplaceStore.currentIndex, matches.items.length);
   const match = matches.items[current];
   if (!match || matches.error) {
@@ -4057,13 +4261,12 @@ function replaceCurrentWysiwygFind() {
   }
   const replacement = replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex);
   view.dispatch(view.state.tr.insertText(replacement, match.docFrom, match.docTo).scrollIntoView());
-  window.setTimeout(refreshWysiwygFind, 0);
 }
 
 function replaceAllWysiwygFind() {
   const view = editor.value?.view;
   if (!view) return;
-  const matches = collectWysiwygFindMatches(view.state);
+  const matches = getWysiwygFindState(view.state);
   if (matches.error || matches.items.length === 0) {
     setFindResult(0, -1, matches.error);
     return;
@@ -4074,62 +4277,6 @@ function replaceAllWysiwygFind() {
   }
   view.dispatch(tr.scrollIntoView());
   appStore.statusMessage = `已替换 ${matches.items.length} 处`;
-  window.setTimeout(refreshWysiwygFind, 0);
-}
-
-function collectWysiwygFindMatches(state: any): { items: EditorFindMatch[]; error: string } {
-  if (!findReplaceStore.open || !findReplaceStore.query) return { items: [], error: "" };
-  const items: EditorFindMatch[] = [];
-  let error = "";
-
-  state.doc.descendants((node: any, pos: number) => {
-    if (!node.isTextblock) return true;
-    const block = flattenTextblock(node, pos);
-    if (!block.text) return false;
-    const result = findTextMatches(block.text, findReplaceStore.query, findOptions());
-    if (result.error) {
-      error = result.error;
-      return false;
-    }
-    result.matches.forEach((match) => {
-      const docFrom = textOffsetToDocPos(block.segments, match.from);
-      const docTo = textOffsetToDocPos(block.segments, match.to);
-      if (docFrom !== null && docTo !== null && docFrom < docTo) {
-        items.push({ ...match, docFrom, docTo });
-      }
-    });
-    return false;
-  });
-
-  return { items, error };
-}
-
-function flattenTextblock(node: any, pos: number) {
-  const segments: Array<{ from: number; text: string; start: number; end: number }> = [];
-  let text = "";
-  node.descendants((child: any, childPos: number) => {
-    if (!child.isText || !child.text) return true;
-    const start = text.length;
-    text += child.text;
-    segments.push({
-      from: pos + 1 + childPos,
-      text: child.text,
-      start,
-      end: text.length,
-    });
-    return false;
-  });
-  return { text, segments };
-}
-
-function textOffsetToDocPos(segments: Array<{ from: number; text: string; start: number; end: number }>, offset: number) {
-  for (const segment of segments) {
-    if (offset >= segment.start && offset <= segment.end) {
-      return segment.from + offset - segment.start;
-    }
-  }
-  const last = segments[segments.length - 1];
-  return last && offset === last.end ? last.from + last.text.length : null;
 }
 
 function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetail>) {
@@ -4689,7 +4836,7 @@ function copyCurrentTable() {
 function copyFormattedTableSource() {
   const table = getCurrentTableElement();
   if (!table) return;
-  void writeClipboard(formatMarkdownTable(table));
+  void writeClipboard(formatMarkdownTableFromDom(table, serializeTableCell));
 }
 
 function getCurrentTableElement() {
@@ -4713,41 +4860,6 @@ function getCurrentTableElement() {
     }
   }
   return null;
-}
-
-function formatMarkdownTable(table: HTMLTableElement) {
-  const rows = Array.from(table.rows).map((row) =>
-    Array.from(row.cells).map(serializeTableCell),
-  );
-  if (!rows.length) return "";
-  const columnCount = Math.max(...rows.map((row) => row.length));
-  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, columnCount - row.length)).fill("")]);
-  const widths = Array.from({ length: columnCount }, (_item, index) =>
-    Math.max(3, ...normalized.map((row) => row[index].length)),
-  );
-  const renderRow = (row: string[]) => `| ${row.map((cell, index) => cell.padEnd(widths[index], " ")).join(" | ")} |`;
-  const alignments = tableColumnAlignments(table, columnCount);
-  const divider = widths.map((width, index) => markdownTableDividerForAlign(alignments[index], width));
-  return [renderRow(normalized[0]), renderRow(divider), ...normalized.slice(1).map(renderRow)].join("\n");
-}
-
-function tableColumnAlignments(table: HTMLTableElement, columnCount: number) {
-  return Array.from({ length: columnCount }, (_item, columnIndex) => {
-    for (const row of Array.from(table.rows)) {
-      const cell = row.cells[columnIndex];
-      const align = cell ? parseTableCellAlign(cell) : null;
-      if (align) return align;
-    }
-    return null;
-  });
-}
-
-function markdownTableDividerForAlign(align: "left" | "center" | "right" | null, width = 3) {
-  const dashes = "-".repeat(Math.max(3, width));
-  if (align === "left") return `:${dashes}`;
-  if (align === "center") return `:${dashes}:`;
-  if (align === "right") return `${dashes}:`;
-  return dashes;
 }
 
 function moveCurrentTableRow(direction: -1 | 1) {
@@ -5212,27 +5324,19 @@ function createHeadingDecorations(state: any) {
 }
 
 function createOutlineHeadingDecorations(state: any) {
+  const derived = getWysiwygDerivedState(state);
+  const collapsedKeys = getPaneTab(props.paneId)?.collapsedHeadingKeys ?? [];
+  const collapsedSignature = collapsedKeys.join("\u0000");
+  if (
+    outlineDecorationCache?.state === derived &&
+    outlineDecorationCache.epoch === outlineDecorationEpoch &&
+    outlineDecorationCache.collapsed === collapsedSignature
+  ) return outlineDecorationCache.value;
   const decorations: any[] = [];
-  const blocks: Array<{ node: any; pos: number }> = [];
-  const headings: Array<{ node: any; pos: number; blockIndex: number }> = [];
-  state.doc.forEach((node: any, pos: number, blockIndex: number) => {
-    blocks.push({ node, pos });
-    if (node.type.name === "heading") headings.push({ node, pos, blockIndex });
-  });
-  const persistedOutline = getPaneStructuredOutline(props.paneId);
-  const structured = structureOutline(
-    headings.map((heading, index) => {
-      const text = sanitizeOutlineText(heading.node.textContent);
-      return {
-        id: persistedOutline[index]?.id ?? `heading-${index}-${slugify(text)}`,
-        text,
-        level: heading.node.attrs.level,
-        line: persistedOutline[index]?.line ?? index,
-      };
-    }),
-    Math.max(1, paneContent.value.split(/\r?\n/).length),
-  );
-  const collapsed = new Set(getPaneTab(props.paneId)?.collapsedHeadingKeys ?? []);
+  const blocks = derived.blocks;
+  const headings = derived.headings;
+  const structured = wysiwygStructuredOutline(state);
+  const collapsed = new Set(collapsedKeys);
   const hiddenBlockPositions = new Set<number>();
 
   headings.forEach((heading, index) => {
@@ -5288,7 +5392,38 @@ function createOutlineHeadingDecorations(state: any) {
       }),
     );
   }
-  return decorations;
+  const value = decorations as Decoration[];
+  outlineDecorationCache = { state: derived, epoch: outlineDecorationEpoch, collapsed: collapsedSignature, value };
+  return value;
+}
+
+function currentCollapsedHeadingSignature() {
+  return (getPaneTab(props.paneId)?.collapsedHeadingKeys ?? []).join("\u0000");
+}
+
+function buildOutlineHeadingDecorationState(state: any) {
+  const collapsed = currentCollapsedHeadingSignature();
+  const decorations = createOutlineHeadingDecorations(state);
+  return {
+    decorations: decorations.length ? DecorationSet.create(state.doc, decorations) : DecorationSet.empty,
+    epoch: outlineDecorationEpoch,
+    collapsed,
+  };
+}
+
+function canMapOutlineHeadingDecorations(oldState: any, newState: any) {
+  const previous = getWysiwygDerivedState(oldState).headings;
+  const next = getWysiwygDerivedState(newState).headings;
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index].node !== next[index].node) return false;
+  }
+  return true;
+}
+
+function wysiwygStructuredOutline(state: any) {
+  const derived = getWysiwygDerivedState(state);
+  return derived.outline;
 }
 
 function createWysiwygHeadingFoldButton(item: StructuredOutlineItem, collapsed: boolean) {
@@ -5318,14 +5453,6 @@ function createWysiwygHeadingFoldSummary(hiddenBlocks: number) {
   summary.contentEditable = "false";
   summary.textContent = `… ${hiddenBlocks} 个块`;
   return summary;
-}
-
-function sanitizeOutlineText(value: string) {
-  return value.replace(/[#*_`[\]()]/g, "").trim();
-}
-
-function slugify(value: string) {
-  return value.toLowerCase().trim().replace(/[^\w\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "");
 }
 
 function getEventElement(event: Event) {
@@ -5631,6 +5758,8 @@ function convertInlineMarkdownSyntax(state: any, options: { onlySelectionBlock?:
 
   let tr = state.tr;
   let converted = false;
+  const selectionHasParentBlock = state.selection.$from.depth > 0;
+  if (onlySelectionBlock && !selectionHasParentBlock) return null;
   const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
   const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
 
@@ -5692,6 +5821,8 @@ function convertInlineCodeSyntax(state: any, options: { onlySelectionBlock?: boo
   let tr = state.tr;
   let converted = false;
   const inlineCodePattern = /`([^`\n]+)`/g;
+  const selectionHasParentBlock = state.selection.$from.depth > 0;
+  if (onlySelectionBlock && !selectionHasParentBlock) return null;
   const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
   const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
 
@@ -6074,12 +6205,13 @@ function convertMarkdownHeading(
   return converted ? tr : null;
 }
 
-function editHeadingAsMarkdown(view: any, element: HTMLElement) {
+function editHeadingAsMarkdown(view: any, element: HTMLElement, event?: MouseEvent) {
   const pos = view.posAtDOM(element, 0);
-  const node = view.state.doc.nodeAt(pos);
-  if (!node || node.type.name !== "heading") return;
-
-  let tr = view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize - 1));
+  const clicked = event
+    ? view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos
+    : undefined;
+  const tr = exposeHeadingMarkdown(view.state, pos, clicked);
+  if (!tr) return;
   view.dispatch(tr.scrollIntoView());
   view.focus();
 }

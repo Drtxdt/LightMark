@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "capturedOn": "2026-08-25",
+  "environment": "Windows WebView2 release, 1200x780",
+  "allowance": {
+    "percent": 5,
+    "minimumBytes": 51200
+  },
+  "rawJsBytes": {
+    "shell": 568097,
+    "wysiwygReady": 2609887,
+    "sourceReadyAfterModeLoad": 2882092,
+    "sourceWorkerSettledAfterModeLoad": 3188740
+  },
+  "resourceCounts": {
+    "wysiwygReady": 6,
+    "sourceReadyAfterModeLoad": 7,
+    "sourceWorkerSettledAfterModeLoad": 8
+  },
+  "entryGzipBytes": 183161
+}

@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { appStore } from "../../stores/appStore";
+import { onMounted } from "vue";
+import { appStore, flushDocumentSnapshot } from "../../stores/appStore";
 import { getWordStats } from "../../plugins/wordCountPlugin";
 
 const stats = computed(() => getWordStats(appStore.currentContent));
+onMounted(() => {
+  if (appStore.activeTabId) void flushDocumentSnapshot(appStore.activeTabId, "externalDiff");
+});
 </script>
 
 <template>

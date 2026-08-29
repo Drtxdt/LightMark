@@ -18,6 +18,47 @@ try {
     serializeMathToken,
     validateMathToken,
   } = await import(pathToFileURL(compiled).href);
+  const compiledIncremental = compileTypeScriptModuleGraph(
+    path.resolve("src/editor/mathDiagnosticsIncremental.ts"),
+    tempDir,
+  );
+  const { IncrementalMathDiagnostics } = await import(pathToFileURL(compiledIncremental).href);
+
+  const publicEvaluation = (source) => {
+    const evaluation = evaluateMarkdownMath(source, { numberingMode: "none" });
+    return {
+      diagnostics: evaluation.diagnostics.map(({ from, to, message }) => ({ from, to, message })),
+      references: evaluation.references.map(({ from, to, key, targetId }) => ({ from, to, key, targetId })),
+      equations: evaluation.equations.map(({ id, tokenIndex, line, display }) => ({ id, tokenIndex, line, display })),
+    };
+  };
+  const incremental = new IncrementalMathDiagnostics();
+  let incrementalSource = "intro\nplain $x$ text\n$$\ny^2\n$$\noutro";
+  incremental.reset(incrementalSource, "none");
+  assert.equal(incremental.evaluate().strategy, "full");
+
+  incremental.applyChanges([{ from: 0, to: 0, insert: "extra\n" }], "none");
+  incrementalSource = `extra\n${incrementalSource}`;
+  const mappedMath = incremental.evaluate();
+  assert.equal(mappedMath.strategy, "mapped", "plain prose edits should only map cached math ranges");
+  assert.deepEqual(
+    { diagnostics: mappedMath.diagnostics, references: mappedMath.references, equations: mappedMath.equations },
+    publicEvaluation(incrementalSource),
+  );
+
+  const formulaInsert = incrementalSource.indexOf("$x$") + 2;
+  incremental.applyChanges([{ from: formulaInsert, to: formulaInsert, insert: "+1" }], "none");
+  incrementalSource = `${incrementalSource.slice(0, formulaInsert)}+1${incrementalSource.slice(formulaInsert)}`;
+  const localMath = incremental.evaluate();
+  assert.equal(localMath.strategy, "formula", "an ordinary formula edit should only evaluate that formula");
+  assert.deepEqual(
+    { diagnostics: localMath.diagnostics, references: localMath.references, equations: localMath.equations },
+    publicEvaluation(incrementalSource),
+  );
+
+  incremental.applyChanges([{ from: 0, to: 0, insert: "$" }], "none");
+  incrementalSource = `$${incrementalSource}`;
+  assert.equal(incremental.evaluate().strategy, "full", "delimiter changes outside known formulas require a full rebuild");
 
   const inlineCases = [
     ["$x$", ["x"]],
@@ -267,7 +308,12 @@ try {
   assert.match(wysiwygSource, /LIGHTMARK_TURNDOWN_HTML_BLOCK/);
   assert.match(wysiwygSource, /InlineMath/);
   assert.match(sourceEditor, /cm-math-error/);
-  assert.match(sourceEditor, /evaluateMarkdownMath/);
+  assert.match(sourceEditor, /mathDiagnostics\.worker\.ts/);
+  const mathWorkerSource = fs.readFileSync(path.resolve("src/workers/mathDiagnostics.worker.ts"), "utf8");
+  assert.match(mathWorkerSource, /IncrementalMathDiagnostics/);
+  const incrementalMathSource = fs.readFileSync(path.resolve("src/editor/mathDiagnosticsIncremental.ts"), "utf8");
+  assert.match(incrementalMathSource, /strategy: "full" \| "mapped" \| "formula"/);
+  assert.match(incrementalMathSource, /evaluateMarkdownMath\(fragment/);
   const mathNodeSource = fs.readFileSync(path.resolve("src/extensions/MathNodes.ts"), "utf8");
   const suggestSource = fs.readFileSync(path.resolve("src/extensions/LatexSuggest.ts"), "utf8");
   const exportSource = fs.readFileSync(path.resolve("src/utils/export.ts"), "utf8");
@@ -278,6 +324,7 @@ try {
   assert.match(mathNodeSource, /math-tools-block-editing/);
   assert.match(mathNodeSource, /math-tools-inline-editing/);
   assert.match(mathNodeSource, /--math-block-editor-bottom/);
+  assert.doesNotMatch(mathNodeSource, /editor\.on\("transaction"/);
   assert.match(suggestSource, /getAdditionalSuggestions/);
   assert.match(suggestSource, /\\\\ce/);
   assert.match(exportSource, /preparePandocMath/);

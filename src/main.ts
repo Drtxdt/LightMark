@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App.vue";
 import "./styles/index.css";
+import { recordStartupStage } from "./editor/startupMetrics";
 
 async function bootstrap() {
   await invoke("trace_headless_frontend", { stage: "bootstrap" }).catch(() => {});
@@ -19,6 +20,9 @@ async function bootstrap() {
     await runHeadlessExport(headless);
     return;
   }
+  // Capture the shell boundary before mounting starts the selected editor's
+  // async component request. Editor readiness is recorded by each editor.
+  recordStartupStage("shell");
   createApp(App).mount("#app");
 }
 

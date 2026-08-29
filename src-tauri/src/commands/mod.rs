@@ -5,3 +5,4 @@ pub mod export;
 pub mod file;
 pub mod models;
 pub mod window;
+pub mod workspace_index;

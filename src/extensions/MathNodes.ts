@@ -104,39 +104,26 @@ export const InlineMath = Node.create({
       new Plugin({
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-
+          const $head = newState.selection.$head;
+          if (!$head.parent.isTextblock || $head.parent.type.name === "codeBlock") return null;
+          const node = $head.parent;
+          const pos = $head.before();
           let tr = newState.tr;
-          let converted = false;
-
-          newState.doc.descendants((node, pos) => {
-            if (converted) return false;
-            if (!node.isTextblock) return true;
-            if (node.type.name === "codeBlock") return false;
-
-            const text = node.textContent;
-            const codeRanges = getCodeMarkRanges(node);
-            const match = findInlineMathMatch(text, (from, to) => !rangeOverlapsCodeMark(codeRanges, from, to));
-            if (!match) return true;
-
-            const tex = match.tex;
-            if (!tex.trim()) return true;
-
-            const from = pos + 1 + match.from;
-            const to = pos + 1 + match.to;
-            tr = tr.replaceWith(from, to, this.type.create({
-              tex,
-              editing: true,
-              delimiter: match.delimiter,
-              raw: match.raw,
-              originalTex: tex,
-              displayMode: match.displayMode,
-            }));
-            tr = tr.setSelection(NodeSelection.create(tr.doc, from));
-            converted = true;
-            return false;
-          });
-
-          return converted ? tr : null;
+          const text = node.textContent;
+          const codeRanges = getCodeMarkRanges(node);
+          const match = findInlineMathMatch(text, (from, to) => !rangeOverlapsCodeMark(codeRanges, from, to));
+          if (!match?.tex.trim()) return null;
+          const from = pos + 1 + match.from;
+          const to = pos + 1 + match.to;
+          tr = tr.replaceWith(from, to, this.type.create({
+            tex: match.tex,
+            editing: true,
+            delimiter: match.delimiter,
+            raw: match.raw,
+            originalTex: match.tex,
+            displayMode: match.displayMode,
+          }));
+          return tr.setSelection(NodeSelection.create(tr.doc, from));
         },
       }),
     ];
@@ -268,6 +255,47 @@ type EditorMathEvaluation = {
 };
 
 const editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
+const visibleMathCallbacks = new WeakMap<Element, () => void>();
+const mathRefreshCallbacks = new Set<(kind: "settings" | "tools") => void>();
+let mathVisibilityObserver: IntersectionObserver | null = null;
+let mathGlobalListenersInstalled = false;
+
+function observeMathVisibility(element: Element, callback: () => void) {
+  if (typeof IntersectionObserver === "undefined") {
+    callback();
+    return () => {};
+  }
+  mathVisibilityObserver ??= new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const callback = visibleMathCallbacks.get(entry.target);
+      if (!callback) continue;
+      visibleMathCallbacks.delete(entry.target);
+      mathVisibilityObserver?.unobserve(entry.target);
+      callback();
+    }
+  }, { rootMargin: "300px 0px" });
+  visibleMathCallbacks.set(element, callback);
+  mathVisibilityObserver.observe(element);
+  return () => {
+    visibleMathCallbacks.delete(element);
+    mathVisibilityObserver?.unobserve(element);
+  };
+}
+
+function subscribeMathRefresh(callback: (kind: "settings" | "tools") => void) {
+  if (!mathGlobalListenersInstalled) {
+    window.addEventListener("lightmark:math-settings-changed", () => {
+      for (const listener of mathRefreshCallbacks) listener("settings");
+    });
+    window.addEventListener("lightmark:refresh-math", () => {
+      for (const listener of mathRefreshCallbacks) listener("tools");
+    });
+    mathGlobalListenersInstalled = true;
+  }
+  mathRefreshCallbacks.add(callback);
+  return () => mathRefreshCallbacks.delete(callback);
+}
 
 function evaluateEditorMath(editor: any): EditorMathEvaluation {
   const doc = editor.view.state.doc as object;
@@ -358,6 +386,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   let originalTex = attrs.originalTex ?? tex;
   let displayMode = Boolean(attrs.displayMode);
   let editing = Boolean(attrs.editing);
+  let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
@@ -384,6 +413,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   };
 
   const renderDisplay = () => {
+    displayRendered = true;
     suggest?.destroy();
     suggest = null;
     dom.innerHTML = "";
@@ -396,6 +426,11 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
+  };
+
+  const renderPlaceholder = () => {
+    dom.className = "math-node math-node-inline math-node-pending";
+    dom.textContent = tex;
   };
 
   const renderEditor = () => {
@@ -525,21 +560,14 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     renderEditor();
   });
 
-  editing ? renderEditor() : renderDisplay();
-  const refreshFromDocument = ({ transaction }: { transaction: { docChanged?: boolean } }) => {
-    if (!transaction.docChanged || editing) return;
-    window.queueMicrotask(renderDisplay);
-  };
-  editor.on?.("transaction", refreshFromDocument);
-  const refreshFromMathSettings = () => {
+  editing ? renderEditor() : renderPlaceholder();
+  const stopVisibility = observeMathVisibility(dom, () => {
     if (!editing) renderDisplay();
-  };
-  window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
-  const refreshFromMathTools = () => {
-    editorMathEvaluationCache.delete(editor.view.state.doc);
-    if (!editing) renderDisplay();
-  };
-  window.addEventListener("lightmark:refresh-math", refreshFromMathTools);
+  });
+  const stopRefresh = subscribeMathRefresh((kind) => {
+    if (kind === "tools") editorMathEvaluationCache.delete(editor.view.state.doc);
+    if (!editing && displayRendered) renderDisplay();
+  });
 
   return {
     dom,
@@ -553,7 +581,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       displayMode = Boolean(nextNode.attrs.displayMode);
       if (editing && nextEditing && dom.querySelector(".math-inline-source-editor")) return true;
       editing = nextEditing;
-      editing ? renderEditor() : renderDisplay();
+      editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
     },
     selectNode() {
@@ -570,9 +598,8 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     },
     destroy() {
       suggest?.destroy();
-      editor.off?.("transaction", refreshFromDocument);
-      window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
-      window.removeEventListener("lightmark:refresh-math", refreshFromMathTools);
+      stopVisibility();
+      stopRefresh();
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-inline-source-editor,.math-suggest,.math-tools")),
@@ -589,6 +616,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   let raw = attrs.raw || "";
   let originalTex = attrs.originalTex ?? tex;
   let editing = attrs.editing || !tex;
+  let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
@@ -623,6 +651,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   };
 
   const renderDisplay = () => {
+    displayRendered = true;
     suggest?.destroy();
     suggest = null;
     dom.innerHTML = "";
@@ -635,6 +664,11 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       evaluation: evaluateEditorMathAt(editor, getPos),
     });
     dom.appendChild(rendered);
+  };
+
+  const renderPlaceholder = () => {
+    dom.className = "math-node math-node-block math-node-pending";
+    dom.textContent = tex;
   };
 
   const renderEditor = () => {
@@ -775,21 +809,14 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     renderEditor();
   });
 
-  editing ? renderEditor() : renderDisplay();
-  const refreshFromDocument = ({ transaction }: { transaction: { docChanged?: boolean } }) => {
-    if (!transaction.docChanged || editing) return;
-    window.queueMicrotask(renderDisplay);
-  };
-  editor.on?.("transaction", refreshFromDocument);
-  const refreshFromMathSettings = () => {
-    if (!editing) renderDisplay();
-  };
-  window.addEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
-  const refreshFromMathTools = () => {
-    editorMathEvaluationCache.delete(editor.view.state.doc);
-    if (!editing) renderDisplay();
-  };
-  window.addEventListener("lightmark:refresh-math", refreshFromMathTools);
+  editing ? renderEditor() : renderPlaceholder();
+  const stopVisibility = observeMathVisibility(dom, () => {
+    if (!editing && tex.trim()) renderDisplay();
+  });
+  const stopRefresh = subscribeMathRefresh((kind) => {
+    if (kind === "tools") editorMathEvaluationCache.delete(editor.view.state.doc);
+    if (!editing && displayRendered && tex.trim()) renderDisplay();
+  });
 
   return {
     dom,
@@ -802,7 +829,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       originalTex = nextNode.attrs.originalTex ?? tex;
       if (editing && nextEditing && dom.querySelector(".math-block-editor")) return true;
       editing = nextEditing;
-      editing ? renderEditor() : renderDisplay();
+      editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
     },
     selectNode() {
@@ -819,9 +846,8 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     },
     destroy() {
       suggest?.destroy();
-      editor.off?.("transaction", refreshFromDocument);
-      window.removeEventListener("lightmark:math-settings-changed", refreshFromMathSettings);
-      window.removeEventListener("lightmark:refresh-math", refreshFromMathTools);
+      stopVisibility();
+      stopRefresh();
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLElement && Boolean(event.target.closest(".math-block-editor,.math-suggest,.math-tools")),

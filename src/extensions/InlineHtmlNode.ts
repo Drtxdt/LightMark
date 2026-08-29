@@ -69,30 +69,19 @@ export const InlineHtmlNode = Node.create({
       new Plugin({
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-
+          const $head = newState.selection.$head;
+          if (!$head.parent.isTextblock || $head.parent.type.name === "codeBlock" || textblockHasCodeMark($head.parent)) return null;
+          const node = $head.parent;
+          const pos = $head.before();
           let tr = newState.tr;
-          let converted = false;
-
-          newState.doc.descendants((node, pos) => {
-            if (converted) return false;
-            if (!node.isTextblock) return true;
-            if (node.type.name === "codeBlock" || textblockHasCodeMark(node)) return false;
-
-            const match = findInlineHtmlMatch(node.textContent);
-            if (!match) return true;
-
-            const html = sanitizeInlineHtmlSource(match.html);
-            if (!html.includes("<")) return true;
-
-            const from = pos + 1 + match.from;
-            const to = pos + 1 + match.to;
-            tr = tr.replaceWith(from, to, this.type.create({ html, editing: false }));
-            tr = tr.setSelection(NodeSelection.create(tr.doc, from));
-            converted = true;
-            return false;
-          });
-
-          return converted ? tr : null;
+          const match = findInlineHtmlMatch(node.textContent);
+          if (!match) return null;
+          const html = sanitizeInlineHtmlSource(match.html);
+          if (!html.includes("<")) return null;
+          const from = pos + 1 + match.from;
+          const to = pos + 1 + match.to;
+          tr = tr.replaceWith(from, to, this.type.create({ html, editing: false }));
+          return tr.setSelection(NodeSelection.create(tr.doc, from));
         },
       }),
     ];
@@ -158,28 +147,17 @@ export const RawHtmlNode = Node.create({
       new Plugin({
         appendTransaction: (transactions, _oldState, newState) => {
           if (!transactions.some((transaction) => transaction.docChanged)) return null;
-
+          const $head = newState.selection.$head;
+          if (!$head.parent.isTextblock || $head.parent.type.name === "codeBlock" || textblockHasCodeMark($head.parent)) return null;
+          const node = $head.parent;
+          const pos = $head.before();
           let tr = newState.tr;
-          let converted = false;
-
-          newState.doc.descendants((node, pos) => {
-            if (converted) return false;
-            if (!node.isTextblock) return true;
-            if (node.type.name === "codeBlock" || textblockHasCodeMark(node)) return false;
-
-            const match = findRawHtmlMatch(node.textContent);
-            if (!match) return true;
-
-            const html = match.html;
-            const from = pos + 1 + match.from;
-            const to = pos + 1 + match.to;
-            tr = tr.replaceWith(from, to, this.type.create({ html, kind: rawHtmlKind(html) }));
-            tr = tr.setSelection(NodeSelection.create(tr.doc, from));
-            converted = true;
-            return false;
-          });
-
-          return converted ? tr : null;
+          const match = findRawHtmlMatch(node.textContent);
+          if (!match) return null;
+          const from = pos + 1 + match.from;
+          const to = pos + 1 + match.to;
+          tr = tr.replaceWith(from, to, this.type.create({ html: match.html, kind: rawHtmlKind(match.html) }));
+          return tr.setSelection(NodeSelection.create(tr.doc, from));
         },
       }),
     ];

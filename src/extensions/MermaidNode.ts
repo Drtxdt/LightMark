@@ -1,6 +1,5 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import { Plugin, TextSelection } from "@tiptap/pm/state";
-import mermaid from "mermaid";
 
 type MermaidAttrs = {
   code: string;
@@ -9,7 +8,7 @@ type MermaidAttrs = {
 
 let mermaidId = 0;
 
-configureMermaid();
+let mermaidModulePromise: Promise<typeof import("mermaid")["default"]> | null = null;
 
 export const MermaidNode = Node.create({
   name: "mermaidDiagram",
@@ -94,6 +93,8 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
 
   let code = attrs.code || "";
   let editing = Boolean(attrs.editing) || !code.trim();
+  let previewTimer = 0;
+  let previewVersion = 0;
 
   const updateAttrs = (next: Partial<MermaidAttrs>) => {
     if (typeof getPos !== "function") return;
@@ -124,7 +125,7 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     dom.appendChild(body);
 
     try {
-      configureMermaid();
+      const mermaid = await getMermaid();
       const id = `lightmark-mermaid-${++mermaidId}`;
       const result = await mermaid.render(id, code);
       body.innerHTML = result.svg;
@@ -161,7 +162,11 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
       code = textarea.value;
       textarea.rows = Math.max(4, code.split(/\r?\n/).length);
       updateAttrs({ code, editing: true });
-      void renderMermaid(preview, code);
+      const version = ++previewVersion;
+      window.clearTimeout(previewTimer);
+      previewTimer = window.setTimeout(() => {
+        if (version === previewVersion) void renderMermaid(preview, code, version, () => previewVersion);
+      }, 150);
     };
 
     textarea.addEventListener("input", refresh);
@@ -186,7 +191,7 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     });
 
     dom.append(open, textarea, close, preview);
-    void renderMermaid(preview, code);
+    void renderMermaid(preview, code, previewVersion, () => previewVersion);
     requestAnimationFrame(() => textarea.focus());
   };
 
@@ -218,10 +223,14 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     },
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
+    destroy() {
+      window.clearTimeout(previewTimer);
+      previewVersion += 1;
+    },
   };
 }
 
-async function renderMermaid(target: HTMLElement, code: string) {
+async function renderMermaid(target: HTMLElement, code: string, version = 0, currentVersion = () => version) {
   target.innerHTML = "";
   if (!code.trim()) {
     target.textContent = "Mermaid 预览";
@@ -231,11 +240,13 @@ async function renderMermaid(target: HTMLElement, code: string) {
 
   target.classList.remove("mermaid-node-empty");
   try {
-    configureMermaid();
+    const mermaid = await getMermaid();
     const id = `lightmark-mermaid-${++mermaidId}`;
     const result = await mermaid.render(id, code);
+    if (version !== currentVersion()) return;
     target.innerHTML = result.svg;
   } catch {
+    if (version !== currentVersion()) return;
     const pre = document.createElement("pre");
     pre.className = "mermaid-node-error";
     pre.textContent = code;
@@ -243,12 +254,24 @@ async function renderMermaid(target: HTMLElement, code: string) {
   }
 }
 
-function configureMermaid() {
+async function getMermaid() {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import("mermaid").then(({ default: mermaid }) => {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
+      });
+      return mermaid;
+    });
+  }
+  const mermaid = await mermaidModulePromise;
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "strict",
     theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
   });
+  return mermaid;
 }
 
 function setBlockSelectionAfter(editor: any, getPos: NodeViewPosition) {

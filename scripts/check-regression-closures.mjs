@@ -20,11 +20,15 @@ assert.match(wysiwyg, /wysiwygFormatHistory\.undo\.push/);
 assert.match(wysiwyg, /before:\s*event\.detail\.source/);
 assert.match(wysiwyg, /setMeta\("addToHistory", false\)/);
 assert.match(wysiwyg, /const markdown = paneContent\.value;/);
-assert.match(
-  wysiwyg,
-  /preserveMarkdownTerminalNewlines\(editorHtmlToMarkdown\(editor\.getHTML\(\)\), previousMarkdown\)/,
-  "WYSIWYG updates must preserve the source document's terminal newlines",
-);
+const wysiwygUpdate = wysiwyg.match(/onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/)?.[0] ?? "";
+assert.match(wysiwyg, /registerDocumentSession/);
+assert.match(wysiwyg, /blocks:\s*\(\) => \{[\s\S]*?currentEditor\.state\.doc\.forEach/);
+assert.match(wysiwyg, /serializeBlock:\s*\(block\)[\s\S]*?DOMSerializer\.fromSchema/);
+assert.match(wysiwyg, /convertBlock:\s*\(html\) => editorHtmlToMarkdown\(html\)/);
+assert.match(wysiwyg, /oracle:\s*\(previousMarkdown\)[\s\S]*?currentEditor\.getHTML\(\)/);
+assert.doesNotMatch(wysiwygUpdate, /getHTML|editorHtmlToMarkdown|setPaneContent/,
+  "WYSIWYG input updates must not serialize or copy the full document");
+assert.match(wysiwygUpdate, /markDocumentChanged/);
 assert.doesNotMatch(
   wysiwyg.match(/function handleModeCursorCapture[\s\S]*?\n}/)?.[0] ?? "",
   /setPaneContent/,

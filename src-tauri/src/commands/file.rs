@@ -726,6 +726,7 @@ pub fn watch_markdown_workspace(app: AppHandle, path: String) -> Result<(), Stri
             if paths.is_empty() {
                 return;
             }
+            super::workspace_index::queue_workspace_paths(paths.clone());
             let _ = app_handle.emit(WORKSPACE_WATCH_EVENT, WorkspaceWatchEvent { paths });
         },
         Config::default(),

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, defineAsyncComponent, ref, watch } from "vue";
 import { getPaneDocumentMode, getPaneEditorMode, getPaneTab } from "../../stores/appStore";
-import LargeMarkdownEditor from "./LargeMarkdownEditor.vue";
-import SourceEditor from "./SourceEditor.vue";
-import WysiwygEditor from "./WysiwygEditor.vue";
+const LargeMarkdownEditor = defineAsyncComponent(() => import("./LargeMarkdownEditor.vue"));
+const SourceEditor = defineAsyncComponent(() => import("./SourceEditor.vue"));
+const WysiwygEditor = defineAsyncComponent(() => import("./WysiwygEditor.vue"));
 import type { EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {

@@ -212,6 +212,20 @@ body {
   transition: opacity 140ms ease;
 }
 
+.ProseMirror.lm-focus-root > * {
+  opacity: 0.3;
+  transition: opacity 140ms ease;
+}
+
+.ProseMirror.lm-focus-root > .lm-focus-active,
+.ProseMirror.lm-focus-root .lm-focus-list-active {
+  opacity: 1;
+}
+
+.ProseMirror.lm-focus-root .lm-focus-list-dimmed {
+  opacity: 0.3;
+}
+
 .ProseMirror .lm-heading-fold-hidden {
   display: none !important;
 }

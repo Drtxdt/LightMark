@@ -4,6 +4,7 @@ import { currentFileName } from "../../stores/appStore";
 import {
   appStore,
   createNewFile,
+  flushDocumentSnapshot,
   formatCurrentMarkdown,
   openCommandPalette,
   openFile,
@@ -17,8 +18,7 @@ import EditorModeToggle from "./EditorModeToggle.vue";
 import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import UiIcon from "../ui/UiIcon.vue";
 import { openFindPanel } from "../../stores/findReplaceStore";
-import { exportTargets, runDocumentExport } from "../../utils/export";
-import { analyzeMathExportCompatibility, mathExportStatusLabel } from "../../utils/mathExportCompatibility";
+import { exportTargets } from "../../utils/exportTargets";
 import type { EditorMode, ThemeMode } from "../../types";
 
 type EditorCommand =
@@ -37,14 +37,7 @@ type EditorCommand =
 const exportMenuOpen = ref(false);
 const primaryExportTargets = exportTargets.filter((target) => ["pdf", "html", "docx", "png"].includes(target.id));
 const secondaryExportTargets = exportTargets.filter((target) => !primaryExportTargets.includes(target));
-const exportCompatibility = computed(() => new Map(exportTargets.map((target) => {
-  const result = analyzeMathExportCompatibility(
-    appStore.currentContent,
-    target.id,
-    appStore.settings.markdown.mathNumbering,
-  );
-  return [target.id, result] as const;
-})));
+const exportCompatibility = ref(new Map<string, { status: string }>());
 
 async function run(action: () => Promise<unknown> | unknown) {
   try {
@@ -56,7 +49,24 @@ async function run(action: () => Promise<unknown> | unknown) {
 
 async function runExport(target: (typeof exportTargets)[number]) {
   exportMenuOpen.value = false;
+  const { runDocumentExport } = await import("../../utils/export");
   await runDocumentExport(target);
+}
+
+async function toggleExportMenu() {
+  exportMenuOpen.value = !exportMenuOpen.value;
+  if (!exportMenuOpen.value) return;
+  if (appStore.activeTabId) await flushDocumentSnapshot(appStore.activeTabId, "export");
+  const { analyzeMathExportCompatibility } = await import("../../utils/mathExportCompatibility");
+  exportCompatibility.value = new Map(exportTargets.map((target) => [target.id, analyzeMathExportCompatibility(
+    appStore.currentContent,
+    target.id,
+    appStore.settings.markdown.mathNumbering,
+  )]));
+}
+
+function mathExportStatusLabel(status: string) {
+  return status === "blocked" ? "阻止" : status === "degraded" ? "降级" : "完整";
 }
 
 function toggleTheme(theme: "light" | "dark") {
@@ -64,7 +74,7 @@ function toggleTheme(theme: "light" | "dark") {
 }
 
 function toggleEditorMode(mode: EditorMode) {
-  switchMode(mode);
+  void switchMode(mode);
 }
 
 const canRunWysiwygCommand = () => appStore.documentMode === "normal" && appStore.editorMode === "wysiwyg";
@@ -169,7 +179,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
           title="导出"
           aria-label="导出"
           :disabled="appStore.exportStatus.status === 'running'"
-          @click="exportMenuOpen = !exportMenuOpen"
+          @click="void toggleExportMenu()"
         >
           <UiIcon name="file-output" />
         </button>

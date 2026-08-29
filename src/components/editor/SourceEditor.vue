@@ -3,12 +3,14 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { history, historyKeymap, isolateHistory } from "@codemirror/commands";
+import { SearchQuery, search, setSearchQuery } from "@codemirror/search";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration,
   GutterMarker,
   type DecorationSet,
   EditorView,
+  ViewPlugin,
   WidgetType,
   gutter,
   keymap,
@@ -24,24 +26,25 @@ import {
   getPaneEditorMode,
   getPanePendingModeCursor,
   getPaneTab,
+  markDocumentChanged,
   recordNavigationLocation,
   revealHeadingAtLine,
-  setPaneContent,
   setPanePendingModeCursor,
   toggleHeadingFoldByKey,
   updatePaneOutlineAnchor,
   updatePanePosition,
 } from "../../stores/appStore";
+import { publishDocumentDerivedState, registerDocumentSession } from "../../editor/documentRuntime";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
-import { findTextMatches, normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
+import { normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
 import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
-import { buildEditorPositionSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
+import { normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
-import { decidePairAction, isInsideFencedCode, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
+import { decidePairAction, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
 import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingModes";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
-import { evaluateMarkdownMath } from "../../utils/mathMarkdown";
-import { extractOutlineWithLines, structureOutline } from "../../utils/outline";
+import { buildSourceOutlineIndex, sourceContextAtLine, updateSourceOutlineIndex } from "../../editor/sourceOutlineIndex";
+import { recordStartupStage } from "../../editor/startupMetrics";
 import { expandSnippet } from "../../utils/snippets";
 import {
   clipboardPayloadFromDataTransfer,
@@ -57,10 +60,13 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 let applyingExternalChange = false;
-let mathDiagnosticTimer: number | null = null;
+let mathWorker: Worker | null = null;
 let typewriterFrame = 0;
 let sourceManualScrollUntil = 0;
 let sourceFindMatches: TextMatch[] = [];
+let sourceRevision = 0;
+let sourceWordCount = 0;
+let unregisterDocumentSession = () => {};
 const wikiCompletion = ref({
   visible: false,
   query: "",
@@ -107,17 +113,50 @@ const mathDiagnosticField = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
-const sourceFocusField = StateField.define<DecorationSet>({
-  create(state) {
-    return buildSourceFocusDecorations(state);
-  },
-  update(_value, transaction) {
-    return buildSourceFocusDecorations(transaction.state);
-  },
-  provide: (field) => EditorView.decorations.from(field),
-});
+const refreshSourceFocus = StateEffect.define<void>();
+const sourceFocusPlugin = ViewPlugin.fromClass(class {
+  decorations: DecorationSet;
+
+  constructor(currentView: EditorView) {
+    this.decorations = buildSourceFocusDecorations(currentView);
+  }
+
+  update(update: { view: EditorView; docChanged: boolean; selectionSet: boolean; viewportChanged: boolean; transactions: readonly { effects: readonly StateEffect<unknown>[] }[] }) {
+    if (
+      update.docChanged
+      || update.selectionSet
+      || update.viewportChanged
+      || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshSourceFocus)))
+    ) this.decorations = buildSourceFocusDecorations(update.view);
+  }
+}, { decorations: (plugin) => plugin.decorations });
 
 const refreshSourceHeadingFolds = StateEffect.define<void>();
+
+const sourceOutlineField = StateField.define({
+  create(state) {
+    return buildSourceOutlineIndex(state.doc);
+  },
+  update(value, transaction) {
+    if (!transaction.docChanged) return value;
+    let oldFrom = transaction.startState.doc.length;
+    let newFrom = transaction.state.doc.length;
+    let newTo = 0;
+    transaction.changes.iterChangedRanges((fromA, _toA, fromB, toB) => {
+      oldFrom = Math.min(oldFrom, fromA);
+      newFrom = Math.min(newFrom, fromB);
+      newTo = Math.max(newTo, toB);
+    });
+    return updateSourceOutlineIndex(
+      value,
+      transaction.startState.doc,
+      transaction.state.doc,
+      oldFrom,
+      newFrom,
+      newTo,
+    );
+  },
+});
 
 class SourceHeadingFoldWidget extends WidgetType {
   constructor(private readonly hiddenLines: number) {
@@ -170,6 +209,7 @@ class SourceHeadingGutterMarker extends GutterMarker {
 function buildSourceHeadingFoldDecorations(state: EditorState) {
   const tab = getPaneTab(props.paneId);
   if (!tab || tab.documentMode !== "normal" || paneEditorMode.value !== "source") return Decoration.none;
+  if (tab.collapsedHeadingKeys.length === 0) return Decoration.none;
   const collapsed = new Set(tab.collapsedHeadingKeys);
   const ranges = [];
   for (const item of sourceStructuredOutline(state)) {
@@ -195,7 +235,10 @@ const sourceHeadingFoldField = StateField.define<DecorationSet>({
     return buildSourceHeadingFoldDecorations(state);
   },
   update(value, transaction) {
-    if (transaction.docChanged || transaction.effects.some((effect) => effect.is(refreshSourceHeadingFolds))) {
+    if (transaction.effects.some((effect) => effect.is(refreshSourceHeadingFolds))) {
+      return buildSourceHeadingFoldDecorations(transaction.state);
+    }
+    if (transaction.docChanged && sourceFoldDecorationsNeedRebuild(transaction)) {
       return buildSourceHeadingFoldDecorations(transaction.state);
     }
     return value.map(transaction.changes);
@@ -207,7 +250,7 @@ const sourceHeadingGutter = gutter({
   class: "cm-heading-fold-gutter",
   lineMarker(currentView, line) {
     const lineNumber = currentView.state.doc.lineAt(line.from).number - 1;
-    const item = sourceStructuredOutline(currentView.state).find((candidate) => candidate.line === lineNumber);
+    const item = currentView.state.field(sourceOutlineField).itemsByLine.get(lineNumber);
     if (!item || item.sectionEndLine <= item.line + 1) return null;
     return new SourceHeadingGutterMarker(
       Boolean(getPaneTab(props.paneId)?.collapsedHeadingKeys.includes(item.key)),
@@ -218,7 +261,7 @@ const sourceHeadingGutter = gutter({
     mousedown(currentView, line, event) {
       if (!(event instanceof MouseEvent) || event.button !== 0) return false;
       const lineNumber = currentView.state.doc.lineAt(line.from).number - 1;
-      const item = sourceStructuredOutline(currentView.state).find((candidate) => candidate.line === lineNumber);
+      const item = currentView.state.field(sourceOutlineField).itemsByLine.get(lineNumber);
       if (!item || item.sectionEndLine <= item.line + 1) return false;
       event.preventDefault();
       toggleHeadingFoldByKey(props.paneId, item.key);
@@ -228,7 +271,40 @@ const sourceHeadingGutter = gutter({
 });
 
 function sourceStructuredOutline(state: EditorState) {
-  return structureOutline(extractOutlineWithLines(state.doc.toString()), state.doc.lines);
+  return state.field(sourceOutlineField).items;
+}
+
+function sourceFoldDecorationsNeedRebuild(transaction: any) {
+  const collapsedKeys = getPaneTab(props.paneId)?.collapsedHeadingKeys ?? [];
+  if (collapsedKeys.length === 0) return false;
+  const oldIndex = transaction.startState.field(sourceOutlineField);
+  const newIndex = transaction.state.field(sourceOutlineField);
+  if (oldIndex.items.length !== newIndex.items.length) return true;
+  const collapsed = new Set(collapsedKeys);
+  let rebuild = false;
+  transaction.changes.iterChangedRanges((fromA: number, toA: number, fromB: number, toB: number) => {
+    if (rebuild) return;
+    const oldFromLine = transaction.startState.doc.lineAt(fromA).number - 1;
+    const oldToLine = transaction.startState.doc.lineAt(toA).number - 1;
+    const newFromLine = transaction.state.doc.lineAt(fromB).number - 1;
+    const newToLine = transaction.state.doc.lineAt(toB).number - 1;
+    if (
+      oldIndex.itemsByLine.has(oldFromLine)
+      || oldIndex.itemsByLine.has(oldToLine)
+      || newIndex.itemsByLine.has(newFromLine)
+      || newIndex.itemsByLine.has(newToLine)
+    ) {
+      rebuild = true;
+      return;
+    }
+    if (oldToLine - oldFromLine === newToLine - newFromLine) return;
+    rebuild = [...oldIndex.items, ...newIndex.items].some((item) =>
+      collapsed.has(item.key)
+      && ((oldFromLine > item.line && oldFromLine < item.sectionEndLine)
+        || (newFromLine > item.line && newFromLine < item.sectionEndLine)),
+    );
+  });
+  return rebuild;
 }
 
 function sourceFocusEnabled() {
@@ -240,19 +316,29 @@ function sourceFocusEnabled() {
   );
 }
 
-function buildSourceFocusDecorations(state: EditorState) {
+function buildSourceFocusDecorations(currentView: EditorView) {
+  const state = currentView.state;
   if (!sourceFocusEnabled()) return Decoration.none;
   const range = sourceFocusRange(state);
   const clearLines = new Set<number>();
+  const visibleOffsets = currentView.visibleRanges.map((visible) => ({
+    from: state.doc.line(Math.max(1, state.doc.lineAt(visible.from).number - 50)).from,
+    to: state.doc.line(Math.min(state.doc.lines, state.doc.lineAt(visible.to).number + 50)).to,
+  }));
   if (findReplaceStore.open) {
     for (const match of sourceFindMatches) {
+      if (!visibleOffsets.some((visible) => match.from <= visible.to && match.to >= visible.from)) continue;
       const fromLine = state.doc.lineAt(Math.min(match.from, state.doc.length)).number;
       const toLine = state.doc.lineAt(Math.min(match.to, state.doc.length)).number;
       for (let line = fromLine; line <= toLine; line += 1) clearLines.add(line);
     }
   }
   const decorations = [];
-  for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+  const visibleLines = currentView.visibleRanges.map((visible) => ({
+    from: Math.max(1, state.doc.lineAt(visible.from).number - 50),
+    to: Math.min(state.doc.lines, state.doc.lineAt(visible.to).number + 50),
+  }));
+  for (const visible of visibleLines) for (let lineNumber = visible.from; lineNumber <= visible.to; lineNumber += 1) {
     const line = state.doc.line(lineNumber);
     decorations.push(
       Decoration.line({
@@ -449,10 +535,12 @@ function extensions() {
   return [
     lineNumbers(),
     history(),
+    search({ top: true }),
     keymap.of([...sourceInputKeymap, ...historyKeymap]),
     sourceFindField,
     mathDiagnosticField,
-    sourceFocusField,
+    sourceFocusPlugin,
+    sourceOutlineField,
     sourceHeadingFoldField,
     sourceHeadingGutter,
     markdown(),
@@ -560,10 +648,18 @@ function extensions() {
     minimalTheme,
     EditorView.updateListener.of((update) => {
       if (update.docChanged && !applyingExternalChange) {
-        setPaneContent(props.paneId, update.state.doc.toString(), true);
-        if (findReplaceStore.open && findReplaceStore.query) window.setTimeout(refreshSourceFind, 0);
+        updateSourceWordCount(update);
+        sourceRevision += 1;
+        const tab = getPaneTab(props.paneId);
+        const outlineIndex = update.state.field(sourceOutlineField);
+        if (tab) markDocumentChanged(tab.id, sourceRevision, {
+          chars: update.state.doc.length,
+          lines: update.state.doc.lines,
+          words: sourceWordCount,
+          outline: outlineIndex.outlineChanged ? outlineIndex.items : undefined,
+        });
       }
-      if (update.docChanged) scheduleMathDiagnostics(update.view);
+      if (update.docChanged) queueMathDiagnosticChanges(update);
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
       if (update.docChanged || update.selectionSet) {
         captureSourcePosition(update.view);
@@ -576,15 +672,39 @@ function extensions() {
 }
 
 function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
-  if (mathDiagnosticTimer !== null) window.clearTimeout(mathDiagnosticTimer);
-  mathDiagnosticTimer = window.setTimeout(() => {
-    mathDiagnosticTimer = null;
-    if (currentView !== view || paneDocumentMode.value !== "normal") return;
-    const source = currentView.state.doc.toString();
-    const evaluation = evaluateMarkdownMath(source, {
-      numberingMode: appStore.settings.markdown.mathNumbering,
-    });
-    const ranges = evaluation.diagnostics
+  if (currentView !== view || !mathWorker) return;
+  mathWorker.postMessage({
+    type: "reset",
+    markdown: currentView.state.doc.toString(),
+    revision: sourceRevision,
+    numberingMode: appStore.settings.markdown.mathNumbering,
+    delay,
+  });
+}
+
+function queueMathDiagnosticChanges(update: { changes: { iterChanges: Function } }) {
+  if (!mathWorker) return;
+  const edits: Array<{ from: number; to: number; insert: string }> = [];
+  update.changes.iterChanges((fromA: number, toA: number, _fromB: number, _toB: number, inserted: { toString(): string }) => {
+    edits.push({ from: fromA, to: toA, insert: inserted.toString() });
+  });
+  mathWorker.postMessage({
+    type: "changes",
+    edits,
+    revision: sourceRevision,
+    numberingMode: appStore.settings.markdown.mathNumbering,
+  });
+}
+
+function applyMathDiagnostics(result: {
+  revision: number;
+  diagnostics: Array<{ from: number; to: number; message: string }>;
+  references: Array<{ from: number; to: number; key: string; targetId?: string }>;
+  equations: Array<{ id?: string; line: number; display: string }>;
+}) {
+    const currentView = view;
+    if (!currentView || result.revision !== sourceRevision || paneDocumentMode.value !== "normal") return;
+    const ranges = result.diagnostics
       .map((diagnostic) => {
         const from = Math.max(0, Math.min(diagnostic.from, currentView.state.doc.length));
         const to = Math.max(from + 1, Math.min(diagnostic.to, currentView.state.doc.length));
@@ -599,9 +719,9 @@ function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
         }).range(from, to);
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-    for (const reference of evaluation.references) {
+    for (const reference of result.references) {
       if (!reference.targetId) continue;
-      const target = evaluation.equations.find((equation) => equation.id === reference.targetId);
+      const target = result.equations.find((equation) => equation.id === reference.targetId);
       if (!target) continue;
       ranges.push(Decoration.mark({
         class: "cm-math-ref",
@@ -615,7 +735,6 @@ function scheduleMathDiagnostics(currentView: EditorView, delay = 140) {
     currentView.dispatch({
       effects: setMathDiagnosticDecorations.of(Decoration.set(ranges, true)),
     });
-  }, delay);
 }
 
 function handleSourcePair(currentView: EditorView, key: string) {
@@ -674,9 +793,13 @@ function handleSourceTab(currentView: EditorView, reverse: boolean) {
   const selection = currentView.state.selection.main;
   const line = currentView.state.doc.lineAt(selection.from);
   if (selection.empty && isMarkdownTableLine(line.text)) return moveSourceTableCell(currentView, reverse);
-  const documentText = currentView.state.doc.toString();
   const isList = /^\s*(?:[-+*]|\d+[.)])\s+/.test(line.text);
-  if (!isList && !isInsideFencedCode(documentText, selection.from)) return false;
+  const context = sourceContextAtLine(
+    currentView.state.field(sourceOutlineField),
+    currentView.state.doc,
+    line.number,
+  );
+  if (!isList && !context.fence) return false;
 
   const firstLine = currentView.state.doc.lineAt(selection.from);
   const lastLine = currentView.state.doc.lineAt(selection.to);
@@ -757,6 +880,7 @@ function withBlockSpacing(documentText: string, from: number, to: number, markdo
 
 onMounted(() => {
   if (!host.value) return;
+  sourceWordCount = countWords(paneContent.value);
   view = new EditorView({
     parent: host.value,
     state: EditorState.create({
@@ -764,6 +888,13 @@ onMounted(() => {
       extensions: extensions(),
     }),
   });
+  // CodeMirror is ready here. Capture this boundary before the diagnostic
+  // worker request so startup metrics keep editor-ready and worker-settled
+  // costs distinct.
+  recordStartupStage("source");
+  mathWorker = new Worker(new URL("../../workers/mathDiagnostics.worker.ts", import.meta.url), { type: "module" });
+  mathWorker.onmessage = (event) => applyMathDiagnostics(event.data);
+  registerSourceDocumentSession();
   scheduleMathDiagnostics(view, 0);
   restorePendingSourceCursor();
   restorePendingSourcePosition();
@@ -788,20 +919,50 @@ watch(
   () => paneTab.value?.id || "",
   () => {
     if (!view) return;
+    sourceWordCount = countWords(paneContent.value);
     applyingExternalChange = true;
     view.setState(EditorState.create({
       doc: paneContent.value,
       extensions: extensions(),
     }));
     applyingExternalChange = false;
+    registerSourceDocumentSession();
     scheduleMathDiagnostics(view, 0);
     syncSourceWritingModes();
     restorePendingSourcePosition();
   },
 );
 
+function updateSourceWordCount(update: { startState: EditorState; state: EditorState; changes: { empty: boolean; iterChangedRanges: Function } }) {
+  if (update.changes.empty) return;
+  let oldFrom = update.startState.doc.length;
+  let oldTo = 0;
+  let newFrom = update.state.doc.length;
+  let newTo = 0;
+  update.changes.iterChangedRanges((fromA: number, toA: number, fromB: number, toB: number) => {
+    oldFrom = Math.min(oldFrom, fromA);
+    oldTo = Math.max(oldTo, toA);
+    newFrom = Math.min(newFrom, fromB);
+    newTo = Math.max(newTo, toB);
+  });
+  const oldStartLine = update.startState.doc.lineAt(oldFrom);
+  const oldEndLine = update.startState.doc.lineAt(oldTo);
+  const newStartLine = update.state.doc.lineAt(newFrom);
+  const newEndLine = update.state.doc.lineAt(newTo);
+  const removed = update.startState.doc.sliceString(oldStartLine.from, oldEndLine.to);
+  const inserted = update.state.doc.sliceString(newStartLine.from, newEndLine.to);
+  sourceWordCount = Math.max(0, sourceWordCount + countWords(inserted) - countWords(removed));
+}
+
+function countWords(value: string) {
+  const trimmed = value.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
+}
+
 onBeforeUnmount(() => {
-  if (mathDiagnosticTimer !== null) window.clearTimeout(mathDiagnosticTimer);
+  unregisterDocumentSession();
+  mathWorker?.terminate();
+  mathWorker = null;
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.removeEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
   window.removeEventListener("lightmark:insert-images", handleGlobalImageInsert as EventListener);
@@ -820,6 +981,67 @@ onBeforeUnmount(() => {
   view?.destroy();
   view = null;
 });
+
+function registerSourceDocumentSession() {
+  unregisterDocumentSession();
+  const tab = getPaneTab(props.paneId);
+  if (!tab || !view) return;
+  const tabId = tab.id;
+  unregisterDocumentSession = registerDocumentSession({
+    tabId,
+    paneId: props.paneId,
+    mode: "source",
+    get revision() {
+      return sourceRevision;
+    },
+    async snapshot(_reason, options) {
+      if (!view) throw new Error("源码编辑器已经关闭。");
+      if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+      const markdown = view.state.doc.toString();
+      if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+      return {
+        tabId,
+        revision: sourceRevision,
+        markdown,
+        dirty: getPaneTab(props.paneId)?.isDirty ?? false,
+      };
+    },
+    derivedState() {
+      if (!view) return {};
+      return {
+        revision: sourceRevision,
+        chars: view.state.doc.length,
+        lines: view.state.doc.lines,
+        words: sourceWordCount,
+        outline: view.state.field(sourceOutlineField).items,
+        findMatches: sourceFindMatches.length,
+      };
+    },
+    async replaceMarkdown(markdown) {
+      if (!view) throw new Error("源码编辑器已经关闭。");
+      sourceWordCount = countWords(markdown);
+      applyingExternalChange = true;
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: markdown } });
+      applyingExternalChange = false;
+      sourceRevision += 1;
+      publishDocumentDerivedState(tabId, {
+        revision: sourceRevision,
+        chars: view.state.doc.length,
+        lines: view.state.doc.lines,
+        words: sourceWordCount,
+        outline: view.state.field(sourceOutlineField).items,
+        findMatches: sourceFindMatches.length,
+      });
+    },
+    navigate(target) {
+      if (!view) return;
+      const requested = target.offset ?? (target.line == null ? 0 : view.state.doc.line(Math.min(view.state.doc.lines, Math.max(1, target.line + 1))).from);
+      const position = Math.max(0, Math.min(view.state.doc.length, requested));
+      view.dispatch({ selection: { anchor: position }, scrollIntoView: true });
+      view.focus();
+    },
+  });
+}
 
 function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean }>) {
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
@@ -877,7 +1099,6 @@ function showPasteWarnings(warnings: string[]) {
 
 function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string; paneId?: EditorPaneId }>) {
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || event.detail?.to !== "wysiwyg" || !view) return;
-  setPaneContent(props.paneId, view.state.doc.toString(), true);
   const selection = view.state.selection.main;
   const line = view.state.doc.lineAt(selection.anchor);
   setPanePendingModeCursor(props.paneId, {
@@ -916,17 +1137,19 @@ function captureSourcePosition(currentView = view) {
   if (!currentView || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal") return;
   const scroller = currentView.scrollDOM;
   const selection = currentView.state.selection.main;
+  const line = currentView.state.doc.lineAt(selection.anchor);
   updatePanePosition(
     props.paneId,
-    buildEditorPositionSnapshot({
+    {
       editorMode: "source",
-      markdown: currentView.state.doc.toString(),
       markdownAnchor: selection.anchor,
       markdownHead: selection.head,
-      scrollTop: scroller.scrollTop,
-      scrollHeight: scroller.scrollHeight,
-      clientHeight: scroller.clientHeight,
-    }),
+      markdownLine: line.number,
+      markdownColumn: selection.anchor - line.from,
+      markdownLineText: line.text,
+      ...normalizeScrollSnapshot(scroller.scrollTop, scroller.scrollHeight, scroller.clientHeight),
+      updatedAt: Date.now(),
+    },
   );
 }
 
@@ -977,7 +1200,7 @@ function restoreSourcePosition(position: any) {
 function handleSourceWritingModesChanged() {
   syncSourceWritingModes();
   if (!view) return;
-  view.dispatch({});
+  view.dispatch({ effects: refreshSourceFocus.of(undefined) });
   scheduleSourceTypewriter(view);
 }
 
@@ -1178,10 +1401,36 @@ function refreshSourceFind() {
     applySourceFindDecorations(-1);
     return;
   }
-  const result = findTextMatches(view.state.doc.toString(), findReplaceStore.query, findOptions());
-  sourceFindMatches = result.matches;
+  const options = findOptions();
+  const query = new SearchQuery({
+    search: findReplaceStore.query,
+    caseSensitive: options.caseSensitive,
+    regexp: options.regex,
+    wholeWord: options.wholeWord,
+  });
+  view.dispatch({ effects: setSearchQuery.of(query) });
+  if (!query.valid) {
+    sourceFindMatches = [];
+    setFindResult(0, -1, "无效正则表达式");
+    applySourceFindDecorations(-1);
+    return;
+  }
+  const matches: TextMatch[] = [];
+  const cursor = query.getCursor(view.state);
+  while (true) {
+    const next = cursor.next();
+    if (next.done) break;
+    const { from, to } = next.value;
+    const text = view.state.sliceDoc(from, to);
+    let groups: string[] | undefined;
+    if (options.regex) {
+      try { groups = new RegExp(findReplaceStore.query, options.caseSensitive ? "u" : "iu").exec(text)?.slice(1); } catch { groups = undefined; }
+    }
+    matches.push({ from, to, text, groups });
+  }
+  sourceFindMatches = matches;
   const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeMatchIndex(findReplaceStore.currentIndex, sourceFindMatches.length);
-  setFindResult(sourceFindMatches.length, current, result.error);
+  setFindResult(sourceFindMatches.length, current, "");
   applySourceFindDecorations(current);
 }
 

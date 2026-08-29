@@ -5,9 +5,10 @@ const outputDir = process.argv[2];
 if (!outputDir) throw new Error("Usage: node scripts/visual-outline-folding-qa.mjs <output-dir>");
 fs.mkdirSync(outputDir, { recursive: true });
 
-const pages = await fetch("http://127.0.0.1:9333/json").then((response) => response.json());
+const cdpPort = process.env.LIGHTMARK_CDP_PORT || "9333";
+const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) => response.json());
 const page = pages.find((item) => item.url.includes("outline-qa=1"))
-  || pages.find((item) => item.url.startsWith("http://127.0.0.1:1420/"));
+  || pages.find((item) => /^http:\/\/(?:127\.0\.0\.1|localhost):1420\//.test(item.url));
 if (!page) throw new Error("LightMark Edge page not found.");
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);

@@ -40,6 +40,8 @@ export interface PendingModeCursor {
 
 export interface EditorPositionSnapshot {
   editorMode: EditorMode;
+  editorAnchor?: number;
+  editorHead?: number;
   markdownAnchor: number;
   markdownHead: number;
   markdownLine: number;

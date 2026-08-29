@@ -48,6 +48,14 @@ pub fn run() {
             commands::config::read_app_config,
             commands::config::write_app_config,
             commands::window::sync_window_chrome,
+            commands::workspace_index::workspace_index_open,
+            commands::workspace_index::workspace_index_status,
+            commands::workspace_index::workspace_index_update_open_document,
+            commands::workspace_index::workspace_index_release_open_document,
+            commands::workspace_index::workspace_query_backlinks,
+            commands::workspace_index::workspace_query_mentions,
+            commands::workspace_index::workspace_query_tags,
+            commands::workspace_index::workspace_resolve_wiki_link,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LightMark");

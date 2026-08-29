@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "../node_modules/typescript/lib/typescript.js";
+import { Schema } from "@tiptap/pm/model";
+import { EditorState } from "@tiptap/pm/state";
 
 const sourcePath = path.resolve("src/utils/inputRules.ts");
 const source = fs.readFileSync(sourcePath, "utf8");
@@ -56,6 +58,32 @@ try {
   assert.doesNotMatch(wysiwygEditor, /insertText\("  ", selection\.from, selection\.to\)/);
   assert.match(wysiwygEditor, /sinkListItem/);
   assert.match(wysiwygEditor, /trailing\.startsWith\("\]\]"\)/);
+
+  const headingEditingSource = fs.readFileSync(path.resolve("src/editor/wysiwygMarkdownEditing.ts"), "utf8");
+  const headingEditingPath = path.resolve(`scripts/.lightmark-heading-editing-${Date.now()}.mjs`);
+  fs.writeFileSync(headingEditingPath, ts.transpileModule(headingEditingSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText, "utf8");
+  try {
+    const { exposeHeadingMarkdown } = await import(pathToFileURL(headingEditingPath).href);
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { group: "block", content: "text*" },
+        heading: { group: "block", content: "text*", attrs: { level: { default: 1 } } },
+        text: { group: "inline" },
+      },
+    });
+    const doc = schema.nodes.doc.create(null, [schema.nodes.heading.create({ level: 2 }, schema.text("Title"))]);
+    const state = EditorState.create({ schema, doc });
+    const tr = exposeHeadingMarkdown(state, 0, 1);
+    assert.ok(tr);
+    assert.equal(tr.doc.firstChild.type.name, "paragraph");
+    assert.equal(tr.doc.firstChild.textContent, "## Title");
+    assert.equal(tr.selection.from, 4, "caret should sit immediately after the editable marker");
+  } finally {
+    fs.rmSync(headingEditingPath, { force: true });
+  }
 } finally {
   fs.rmSync(tempPath, { force: true });
 }

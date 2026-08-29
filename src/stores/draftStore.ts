@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { reactive } from "vue";
-import { appStore, createUntitledTab, setContent, switchMode } from "./appStore";
+import { appStore, createUntitledTab, flushDocumentSnapshot, setContent, switchMode } from "./appStore";
 import { showDialog } from "./dialogStore";
 import type { DraftRecord, FileSnapshot, TextEdit } from "../types";
 
@@ -57,6 +57,7 @@ export async function checkDraftForOpenedFile(path: string) {
 
 export async function flushCurrentDraft() {
   if (!appStore.settings.general.autoSave || !appStore.isDirty) return;
+  if (appStore.activeTabId) await flushDocumentSnapshot(appStore.activeTabId, "draft");
   const record = await buildCurrentDraftRecord();
   if (!record) return;
   try {
@@ -169,7 +170,7 @@ async function restoreDraft(record: DraftRecord) {
     }
   }
   if (record.editorMode === "wysiwyg" || record.editorMode === "source") {
-    switchMode(record.editorMode);
+    await switchMode(record.editorMode);
   }
   draftStore.activeDraftId = record.id;
   draftStore.status = "restored";
