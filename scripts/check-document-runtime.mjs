@@ -91,7 +91,24 @@ try {
     mismatch: undefined,
   });
 
+  const exactSource = "\uFEFF---\r\ntitle: exact  \r\n---\r\n\r\n-  item\t\r\n";
+  let exactSerializations = 0;
+  const exactCache = new WysiwygSnapshotCache({
+    tabId: () => "tab-exact",
+    revision: () => 1,
+    dirty: () => false,
+    previousMarkdown: () => exactSource,
+    blocks: () => [{ html: "normalized" }],
+    serializeBlock: () => { exactSerializations += 1; return "normalized"; },
+    convertBlock: (value) => value,
+    combineBlocks: (parts) => parts.join("\n"),
+    oracle: () => "normalized\n",
+  });
+  assert.equal((await exactCache.snapshot("save")).markdown, exactSource, "an untouched WYSIWYG document must remain byte-for-byte identical");
+  assert.equal(exactSerializations, 0, "an untouched document must bypass HTML serialization");
+
   revision += 1;
+  dirty = true;
   blocks = [{ html: "<p>two</p>" }];
   slowSerialization = true;
   cache.invalidate();
@@ -121,9 +138,11 @@ try {
   assert.equal(mismatchCache.diagnostics().mismatch?.at, 0);
 
   let adapterRevision = 4;
+  let flushedReason = null;
   const adapter = {
     tabId: "old-tab", paneId: "main", mode: "source",
     get revision() { return adapterRevision; },
+    async flushPendingEdits(reason) { flushedReason = reason; adapterRevision += 1; },
     async snapshot() { return { tabId: "old-tab", revision: adapterRevision, markdown: "latest", dirty: true }; },
     derivedState() { return { revision: adapterRevision }; },
     async replaceMarkdown() {}, navigate() {},
@@ -131,6 +150,8 @@ try {
   const unregister = runtime.registerDocumentSession(adapter);
   runtime.rebindDocumentSession("old-tab", "new-tab");
   assert.equal((await runtime.snapshotDocumentTab("new-tab", "save")).tabId, "new-tab");
+  assert.equal(flushedReason, "save", "a snapshot must flush pending node-view edits first");
+  assert.equal(adapterRevision, 5, "the snapshot revision must be captured after pending edits are committed");
   unregister();
   assert.equal(runtime.documentSessionForTab("new-tab"), null, "unregister must remove a rebound tab id");
 } finally {

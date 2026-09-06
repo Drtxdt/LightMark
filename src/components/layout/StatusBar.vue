@@ -36,6 +36,12 @@ const breadcrumbTitle = computed(() => {
   const sections = breadcrumbs.value.map((item) => item.text).join(" › ");
   return sections ? `${appStore.currentFilePath || "未打开文件"} · ${sections}` : appStore.currentFilePath || "未打开文件";
 });
+const saveLabel = computed(() => ({
+  dirty: "未保存",
+  saving: "保存中",
+  saved: "已保存",
+  failed: "保存失败",
+})[appStore.saveState]);
 
 function jumpToBreadcrumb(item: BreadcrumbItem) {
   recordNavigationLocation();
@@ -83,7 +89,7 @@ function jumpToBreadcrumb(item: BreadcrumbItem) {
       <span v-if="appStore.settings.editor.showWordCount && stats" class="status-count">{{ stats.words }} 词</span>
       <span v-else-if="appStore.settings.editor.showWordCount" class="status-count">{{ appStore.largeFile?.totalLines ?? 0 }} 行</span>
       <span class="status-mode">{{ appStore.documentMode === "large" ? "大文件" : appStore.editorMode === "wysiwyg" ? "编辑" : "源代码" }}</span>
-      <span class="status-save" :class="{ dirty: appStore.isDirty }"><i></i>{{ appStore.isDirty ? "未保存" : "已保存" }}</span>
+      <span class="status-save" :class="appStore.saveState" role="status" aria-live="polite"><i></i>{{ saveLabel }}</span>
     </div>
   </footer>
 </template>
@@ -115,6 +121,10 @@ function jumpToBreadcrumb(item: BreadcrumbItem) {
 .status-save { display: inline-flex; align-items: center; gap: 6px; }
 .status-save i { width: 6px; height: 6px; border-radius: 50%; background: #718060; box-shadow: 0 0 0 3px rgb(113 128 96 / 10%); }
 .status-save.dirty i { background: var(--lm-accent); box-shadow: 0 0 0 3px var(--lm-accent-soft); }
+.status-save.saving i { background: var(--lm-accent); box-shadow: 0 0 0 3px var(--lm-accent-soft); animation: status-pulse 900ms ease-in-out infinite alternate; }
+.status-save.failed { color: var(--lm-error); }
+.status-save.failed i { background: var(--lm-error); box-shadow: 0 0 0 3px var(--lm-error-soft); }
+@keyframes status-pulse { to { opacity: 0.35; } }
 .status-mode { color: var(--lm-ink-soft); }
 .status-message { color: var(--lm-ink-soft); }
 

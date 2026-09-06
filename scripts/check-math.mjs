@@ -324,6 +324,12 @@ try {
   assert.match(mathNodeSource, /math-tools-block-editing/);
   assert.match(mathNodeSource, /math-tools-inline-editing/);
   assert.match(mathNodeSource, /--math-block-editor-bottom/);
+  assert.match(mathNodeSource, /flushPendingMathEdits/);
+  assert.match(mathNodeSource, /exitToDocument\("after"\)/, "inline Enter and Escape must restore the document selection");
+  assert.match(mathNodeSource, /compositionWaiters/, "snapshot flushing must wait for IME composition");
+  assert.doesNotMatch(mathNodeSource, /editing = true;\s*updateAttrs\(\{ editing: true \}\)/, "entering math edit mode must not create a content transaction");
+  assert.match(mathNodeSource, /event\.key === "Enter" && \(event\.ctrlKey \|\| event\.metaKey\)/, "block math needs a Ctrl+Enter commit path");
+  assert.doesNotMatch(mathNodeSource, /const refresh = \(\) => \{[\s\S]{0,500}updateAttrs\(\{ tex, raw: "", editing: true \}\)/, "block previews must not write every keystroke into the document model");
   assert.doesNotMatch(mathNodeSource, /editor\.on\("transaction"/);
   assert.match(suggestSource, /getAdditionalSuggestions/);
   assert.match(suggestSource, /\\\\ce/);

@@ -94,6 +94,7 @@ export const appStore = reactive({
   paneOutlineAnchorSources: { main: "selection", secondary: "selection" } as Record<EditorPaneId, "selection" | "scroll" | "navigation">,
   largeFileViewportLines: { main: 0, secondary: 0 } as Record<EditorPaneId, number>,
   isDirty: false,
+  saveState: "saved" as "dirty" | "saving" | "saved" | "failed",
   editorMode: "wysiwyg" as EditorMode,
   tabs: [] as DocumentTab[],
   activeTabId: "",
@@ -249,6 +250,7 @@ export function setPaneContent(paneId: EditorPaneId, content: string, dirty = tr
   if (paneId === appStore.splitLayout.activePaneId || target.id === appStore.activeTabId) {
     appStore.currentContent = content;
     appStore.isDirty = dirty;
+    appStore.saveState = dirty ? "dirty" : "saved";
     appStore.documentMode = target.documentMode;
   }
   scheduleKnowledgeRefresh();
@@ -269,7 +271,10 @@ export function markDocumentChanged(
   const tab = appStore.tabs.find((item) => item.id === tabId);
   if (!tab || tab.documentMode === "large") return;
   tab.isDirty = true;
-  if (tab.id === appStore.activeTabId) appStore.isDirty = true;
+  if (tab.id === appStore.activeTabId) {
+    appStore.isDirty = true;
+    appStore.saveState = "dirty";
+  }
   documentRuntimeMetadata.set(tabId, { revision, derived });
   publishDocumentDerivedPatch(tabId, { revision, ...derived });
   scheduleDocumentSnapshot(tabId);
@@ -1085,6 +1090,18 @@ export async function goForwardNavigation() {
 }
 
 export async function saveCurrentFile() {
+  appStore.saveState = "saving";
+  try {
+    const saved = await saveCurrentFileImpl();
+    appStore.saveState = saved ? "saved" : appStore.isDirty ? "dirty" : "saved";
+    return saved;
+  } catch (error) {
+    appStore.saveState = "failed";
+    throw error;
+  }
+}
+
+async function saveCurrentFileImpl() {
   if (appStore.documentMode === "large" && appStore.largeFile) {
     appStore.statusMessage = "正在保存大文件...";
     const state = await invoke<DirtyState>("save_large_file", {
@@ -2288,6 +2305,7 @@ function projectTab(tab: DocumentTab) {
   appStore.documentMode = tab.documentMode;
   appStore.largeFile = tab.largeFile;
   appStore.isDirty = tab.isDirty;
+  appStore.saveState = tab.isDirty ? "dirty" : "saved";
   appStore.editorMode = tab.documentMode === "large" ? "wysiwyg" : tab.editorMode;
   appStore.pendingModeCursor = tab.pendingModeCursor;
   requestEditorPositionRestore(tab.position);
@@ -2656,6 +2674,7 @@ function resetOpenDocument() {
   appStore.documentMode = "normal";
   appStore.largeFile = null;
   appStore.isDirty = false;
+  appStore.saveState = "saved";
   appStore.editorMode = "wysiwyg";
   appStore.activeTabId = "";
   appStore.splitLayout = defaultSplitLayout();

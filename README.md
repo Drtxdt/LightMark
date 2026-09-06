@@ -22,12 +22,14 @@ LightMark 是一款轻量级 Markdown 桌面编辑器，基于 Tauri 2 + Rust + 
 - Mermaid 图表：代码块内实时 SVG 预览与编辑。
 - 代码块语法高亮：基于 `highlight.js` / `lowlight`。
 - 图片处理：支持剪贴板粘贴、拖拽插入，自动保存到文档同级的 `assets/` 目录。
-- HTML 导出：生成包含内嵌样式、代码高亮、数学公式、Mermaid 图表的自包含 HTML 文件。
+- 导出：支持自包含 HTML、原生 PDF、PNG，以及安装 Pandoc 后的 DOCX、LaTeX、EPUB 等格式；导出前会显示公式兼容、降级或阻止状态。
 - 右键上下文菜单：支持格式设置、表格操作、GitHub 警示框插入、剪贴板操作、复制为 HTML。
 - 命令面板：`Ctrl+Shift+P` 打开，模糊搜索命令。
 - 主题：亮色 / 暗色 / 跟随系统三种模式，全面覆盖暗色样式。
 - 前端插件接口：内置字数统计插件（状态栏 + 详情面板）。
 - 最近文件、主题、上次工作区持久化保存在 Tauri 应用配置目录。
+- 多标签页、左右分屏、会话恢复、外部文件监听与保存冲突保护。
+- Wiki Links、反向链接、未链接提及、标签与工作区全文索引。
 - 保存快捷键 `Ctrl+S`。
 - 侧边栏可拖拽调整宽度。
 - 脏状态追踪，切换文件时提示保存。
@@ -44,10 +46,10 @@ LightMark 是一款轻量级 Markdown 桌面编辑器，基于 Tauri 2 + Rust + 
 - Markdown 渲染：`markdown-it`
 - 语法高亮：`highlight.js` + `lowlight`
 - 图表：Mermaid
-- 数学：KaTeX（`markdown-it-katex`）
+- 数学：KaTeX
 - HTML 转 Markdown：Turndown
 
-技术选型说明：MVP 阶段选择 `markdown-it` 是因为集成快、插件模型简单、与 HTML 导出兼容好。未来如有更深的 AST 变换需求，可考虑引入 remark/unified 流水线。
+可视化编辑使用 Tiptap，同时保留原始 Markdown 顶层语法范围；生成快照时仅序列化变更的结构区间，未编辑块继续使用原文。
 
 ## 安装
 
@@ -83,18 +85,12 @@ pnpm build
 
 ## 当前 MVP 限制
 
-- 所见即所得模式的 Markdown 往返转换依赖 HTML → Markdown 转换，部分复杂格式在富文本编辑后可能被标准化。
+- 可视化模式已对未编辑顶层块做原文保留；若非标准组合语法导致源码映射无法建立，保存会明确失败并保留原文件与编辑缓冲，用户可切换到源码模式恢复或另存为副本，不会静默退回整篇规范化。
 - 插件系统目前仅运行在前端内存中，未做沙箱隔离。
-- PDF、DOCX、PPTX 导出尚未实现。
-- 外部文件变更监听和冲突检测尚未实现。
-- LaTeX 支持通过 KaTeX 渲染，但没有独立的公式编辑 UI。
+- Pandoc 目标需要系统已安装 Pandoc；不同目标对公式、Mermaid 和本地资源的支持程度不同。
+- 大于 5 MB 的文档进入分块大文件模式，不提供完整可视化编辑。
+- 移动/重命名时的跨文档链接批量重写仍在完善中。
 
-## 路线图
+## 验收与已知限制
 
-- 提升 Markdown 往返转换的保真度。
-- 添加文件监视和冲突解决。
-- 添加多标签页支持。
-- 扩展插件 API，支持沙箱化 JS/WASM 插件。
-- 添加 PDF、DOCX、PPTX 导出。
-- 添加设置界面和快捷键自定义。
-- 添加可选的 AI 扩展点（不引入云依赖到核心应用）。
+当前发布验收状态、复现步骤和自动化证据见 [`docs/acceptance-matrix.md`](docs/acceptance-matrix.md)，本轮变更摘要见 [`docs/release-notes-2026-09-06.md`](docs/release-notes-2026-09-06.md)。

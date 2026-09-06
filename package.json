@@ -38,7 +38,9 @@
     "check:wysiwyg-find": "node scripts/check-wysiwyg-find.mjs",
     "check:source-outline": "node scripts/check-source-outline-incremental.mjs",
     "check:document-runtime": "node scripts/check-document-runtime.mjs",
+    "check:source-preservation": "node scripts/check-source-preservation.mjs",
     "check:editor-boundaries": "node scripts/check-editor-boundaries.mjs",
+    "check:webview-markdown-editing": "node scripts/webview-markdown-editing-qa.mjs",
     "check:bundle-budget": "node scripts/check-bundle-budget.mjs"
   },
   "dependencies": {

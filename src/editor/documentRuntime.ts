@@ -46,6 +46,7 @@ export interface DocumentSessionAdapter {
   readonly paneId: EditorPaneId;
   readonly mode: EditorMode;
   readonly revision: number;
+  flushPendingEdits?(reason: SnapshotReason): Promise<void>;
   snapshot(reason: SnapshotReason, options?: SnapshotOptions): Promise<MarkdownSnapshot>;
   derivedState(): DocumentDerivedState;
   replaceMarkdown(markdown: string): Promise<void>;
@@ -155,6 +156,8 @@ function emitSessionChange() {
 export async function snapshotDocumentTab(tabId: string, reason: SnapshotReason, options: SnapshotOptions = {}) {
   const session = documentSessionForTab(tabId);
   if (!session) return null;
+  if (options.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+  await session.flushPendingEdits?.(reason);
   if (options.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
   const expectedRevision = session.revision;
   const snapshot = await session.snapshot(reason, options);

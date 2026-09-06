@@ -32,6 +32,7 @@ type EditorCommand =
   | "taskList"
   | "heading"
   | "image"
+  | "table"
   | "alert";
 
 const exportMenuOpen = ref(false);
@@ -153,7 +154,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
       <button class="lm-toolbar-button toolbar-priority-low" title="GitHub 警示框" aria-label="GitHub 警示框" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('alert', 'note')">
         <UiIcon name="badge-alert" />
       </button>
-      <button class="lm-toolbar-button toolbar-priority-low disabled-soft" title="表格，未来版本实现" aria-label="表格，未来版本实现" disabled>
+      <button class="lm-toolbar-button toolbar-priority-low" title="插入表格" aria-label="插入表格" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('table')">
         <UiIcon name="table" />
       </button>
     </div>

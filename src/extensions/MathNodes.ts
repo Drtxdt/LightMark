@@ -249,6 +249,31 @@ export const BlockMath = Node.create({
 
 type NodeViewPosition = (() => number | undefined) | boolean;
 
+type PendingMathEdit = {
+  flush: () => Promise<void>;
+};
+
+const pendingMathEdits = new WeakMap<object, Set<PendingMathEdit>>();
+
+function registerPendingMathEdit(editor: object, edit: PendingMathEdit) {
+  let edits = pendingMathEdits.get(editor);
+  if (!edits) {
+    edits = new Set();
+    pendingMathEdits.set(editor, edits);
+  }
+  edits.add(edit);
+  return () => {
+    edits?.delete(edit);
+    if (edits?.size === 0) pendingMathEdits.delete(editor);
+  };
+}
+
+export async function flushPendingMathEdits(editor: object) {
+  const edits = pendingMathEdits.get(editor);
+  if (!edits?.size) return;
+  await Promise.all([...edits].map((edit) => edit.flush()));
+}
+
 type EditorMathEvaluation = {
   entriesByPos: Map<number, MathEvaluationEntry>;
   numberingMode: typeof appStore.settings.markdown.mathNumbering;
@@ -388,20 +413,26 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   let editing = Boolean(attrs.editing);
   let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
+  let composing = false;
+  const compositionWaiters = new Set<() => void>();
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
     if (typeof getPos !== "function") return;
     const pos = getPos();
     if (typeof pos !== "number") return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, {
+    const node = editor.view.state.doc.nodeAt(pos);
+    if (!node) return;
+    const nextAttrs = {
       tex,
       delimiter,
       raw,
       originalTex,
       displayMode,
-      editing,
+      editing: false,
       ...next,
-    }));
+    };
+    if (Object.entries(nextAttrs).every(([key, value]) => node.attrs[key] === value)) return;
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
   };
 
   const exitToDocument = (side: "before" | "after") => {
@@ -411,6 +442,16 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     renderDisplay();
     setInlineSelection(editor, getPos, side);
   };
+
+  const pendingEdit: PendingMathEdit = {
+    async flush() {
+      if (composing) await new Promise<void>((resolve) => { compositionWaiters.add(resolve); });
+      if (!editing) return;
+      raw = tex === originalTex ? raw : "";
+      updateAttrs({ tex, raw, editing: false });
+    },
+  };
+  const unregisterPendingEdit = registerPendingMathEdit(editor, pendingEdit);
 
   const renderDisplay = () => {
     displayRendered = true;
@@ -433,7 +474,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     dom.textContent = tex;
   };
 
-  const renderEditor = () => {
+  const renderEditor = (initialCaret: "start" | "end" = "end") => {
     dom.innerHTML = "";
     dom.className = "math-node math-node-inline math-node-inline-editing";
 
@@ -495,6 +536,13 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     });
 
     source.addEventListener("input", refresh);
+    source.addEventListener("compositionstart", () => { composing = true; });
+    source.addEventListener("compositionend", () => {
+      composing = false;
+      for (const resolve of compositionWaiters) resolve();
+      compositionWaiters.clear();
+      refresh();
+    });
     source.addEventListener("keydown", (event) => {
       if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && isCaretAtStart(source)) {
@@ -504,7 +552,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       }
       if (event.key === "Enter" || event.key === "Escape") {
         event.preventDefault();
-        source.blur();
+        exitToDocument("after");
         return;
       }
       if (event.key === "ArrowRight" && isCaretAtEnd(source)) {
@@ -533,10 +581,8 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     renderKatex(body, tex, displayMode, "公式预览", { delimiter, raw: "", evaluation });
     installEditingTools();
     const diagnostic = evaluation?.diagnostic ?? null;
-    requestAnimationFrame(() => {
-      source.focus();
-      setContentEditableCaret(source, diagnostic?.texOffset ?? tex.length);
-    });
+    source.focus();
+    setContentEditableCaret(source, initialCaret === "start" ? 0 : diagnostic?.texOffset ?? tex.length);
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -555,9 +601,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       return;
     }
     event.preventDefault();
+    const bounds = dom.getBoundingClientRect();
+    const initialCaret = event.clientX <= bounds.left + bounds.width / 2 ? "start" : "end";
     editing = true;
-    updateAttrs({ editing: true });
-    renderEditor();
+    renderEditor(initialCaret);
   });
 
   editing ? renderEditor() : renderPlaceholder();
@@ -579,7 +626,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       raw = nextNode.attrs.raw || "";
       originalTex = nextNode.attrs.originalTex ?? tex;
       displayMode = Boolean(nextNode.attrs.displayMode);
-      if (editing && nextEditing && dom.querySelector(".math-inline-source-editor")) return true;
+      if (editing && dom.querySelector(".math-inline-source-editor")) return true;
       editing = nextEditing;
       editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
@@ -587,7 +634,6 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     selectNode() {
       if (editing) return;
       editing = true;
-      updateAttrs({ editing: true });
       renderEditor();
     },
     deselectNode() {
@@ -598,6 +644,9 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     },
     destroy() {
       suggest?.destroy();
+      for (const resolve of compositionWaiters) resolve();
+      compositionWaiters.clear();
+      unregisterPendingEdit();
       stopVisibility();
       stopRefresh();
     },
@@ -618,20 +667,26 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   let editing = attrs.editing || !tex;
   let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
+  let composing = false;
+  const compositionWaiters = new Set<() => void>();
 
   const updateAttrs = (next: Partial<MathAttrs>) => {
     if (typeof getPos !== "function") return;
     const pos = getPos();
     if (typeof pos !== "number") return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, {
+    const node = editor.view.state.doc.nodeAt(pos);
+    if (!node) return;
+    const nextAttrs = {
       tex,
       delimiter,
       raw,
       originalTex,
       displayMode: true,
-      editing,
+      editing: false,
       ...next,
-    }));
+    };
+    if (Object.entries(nextAttrs).every(([key, value]) => node.attrs[key] === value)) return;
+    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
   };
 
   const exitToNextParagraph = () => {
@@ -649,6 +704,16 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     if (tex.trim()) renderDisplay();
     setBlockSelectionBefore(editor, getPos);
   };
+
+  const pendingEdit: PendingMathEdit = {
+    async flush() {
+      if (composing) await new Promise<void>((resolve) => { compositionWaiters.add(resolve); });
+      if (!editing) return;
+      raw = tex === originalTex ? raw : "";
+      updateAttrs({ tex, raw, editing: false });
+    },
+  };
+  const unregisterPendingEdit = registerPendingMathEdit(editor, pendingEdit);
 
   const renderDisplay = () => {
     displayRendered = true;
@@ -719,7 +784,6 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
         evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, true),
       });
       installEditingTools();
-      updateAttrs({ tex, raw: "", editing: true });
       suggest?.sync();
       syncOverlayPosition();
     };
@@ -742,6 +806,13 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     });
 
     textarea.addEventListener("input", refresh);
+    textarea.addEventListener("compositionstart", () => { composing = true; });
+    textarea.addEventListener("compositionend", () => {
+      composing = false;
+      for (const resolve of compositionWaiters) resolve();
+      compositionWaiters.clear();
+      refresh();
+    });
     textarea.addEventListener("keydown", (event) => {
       if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
@@ -751,7 +822,12 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       }
       if (event.key === "Escape") {
         event.preventDefault();
-        textarea.blur();
+        exitToNextParagraph();
+        return;
+      }
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        exitToNextParagraph();
         return;
       }
       if (event.key === "ArrowRight" && textarea.selectionStart === textarea.value.length && textarea.selectionEnd === textarea.value.length) {
@@ -781,11 +857,9 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     installEditingTools();
     syncOverlayPosition();
     const diagnostic = evaluation?.diagnostic ?? null;
-    requestAnimationFrame(() => {
-      textarea.focus();
-      const offset = diagnostic?.texOffset ?? tex.length;
-      textarea.setSelectionRange(offset, offset);
-    });
+    textarea.focus();
+    const offset = diagnostic?.texOffset ?? tex.length;
+    textarea.setSelectionRange(offset, offset);
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -805,7 +879,6 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     }
     event.preventDefault();
     editing = true;
-    updateAttrs({ editing: true });
     renderEditor();
   });
 
@@ -827,7 +900,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       delimiter = nextNode.attrs.delimiter || "display-dollar";
       raw = nextNode.attrs.raw || "";
       originalTex = nextNode.attrs.originalTex ?? tex;
-      if (editing && nextEditing && dom.querySelector(".math-block-editor")) return true;
+      if (editing && dom.querySelector(".math-block-editor")) return true;
       editing = nextEditing;
       editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
@@ -835,7 +908,6 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     selectNode() {
       if (editing) return;
       editing = true;
-      updateAttrs({ editing: true });
       renderEditor();
     },
     deselectNode() {
@@ -846,6 +918,9 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     },
     destroy() {
       suggest?.destroy();
+      for (const resolve of compositionWaiters) resolve();
+      compositionWaiters.clear();
+      unregisterPendingEdit();
       stopVisibility();
       stopRefresh();
     },

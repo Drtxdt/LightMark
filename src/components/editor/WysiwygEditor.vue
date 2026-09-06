@@ -47,7 +47,10 @@ import {
   exposeInlineMarkdown,
   exposeMarkdownMeta,
   headingPositionAt,
+  markdownPresentationMeta,
   markdownMarkRangeAt,
+  reconcileExposedHeading as reconcileExposedHeadingTransaction,
+  removeExposedMarkdownFormatting,
   type ExposedMarkdownRange,
 } from "../../editor/wysiwygMarkdownEditing";
 import {
@@ -71,7 +74,8 @@ import { incrementalLowlightPlugin } from "../../editor/incrementalLowlight";
 import { recordStartupStage } from "../../editor/startupMetrics";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { normalizeMatchIndex, replacementForMatch } from "../../utils/findReplace";
-import { renderMarkdownForEditor } from "../../utils/markdown";
+import { markdownTopLevelSourceBlocks, renderMarkdownForEditor } from "../../utils/markdown";
+import { combinePreservedSourceBlocks, inspectSourceEnvelope } from "../../editor/sourcePreservation";
 import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import {
@@ -126,7 +130,7 @@ import {
   type ImageAlignment,
 } from "../../utils/enhancedImages";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
-import { BlockMath, InlineMath } from "../../extensions/MathNodes";
+import { BlockMath, InlineMath, flushPendingMathEdits } from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { EscapedDollarNode } from "../../extensions/EscapedDollarNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
@@ -180,6 +184,7 @@ type ToolbarEditorCommand =
   | "taskList"
   | "heading"
   | "image"
+  | "table"
   | "alert";
 type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
 const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
@@ -1279,7 +1284,7 @@ const FootnotesNode = Node.create({
   },
 });
 
-const exposedMarkdownLifecycleKey = new PluginKey<boolean>("lightmarkExposedMarkdownLifecycle");
+const exposedMarkdownLifecycleKey = new PluginKey<ExposedMarkdownRange | null>("lightmarkExposedMarkdownLifecycle");
 
 const ExposedMarkdownLifecycle = Extension.create({
   name: "exposedMarkdownLifecycle",
@@ -1287,12 +1292,28 @@ const ExposedMarkdownLifecycle = Extension.create({
     return [new Plugin({
       key: exposedMarkdownLifecycleKey,
       state: {
-        init: () => false,
-        apply: (transaction, active) => {
-          if (transaction.getMeta(clearExposeMarkdownMeta)) return false;
-          if (transaction.getMeta(exposeMarkdownMeta)) return true;
-          return active;
+        init: (): ExposedMarkdownRange | null => null,
+        apply: (transaction, active: ExposedMarkdownRange | null): ExposedMarkdownRange | null => {
+          if (transaction.getMeta(clearExposeMarkdownMeta)) return null;
+          const exposed = transaction.getMeta(exposeMarkdownMeta) as ExposedMarkdownRange | undefined;
+          if (exposed) return exposed;
+          if (!active || !transaction.docChanged) return active;
+          return {
+            ...active,
+            from: transaction.mapping.map(active.from, -1),
+            to: transaction.mapping.map(active.to, 1),
+            blockFrom: transaction.mapping.map(active.blockFrom, -1),
+          };
         },
+      },
+      appendTransaction: (transactions, oldState, newState) => {
+        if (exposedMarkdownLifecycleKey.getState(oldState) || exposedMarkdownLifecycleKey.getState(newState)) return null;
+        if (transactions.some((transaction) => transaction.docChanged)) return null;
+        if (!oldState.selection.empty || !newState.selection.empty) return null;
+        const oldPos = oldState.selection.from;
+        const newPos = newState.selection.from;
+        if (oldPos === newPos) return null;
+        return exposeMarkdownAtCursor(newState, newPos > oldPos ? "right" : "left");
       },
     })];
   },
@@ -1332,8 +1353,11 @@ const TyporaSourceMarkers = Extension.create({
         props: {
           decorations(state) {
             const decorations: Decoration[] = [];
+            const exposed = exposedMarkdownLifecycleKey.getState(state);
 
-            if (state.selection.empty) {
+            if (exposed) {
+              decorations.push(...createExposedMarkdownDecorations(state, exposed));
+            } else if (state.selection.empty) {
               decorations.push(
                 ...createMarkDecorations(state, "bold", "**", "**"),
                 ...createMarkDecorations(state, "italic", "*", "*"),
@@ -2481,6 +2505,7 @@ const editor = useEditor({
       }
       if (handleExactFormatHistoryKeydown(view, event)) return true;
       if (handleWikiCompletionKeydown(view, event)) return true;
+      if (handleExposedMarkdownDeletion(view, event)) return true;
       if (handleWysiwygPair(view, event)) return true;
       if (handleWysiwygTab(view, event)) return true;
       if (convertLeadingFrontMatter(view, event)) return true;
@@ -2494,7 +2519,10 @@ const editor = useEditor({
         view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
         return true;
       }
-      scheduleMarkdownExposureAfterCursorMove(view, event);
+      if (exposeMarkdownBeforeCursorMove(view, event)) {
+        event.preventDefault();
+        return true;
+      }
       if (event.key === "Enter") {
         if ((event.ctrlKey || event.metaKey) && insertTableRowAfterAndFocusFirstCell(view)) {
           event.preventDefault();
@@ -2526,6 +2554,7 @@ const editor = useEditor({
       return false;
     },
     handleTextInput(view, from, to, text) {
+      if (handleExposedMarkdownTextInput(view, from, to, text)) return true;
       scheduleSlashMenuUpdate(view);
       return handleWysiwygMarkdownShortcutText(view, from, to, text);
     },
@@ -2545,6 +2574,7 @@ const editor = useEditor({
         const mouseEvent = event as MouseEvent;
         const marker = getEventElement(mouseEvent)?.closest<HTMLElement>(".md-live-marker");
         if (marker) {
+          if (exposedMarkdownLifecycleKey.getState(view.state)) return false;
           const heading = marker.closest<HTMLElement>("h1,h2,h3,h4,h5,h6");
           if (heading) {
             mouseEvent.preventDefault();
@@ -2646,6 +2676,7 @@ const editor = useEditor({
     },
     handleClick(view, pos, event) {
       const target = getEventElement(event);
+      if (exposedMarkdownLifecycleKey.getState(view.state)) return false;
       const table = target?.closest<HTMLTableElement>("table");
       if (table && view.dom.contains(table)) {
         const cell = target?.closest<HTMLTableCellElement>("td,th") || null;
@@ -2691,7 +2722,8 @@ const editor = useEditor({
     },
   },
   onUpdate({ editor, transaction }) {
-    updateExposedMarkdownRange(editor.view, transaction);
+    if (transaction.getMeta(markdownPresentationMeta)) return;
+    reconcileExposedHeading(editor.view);
     if (suppressWysiwygUpdate || transaction.getMeta("lightmarkLowlightRefresh")) return;
     getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
     wysiwygRevision += 1;
@@ -3717,6 +3749,15 @@ function registerWysiwygDocumentSession() {
   const tab = getPaneTab(props.paneId);
   if (!activeEditor || !tab) return;
   const tabId = tab.id;
+  const capturePreservationBaseline = (markdown: string) => {
+    const nodes: object[] = [];
+    activeEditor.state.doc.forEach((node: object) => nodes.push(node));
+    const source = markdownTopLevelSourceBlocks(markdown);
+    return source.blocks.length === nodes.length
+      ? { nodes, blocks: source.blocks, prefix: source.prefix, lineEnding: inspectSourceEnvelope(markdown).lineEnding }
+      : null;
+  };
+  let preservationBaseline = capturePreservationBaseline(getPaneContent(props.paneId));
   snapshotCache = new WysiwygSnapshotCache({
     tabId: () => getPaneTab(props.paneId)?.id ?? tabId,
     revision: () => wysiwygRevision,
@@ -3737,8 +3778,19 @@ function registerWysiwygDocumentSession() {
       return container.innerHTML;
     },
     convertBlock: (html) => editorHtmlToMarkdown(html).replace(/^\n+|\n+$/g, ""),
-    combineBlocks: (blocks, previousMarkdown, sourceBlocks) => preserveMarkdownTerminalNewlines(
-      blocks
+    combineBlocks: (blocks, previousMarkdown, sourceBlocks) => {
+      if (preservationBaseline) return combinePreservedSourceBlocks(
+        preservationBaseline.nodes,
+        preservationBaseline.blocks,
+        sourceBlocks,
+        blocks,
+        preservationBaseline.prefix,
+        preservationBaseline.lineEnding,
+      );
+      if (previousMarkdown.length > 0) {
+        throw new Error("无法建立 Markdown 源码映射，已阻止静默覆盖。请切换到源码模式恢复或另存为副本。");
+      }
+      return preserveMarkdownTerminalNewlines(blocks
         .map((block, index) => {
           const nodeType = (sourceBlocks[index] as { type?: { name?: string } })?.type?.name;
           const listNeedsFollowingBlockPadding = index < blocks.length - 1
@@ -3749,14 +3801,16 @@ function registerWysiwygDocumentSession() {
         })
         .filter((block) => block.length > 0)
         .join("\n\n"),
-      previousMarkdown,
-    ),
+        previousMarkdown,
+      );
+    },
     oracle: (previousMarkdown) => {
       const currentEditor = editor.value;
       if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
       return preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(currentEditor.getHTML()), previousMarkdown);
     },
     verifyIncremental: () => window.localStorage.getItem("lightmark:verify-wysiwyg-snapshot") === "1",
+    trustIncremental: () => Boolean(preservationBaseline),
   });
   unregisterDocumentSession = registerDocumentSession({
     tabId,
@@ -3765,10 +3819,17 @@ function registerWysiwygDocumentSession() {
     get revision() {
       return wysiwygRevision;
     },
+    async flushPendingEdits() {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      await finalizeMarkdownExposure(currentEditor.view);
+      await flushPendingMathEdits(currentEditor);
+    },
     async snapshot(reason, options) {
       if (!snapshotCache) throw new Error("所见即所得快照会话已经关闭。");
       const snapshot = await snapshotCache.snapshot(reason, options);
       if (editor.value?.view && wysiwygRevision === snapshot.revision) {
+        preservationBaseline = capturePreservationBaseline(snapshot.markdown);
         captureExactWysiwygPosition(editor.value.view, snapshot.markdown);
         const derived = getWysiwygDerivedState(editor.value.view.state);
         publishDocumentDerivedState(tabId, {
@@ -3804,6 +3865,7 @@ function registerWysiwygDocumentSession() {
       const currentEditor = editor.value;
       if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
       currentEditor.commands.setContent(renderMarkdownForEditorWithAssets(markdown), { emitUpdate: false });
+      preservationBaseline = capturePreservationBaseline(markdown);
       wysiwygRevision += 1;
       snapshotCache?.invalidate();
       outlineDecorationEpoch += 1;
@@ -4355,6 +4417,9 @@ function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetai
       break;
     case "image":
       insertImageByUrl();
+      break;
+    case "table":
+      editor.value?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
       break;
     case "alert":
       insertGithubAlert(typeof event.detail?.value === "string" ? event.detail.value : "note");
@@ -5450,6 +5515,19 @@ function createOutlineHeadingDecorations(state: any) {
   return value;
 }
 
+function createExposedMarkdownDecorations(state: any, exposed: ExposedMarkdownRange) {
+  const decorations: Decoration[] = [];
+  if (exposed.kind === "heading" && exposed.headingInvalid) return decorations;
+  const max = state.doc.content.size;
+  const from = Math.max(0, Math.min(exposed.from, max));
+  const openTo = Math.max(from, Math.min(from + exposed.open.length, max));
+  const closeFrom = Math.max(openTo, Math.min(exposed.to - exposed.close.length, max));
+  const to = Math.max(closeFrom, Math.min(exposed.to, max));
+  if (openTo > from) decorations.push(Decoration.inline(from, openTo, { class: "md-live-marker" }));
+  if (to > closeFrom) decorations.push(Decoration.inline(closeFrom, to, { class: "md-live-marker" }));
+  return decorations;
+}
+
 function currentCollapsedHeadingSignature() {
   return (getPaneTab(props.paneId)?.collapsedHeadingKeys ?? []).join("\u0000");
 }
@@ -5691,45 +5769,106 @@ function getActiveMarkRange(state: any, markName: string) {
   return { from, to, mark: activeMark };
 }
 
-let markdownCursorExposureToken = 0;
-const exposedMarkdownRanges = new WeakMap<object, ExposedMarkdownRange>();
-
-function updateExposedMarkdownRange(view: any, transaction: any) {
-  const exposed = transaction.getMeta(exposeMarkdownMeta) as ExposedMarkdownRange | undefined;
-  if (exposed) {
-    exposedMarkdownRanges.set(view, exposed);
-    return;
-  }
-  const current = exposedMarkdownRanges.get(view);
-  if (!current || !transaction.docChanged) return;
-  exposedMarkdownRanges.set(view, {
-    ...current,
-    from: transaction.mapping.map(current.from, -1),
-    to: transaction.mapping.map(current.to, 1),
-    blockFrom: transaction.mapping.map(current.blockFrom, -1),
-  });
-}
-
 function restoreExposedMarkdownWhenOutside(view: any, force = false) {
-  const exposed = exposedMarkdownRanges.get(view);
+  const exposed = exposedMarkdownLifecycleKey.getState(view.state);
   if (!exposed) return false;
+  if (exposed.kind === "heading" && exposed.headingInvalid) return false;
   const { from, to } = view.state.selection;
-  if (!force && from === to && from > exposed.from && from < exposed.to) return false;
+  if (!force && from === to && from >= exposed.from && from <= exposed.to) return false;
 
-  exposedMarkdownRanges.delete(view);
   const options = { targetBlockFrom: exposed.blockFrom };
   const tr = exposed.kind === "heading"
     ? convertMarkdownHeading(view.state, { force: true, ...options })
     : convertInlineCodeSyntax(view.state, options) || convertInlineMarkdownSyntax(view.state, options);
   if (!tr) {
-    view.dispatch(view.state.tr.setMeta(clearExposeMarkdownMeta, true));
+    view.dispatch(view.state.tr
+      .setMeta(clearExposeMarkdownMeta, true)
+      .setMeta(markdownPresentationMeta, true)
+      .setMeta("addToHistory", false));
     return false;
   }
-  view.dispatch(tr.setMeta(clearExposeMarkdownMeta, true).scrollIntoView());
+  view.dispatch(tr
+    .setMeta(clearExposeMarkdownMeta, true)
+    .setMeta(markdownPresentationMeta, true)
+    .setMeta("addToHistory", false)
+    .scrollIntoView());
   return true;
 }
 
-function scheduleMarkdownExposureAfterCursorMove(view: any, event: KeyboardEvent) {
+async function finalizeMarkdownExposure(view: any) {
+  if (view.composing) {
+    await new Promise<void>((resolve) => {
+      view.dom.addEventListener("compositionend", () => resolve(), { once: true });
+    });
+  }
+  reconcileExposedHeading(view);
+  restoreExposedMarkdownWhenOutside(view, true);
+}
+
+function handleExposedMarkdownDeletion(view: any, event: KeyboardEvent) {
+  if (event.key !== "Backspace" && event.key !== "Delete") return false;
+  const exposed = exposedMarkdownLifecycleKey.getState(view.state);
+  if (!exposed) return false;
+  if (exposed.kind === "heading" && exposed.headingInvalid) return false;
+  const selection = view.state.selection;
+  const deletionFrom = selection.empty
+    ? selection.from + (event.key === "Backspace" ? -1 : 0)
+    : selection.from;
+  const deletionTo = selection.empty ? deletionFrom + 1 : selection.to;
+  const openFrom = exposed.from;
+  const openTo = openFrom + exposed.open.length;
+  const closeFrom = exposed.to - exposed.close.length;
+  const touchesOpen = deletionFrom < openTo && deletionTo > openFrom;
+  const touchesClose = exposed.close.length > 0 && deletionFrom < exposed.to && deletionTo > closeFrom;
+  if (!touchesOpen && !touchesClose) return false;
+
+  event.preventDefault();
+  let tr = removeExposedMarkdownFormatting(view.state, exposed, touchesOpen ? "open" : "close");
+  if (tr && !selection.empty) {
+    const mappedFrom = tr.mapping.map(selection.from, -1);
+    const mappedTo = tr.mapping.map(selection.to, 1);
+    if (mappedTo > mappedFrom) tr = tr.delete(mappedFrom, mappedTo);
+    tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(mappedFrom, tr.doc.content.size)));
+  }
+  if (tr) view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function handleExposedMarkdownTextInput(view: any, from: number, to: number, text: string) {
+  const exposed = exposedMarkdownLifecycleKey.getState(view.state);
+  if (!exposed) return false;
+  const openFrom = exposed.from;
+  const openTo = openFrom + exposed.open.length;
+  const closeFrom = exposed.to - exposed.close.length;
+  const intersects = (rangeFrom: number, rangeTo: number) => from === to
+    ? from > rangeFrom && from < rangeTo
+    : from < rangeTo && to > rangeFrom;
+  const touchesOpen = intersects(openFrom, openTo);
+  const touchesClose = exposed.close.length > 0 && intersects(closeFrom, exposed.to);
+  if (!touchesOpen && !touchesClose) return false;
+  let tr = removeExposedMarkdownFormatting(view.state, exposed, touchesOpen ? "open" : "close");
+  if (!tr) return false;
+  if (to > from) {
+    const mappedFrom = tr.mapping.map(from, -1);
+    const mappedTo = tr.mapping.map(to, 1);
+    if (mappedTo > mappedFrom) tr = tr.delete(mappedFrom, mappedTo);
+    tr = tr.setSelection(TextSelection.create(tr.doc, Math.min(mappedFrom, tr.doc.content.size)));
+  }
+  if (text) tr = tr.insertText(text, tr.selection.from, tr.selection.to);
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function reconcileExposedHeading(view: any) {
+  const exposed = exposedMarkdownLifecycleKey.getState(view.state);
+  if (!exposed || exposed.kind !== "heading") return false;
+  const tr = reconcileExposedHeadingTransaction(view.state, exposed);
+  if (!tr) return false;
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+function exposeMarkdownBeforeCursorMove(view: any, event: KeyboardEvent) {
   const directions = {
     ArrowLeft: "left",
     ArrowRight: "right",
@@ -5737,15 +5876,12 @@ function scheduleMarkdownExposureAfterCursorMove(view: any, event: KeyboardEvent
     ArrowDown: "down",
   } as const;
   const direction = directions[event.key as keyof typeof directions];
-  if (!direction || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-  if (!view.state.selection.empty) return;
-
-  const token = ++markdownCursorExposureToken;
-  window.setTimeout(() => {
-    if (token !== markdownCursorExposureToken || view.isDestroyed || !view.state.selection.empty) return;
-    const tr = exposeMarkdownAtCursor(view.state, direction);
-    if (tr) view.dispatch(tr.scrollIntoView());
-  }, 0);
+  if (!direction || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  if (!view.state.selection.empty || exposedMarkdownLifecycleKey.getState(view.state)) return false;
+  const tr = exposeMarkdownAtCursor(view.state, direction);
+  if (!tr) return false;
+  view.dispatch(tr.scrollIntoView());
+  return true;
 }
 
 function exitEmptyStoredFormattingOnBackspace(view: any) {
@@ -6345,6 +6481,7 @@ function editInlineSyntaxAsMarkdown(view: any, target: HTMLElement, pos: number)
       definition.open,
       close,
       markerText === close ? "close" : "open",
+      pos,
     );
     if (!tr) return false;
     view.dispatch(tr.scrollIntoView());

@@ -69,6 +69,46 @@ export function renderMarkdownForEditor(markdown: string) {
   return editorMd.render(renderMarkdownTables(prepared, (source) => editorMd.renderInline(source)));
 }
 
+export interface MarkdownSourceBlock {
+  from: number;
+  contentTo: number;
+  to: number;
+  source: string;
+  separator: string;
+}
+
+export function markdownTopLevelSourceBlocks(markdown: string): { prefix: string; blocks: MarkdownSourceBlock[] } {
+  const prepared = markSpecialBlocksForEditor(markdown);
+  const tokens = editorMd.parse(prepared, {});
+  const lineStarts = markdownLineStarts(markdown);
+  const documentPrefixLength = markdown.startsWith("\uFEFF") ? 1 : 0;
+  const ranges = tokens
+    .filter((token) => token.level === 0 && token.map && token.nesting !== -1)
+    .map((token) => ({ fromLine: token.map![0], toLine: token.map![1] }))
+    .filter((range, index, items) => index === 0 || range.fromLine !== items[index - 1].fromLine || range.toLine !== items[index - 1].toLine);
+  const blocks = ranges.map((range, index) => {
+    const lineFrom = lineStarts[Math.min(range.fromLine, lineStarts.length - 1)] ?? markdown.length;
+    const from = index === 0 ? Math.max(lineFrom, documentPrefixLength) : lineFrom;
+    const contentTo = lineStarts[Math.min(range.toLine, lineStarts.length - 1)] ?? markdown.length;
+    const nextLine = ranges[index + 1]?.fromLine;
+    const to = nextLine == null ? markdown.length : lineStarts[Math.min(nextLine, lineStarts.length - 1)] ?? markdown.length;
+    return {
+      from,
+      contentTo,
+      to,
+      source: markdown.slice(from, contentTo),
+      separator: markdown.slice(contentTo, to),
+    };
+  });
+  return { prefix: markdown.slice(0, blocks[0]?.from ?? markdown.length), blocks };
+}
+
+function markdownLineStarts(markdown: string) {
+  const starts = [0];
+  for (const match of markdown.matchAll(/\r\n|\r|\n/g)) starts.push((match.index ?? 0) + match[0].length);
+  return starts;
+}
+
 export function buildExportHtml(
   title: string,
   body: string,

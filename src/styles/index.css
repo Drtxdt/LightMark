@@ -13,7 +13,7 @@
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(185 179 168 / 44%) transparent;
+  scrollbar-color: rgb(148 163 184 / 48%) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -28,12 +28,12 @@
 *::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: rgb(185 179 168 / 36%);
+  background: rgb(148 163 184 / 40%);
   background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgb(141 134 124 / 58%);
+  background: rgb(100 116 139 / 62%);
   background-clip: padding-box;
 }
 
@@ -42,16 +42,16 @@
 }
 
 .dark * {
-  scrollbar-color: rgb(117 111 102 / 46%) transparent;
+  scrollbar-color: rgb(100 116 139 / 54%) transparent;
 }
 
 .dark *::-webkit-scrollbar-thumb {
-  background: rgb(117 111 102 / 38%);
+  background: rgb(100 116 139 / 44%);
   background-clip: padding-box;
 }
 
 .dark *::-webkit-scrollbar-thumb:hover {
-  background: rgb(148 142 132 / 56%);
+  background: rgb(148 163 184 / 62%);
   background-clip: padding-box;
 }
 
@@ -64,36 +64,40 @@ body,
 }
 
 body {
-  font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, "Segoe UI Emoji", "Segoe UI", sans-serif;
-  background: #f3ecdf;
-  color: #342f29;
+  font-family: var(--lm-ui-font-family);
+  font-size: 13px;
+  background: var(--lm-canvas);
+  color: var(--lm-ink);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
 :root {
   color-scheme: light;
-  --lm-canvas: #eee6d8;
-  --lm-surface: #fdfbf6;
-  --lm-surface-soft: #f7f2e8;
-  --lm-surface-raised: #fffefa;
-  --lm-sidebar: #f2eadc;
-  --lm-ink: #342f29;
-  --lm-ink-soft: #62594e;
-  --lm-ink-muted: #8a7f70;
-  --lm-border: rgba(112, 91, 65, 0.16);
-  --lm-border-strong: rgba(112, 91, 65, 0.26);
-  --lm-accent: #9a6a35;
-  --lm-accent-soft: rgba(174, 119, 57, 0.12);
-  --lm-focus: rgba(166, 111, 52, 0.26);
-  --lm-shadow-sm: 0 1px 2px rgba(67, 48, 29, 0.06), 0 5px 16px rgba(67, 48, 29, 0.04);
-  --lm-shadow-md: 0 18px 48px rgba(55, 39, 24, 0.14), 0 3px 10px rgba(55, 39, 24, 0.06);
+  --lm-canvas: #f3f4f6;
+  --lm-surface: #ffffff;
+  --lm-surface-soft: #f8fafc;
+  --lm-surface-raised: #ffffff;
+  --lm-sidebar: #f1f3f5;
+  --lm-ink: #1f2937;
+  --lm-ink-soft: #475467;
+  --lm-ink-muted: #667085;
+  --lm-border: rgba(71, 84, 103, 0.18);
+  --lm-border-strong: rgba(71, 84, 103, 0.34);
+  --lm-accent: #3f6f9f;
+  --lm-accent-soft: rgba(63, 111, 159, 0.12);
+  --lm-focus: rgba(63, 111, 159, 0.34);
+  --lm-error: #b42318;
+  --lm-error-soft: rgba(180, 35, 24, 0.1);
+  --lm-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 5px 16px rgba(15, 23, 42, 0.04);
+  --lm-shadow-md: 0 18px 48px rgba(15, 23, 42, 0.14), 0 3px 10px rgba(15, 23, 42, 0.06);
   --lm-radius-sm: 7px;
   --lm-radius-md: 11px;
   --lm-radius-lg: 16px;
   --lm-transition: 170ms cubic-bezier(0.2, 0.75, 0.25, 1);
   --lm-editor-width: 860px;
-  --lm-editor-font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --lm-ui-font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --lm-editor-font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --lm-editor-font-size: 16px;
   --lm-editor-line-height: 1.6;
   --lm-editor-paragraph-spacing: 0.8em;
@@ -102,19 +106,21 @@ body {
 
 .dark {
   color-scheme: dark;
-  --lm-canvas: #100e0c;
-  --lm-surface: #191613;
-  --lm-surface-soft: #211d19;
-  --lm-surface-raised: #29231e;
-  --lm-sidebar: #171411;
-  --lm-ink: #eee7dc;
-  --lm-ink-soft: #c6bbab;
-  --lm-ink-muted: #998d7d;
-  --lm-border: rgba(226, 210, 188, 0.11);
-  --lm-border-strong: rgba(226, 210, 188, 0.2);
-  --lm-accent: #c99a63;
-  --lm-accent-soft: rgba(201, 154, 99, 0.13);
-  --lm-focus: rgba(211, 163, 105, 0.25);
+  --lm-canvas: #111318;
+  --lm-surface: #181a1f;
+  --lm-surface-soft: #20232a;
+  --lm-surface-raised: #272a31;
+  --lm-sidebar: #15171c;
+  --lm-ink: #f2f4f7;
+  --lm-ink-soft: #d0d5dd;
+  --lm-ink-muted: #98a2b3;
+  --lm-border: rgba(208, 213, 221, 0.14);
+  --lm-border-strong: rgba(208, 213, 221, 0.28);
+  --lm-accent: #78a6d3;
+  --lm-accent-soft: rgba(120, 166, 211, 0.15);
+  --lm-focus: rgba(120, 166, 211, 0.38);
+  --lm-error: #fda29b;
+  --lm-error-soft: rgba(253, 162, 155, 0.12);
   --lm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 7px 20px rgba(0, 0, 0, 0.13);
   --lm-shadow-md: 0 20px 56px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.22);
 }
@@ -969,7 +975,7 @@ sub {
   font-weight: 400;
   cursor: text;
   pointer-events: auto;
-  user-select: none;
+  user-select: text;
   white-space: pre;
 }
 

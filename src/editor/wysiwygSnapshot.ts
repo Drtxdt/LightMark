@@ -10,6 +10,7 @@ type SnapshotSource = {
   convertBlock: (html: string) => string;
   combineBlocks: (blocks: readonly string[], previousMarkdown: string, sourceBlocks: readonly object[]) => string;
   oracle: (previousMarkdown: string) => string;
+  trustIncremental?: boolean | (() => boolean);
   verifyIncremental?: (reason: SnapshotReason) => boolean;
 };
 
@@ -99,6 +100,18 @@ export class WysiwygSnapshotCache {
   private async buildSnapshot(revision: number, reason: SnapshotReason, options: SnapshotOptions) {
     throwIfAborted(options.signal);
     const previousMarkdown = this.source.previousMarkdown();
+    // Opening a document in WYSIWYG mode must be byte-for-byte inert. In
+    // particular, do not send BOMs, line endings, whitespace, or delimiter
+    // choices through the HTML -> Markdown compatibility serializer until a
+    // real content transaction has made the document dirty.
+    if (!this.source.dirty()) {
+      return {
+        tabId: this.source.tabId(),
+        revision,
+        markdown: previousMarkdown,
+        dirty: false,
+      } satisfies MarkdownSnapshot;
+    }
     const blocks = [...this.source.blocks()];
     const serialized: string[] = [];
     let sliceStarted = now();
@@ -125,6 +138,15 @@ export class WysiwygSnapshotCache {
     }
 
     const incremental = this.source.combineBlocks(serialized, previousMarkdown, blocks);
+    const trustIncremental = typeof this.source.trustIncremental === "function"
+      ? this.source.trustIncremental()
+      : this.source.trustIncremental === true;
+    // Source-range assembly is the authoritative serializer while a valid
+    // preservation baseline exists. Re-evaluate this for every snapshot: a
+    // newly opened/replaced document can acquire a baseline after the cache
+    // was created, and the HTML compatibility oracle intentionally cannot
+    // prove byte preservation.
+    if (trustIncremental) this.incrementalCompatible = true;
     const mustVerify = this.incrementalCompatible !== true || this.source.verifyIncremental?.(reason) === true;
     let markdown = incremental;
     if (mustVerify || this.incrementalCompatible === false) {

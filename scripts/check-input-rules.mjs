@@ -65,7 +65,15 @@ try {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText, "utf8");
   try {
-    const { exposeHeadingMarkdown, exposeInlineMarkdown, exposeMarkdownAtCursor, headingPositionAt, markdownMarkRangeAt } = await import(pathToFileURL(headingEditingPath).href);
+    const {
+      exposeHeadingMarkdown,
+      exposeInlineMarkdown,
+      exposeMarkdownAtCursor,
+      headingPositionAt,
+      markdownMarkRangeAt,
+      reconcileExposedHeading,
+      removeExposedMarkdownFormatting,
+    } = await import(pathToFileURL(headingEditingPath).href);
     const schema = new Schema({
       nodes: {
         doc: { content: "block+" },
@@ -79,9 +87,11 @@ try {
     assert.equal(headingPositionAt(state, 1), 0, "DOM positions inside headings must resolve to the block start");
     const tr = exposeHeadingMarkdown(state, headingPositionAt(state, 1), 1);
     assert.ok(tr);
-    assert.equal(tr.doc.firstChild.type.name, "paragraph");
+    assert.equal(tr.doc.firstChild.type.name, "heading", "revealing source must keep heading rendering active");
     assert.equal(tr.doc.firstChild.textContent, "## Title");
     assert.equal(tr.selection.from, 4, "caret should sit immediately after the editable marker");
+    assert.equal(tr.getMeta("lightmarkMarkdownPresentation"), true);
+    assert.equal(tr.getMeta("addToHistory"), false, "source reveal must not create an undo step");
 
     const strongSchema = new Schema({
       nodes: {
@@ -101,8 +111,70 @@ try {
     const inlineTr = exposeInlineMarkdown(strongState, boldRange.from, boldRange.to, bold, "**", "**", "open");
     assert.ok(inlineTr);
     assert.equal(inlineTr.doc.textContent, "**bold**");
-    assert.equal(inlineTr.doc.rangeHasMark(1, 9, bold), false);
+    assert.equal(inlineTr.doc.rangeHasMark(3, 7, bold), true, "formatted content must remain rendered while markers are visible");
+    assert.equal(inlineTr.doc.rangeHasMark(1, 3, bold), false, "opening marker must remain unformatted");
+    assert.equal(inlineTr.doc.rangeHasMark(7, 9, bold), false, "closing marker must remain unformatted");
     assert.equal(inlineTr.selection.from, 3);
+    assert.equal(inlineTr.getMeta("lightmarkMarkdownPresentation"), true);
+    assert.equal(inlineTr.getMeta("addToHistory"), false);
+    const exposedBold = inlineTr.getMeta("lightmarkExposeMarkdown");
+    const expandedBoldState = strongState.apply(inlineTr);
+    const removeBoldTr = removeExposedMarkdownFormatting(expandedBoldState, exposedBold, "open");
+    assert.ok(removeBoldTr);
+    assert.equal(removeBoldTr.doc.textContent, "bold", "deleting either delimiter removes the complete delimiter pair");
+    assert.equal(removeBoldTr.doc.rangeHasMark(1, 5, bold), false, "deleting a delimiter removes only its semantic format");
+
+    const symmetricSchema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { group: "block", content: "inline*" },
+        text: { group: "inline" },
+      },
+      marks: {
+        bold: {}, italic: {}, code: {}, strike: {}, highlight: {}, superscript: {}, subscript: {},
+        link: { attrs: { href: { default: "https://example.test" } } },
+      },
+    });
+    const syntaxCases = [
+      ["bold", "**", "**"], ["italic", "*", "*"], ["code", "`", "`"],
+      ["strike", "~~", "~~"], ["highlight", "==", "=="],
+      ["superscript", "^", "^"], ["subscript", "~", "~"],
+      ["link", "[", "](https://example.test)"],
+    ];
+    for (const [markName, open, close] of syntaxCases) {
+      const markType = symmetricSchema.marks[markName];
+      const syntaxState = EditorState.create({
+        schema: symmetricSchema,
+        doc: symmetricSchema.nodes.doc.create(null, [symmetricSchema.nodes.paragraph.create(null, symmetricSchema.text("text", [markType.create()]))]),
+      });
+      const syntaxTr = exposeInlineMarkdown(syntaxState, 1, 5, markType, open, close, "open");
+      const syntaxExposure = syntaxTr.getMeta("lightmarkExposeMarkdown");
+      const removed = removeExposedMarkdownFormatting(syntaxState.apply(syntaxTr), syntaxExposure, "close");
+      assert.equal(removed.doc.textContent, "text", `${markName} must remove its complete delimiter pair`);
+      assert.equal(removed.doc.rangeHasMark(1, 5, markType), false, `${markName} formatting must be removed`);
+    }
+
+    const italic = symmetricSchema.marks.italic;
+    const nestedBold = symmetricSchema.marks.bold;
+    const nestedState = EditorState.create({
+      schema: symmetricSchema,
+      doc: symmetricSchema.nodes.doc.create(null, [
+        symmetricSchema.nodes.paragraph.create(null, symmetricSchema.text("nested", [nestedBold.create(), italic.create()])),
+      ]),
+    });
+    const nestedExpose = exposeInlineMarkdown(nestedState, 1, 7, nestedBold, "**", "**", "open");
+    const nestedRemove = removeExposedMarkdownFormatting(
+      nestedState.apply(nestedExpose),
+      nestedExpose.getMeta("lightmarkExposeMarkdown"),
+      "open",
+    );
+    assert.equal(nestedRemove.doc.rangeHasMark(1, 7, nestedBold), false);
+    assert.equal(nestedRemove.doc.rangeHasMark(1, 7, italic), true, "removing one nested delimiter must preserve the other mark");
+
+    const removeHeadingTr = removeExposedMarkdownFormatting(state.apply(tr), tr.getMeta("lightmarkExposeMarkdown"), "open");
+    assert.ok(removeHeadingTr);
+    assert.equal(removeHeadingTr.doc.firstChild.type.name, "paragraph");
+    assert.equal(removeHeadingTr.doc.firstChild.textContent, "Title", "deleting the heading marker keeps only its body");
 
     const arrowRightState = strongState.apply(
       strongState.tr.setSelection(TextSelection.create(strongState.doc, 2)),
@@ -110,7 +182,8 @@ try {
     const arrowRightTr = exposeMarkdownAtCursor(arrowRightState, "right");
     assert.ok(arrowRightTr, "ArrowRight into formatted text must expose its opening marker");
     assert.equal(arrowRightTr.doc.textContent, "**bold**");
-    assert.equal(arrowRightTr.selection.from, 3);
+    assert.equal(arrowRightTr.doc.rangeHasMark(3, 7, bold), true);
+    assert.equal(arrowRightTr.selection.from, 4, "source reveal must preserve the caret's content offset");
 
     const arrowLeftState = strongState.apply(
       strongState.tr.setSelection(TextSelection.create(strongState.doc, 4)),
@@ -118,7 +191,18 @@ try {
     const arrowLeftTr = exposeMarkdownAtCursor(arrowLeftState, "left");
     assert.ok(arrowLeftTr, "ArrowLeft into formatted text must expose its closing marker");
     assert.equal(arrowLeftTr.doc.textContent, "**bold**");
-    assert.equal(arrowLeftTr.selection.from, 7);
+    assert.equal(arrowLeftTr.doc.rangeHasMark(3, 7, bold), true);
+    assert.equal(arrowLeftTr.selection.from, 6, "source reveal must preserve the caret's content offset");
+
+    const boundaryRightState = strongState.apply(strongState.tr.setSelection(TextSelection.create(strongState.doc, 1)));
+    const boundaryRightTr = exposeMarkdownAtCursor(boundaryRightState, "right");
+    assert.ok(boundaryRightTr, "the first ArrowRight at the opening boundary must reveal syntax immediately");
+    assert.equal(boundaryRightTr.selection.from, 3);
+
+    const boundaryLeftState = strongState.apply(strongState.tr.setSelection(TextSelection.create(strongState.doc, 5)));
+    const boundaryLeftTr = exposeMarkdownAtCursor(boundaryLeftState, "left");
+    assert.ok(boundaryLeftTr, "the first ArrowLeft at the closing boundary must reveal syntax immediately");
+    assert.equal(boundaryLeftTr.selection.from, 7);
 
     const headingCursorState = state.apply(
       state.tr.setSelection(TextSelection.create(state.doc, 3)),
@@ -127,6 +211,26 @@ try {
     assert.ok(headingCursorTr, "vertical cursor movement into a heading must expose its marker");
     assert.equal(headingCursorTr.doc.firstChild.textContent, "## Title");
     assert.equal(headingCursorTr.selection.from, 6, "heading caret offset must survive keyboard exposure");
+
+    const exposedHeading = tr.getMeta("lightmarkExposeMarkdown");
+    const expandedHeadingState = state.apply(tr);
+    let invalidInputTr = expandedHeadingState.tr.insertText("x", 1);
+    invalidInputTr = invalidInputTr.setSelection(TextSelection.create(invalidInputTr.doc, 2));
+    const invalidHeadingState = expandedHeadingState.apply(invalidInputTr);
+    const demoteTr = reconcileExposedHeading(invalidHeadingState, exposedHeading);
+    assert.ok(demoteTr);
+    const demotedState = invalidHeadingState.apply(demoteTr);
+    assert.equal(demotedState.doc.firstChild.type.name, "paragraph");
+    assert.equal(demotedState.doc.firstChild.textContent, "x## Title");
+    const invalidExposure = demoteTr.getMeta("lightmarkExposeMarkdown");
+    let recoveredInputTr = demotedState.tr.delete(1, 2);
+    recoveredInputTr = recoveredInputTr.setSelection(TextSelection.create(recoveredInputTr.doc, 1));
+    const recoveredInputState = demotedState.apply(recoveredInputTr);
+    const recoverTr = reconcileExposedHeading(recoveredInputState, invalidExposure);
+    assert.ok(recoverTr, "removing the invalid prefix must immediately recover the heading");
+    assert.equal(recoverTr.doc.firstChild.type.name, "heading");
+    assert.equal(recoverTr.doc.firstChild.attrs.level, 2);
+    assert.equal(recoverTr.doc.firstChild.textContent, "Title");
   } finally {
     fs.rmSync(headingEditingPath, { force: true });
   }

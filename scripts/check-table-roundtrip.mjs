@@ -25,6 +25,11 @@ try {
     assert.match(html, /<code\b[^>]*>x\|y<\/code>/);
     assert.match(html, />42</);
   }
+  const toolbarSource = fs.readFileSync(path.resolve("src/components/layout/Toolbar.vue"), "utf8");
+  const wysiwygSource = fs.readFileSync(path.resolve("src/components/editor/WysiwygEditor.vue"), "utf8");
+  assert.match(toolbarSource, /runEditorCommand\('table'\)/, "the toolbar must expose table insertion");
+  assert.doesNotMatch(toolbarSource, /表格，未来版本实现/);
+  assert.match(wysiwygSource, /insertTable\(\{ rows: 3, cols: 3, withHeaderRow: true \}\)/);
   console.log("table roundtrip checks passed");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
