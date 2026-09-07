@@ -1,4 +1,8 @@
 import { evaluateMathTokens, parseInlineMathText } from "./mathMarkdown";
+import {
+  hasInternalHtmlCapability,
+  type InternalRenderContext,
+} from "./internalRenderContext";
 
 const inlineHtmlTags = new Set([
   "span",
@@ -99,6 +103,29 @@ const safeStyleProperties = new Set([
   "margin-right",
   "text-align",
 ]);
+const internalDataTypes = new Set([
+  "front-matter",
+  "mermaid",
+  "block-math",
+  "inline-math",
+  "inline-html",
+  "raw-html",
+  "html-block",
+  "footnote-ref",
+  "footnotes",
+  "table-of-contents",
+  "horizontal-rule",
+  "escaped-dollar",
+]);
+const internalAttributeNames = new Set([
+  "data-lightmark-internal",
+  "data-task-item",
+  "data-footnote-ref",
+  "data-footnote-index",
+  "data-ref-id",
+  "data-preview",
+  "data-footnote-link",
+]);
 
 export function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => {
@@ -151,7 +178,10 @@ export function sanitizeInlineHtmlSource(html: string) {
   return sanitizeHtmlFragment(html, { inlineOnly: true });
 }
 
-export function sanitizeHtmlFragment(html: string, options: { inlineOnly?: boolean; displayRaw?: boolean } = {}) {
+export function sanitizeHtmlFragment(
+  html: string,
+  options: { inlineOnly?: boolean; displayRaw?: boolean; internalRenderContext?: InternalRenderContext } = {},
+) {
   const allowedTags = options.inlineOnly ? inlineHtmlTags : new Set([...inlineHtmlTags, ...blockHtmlTags]);
   let output = "";
   let cursor = 0;
@@ -160,7 +190,7 @@ export function sanitizeHtmlFragment(html: string, options: { inlineOnly?: boole
 
   while (match) {
     output += escapeHtmlText(decodeHtmlEntities(html.slice(cursor, match.index)));
-    output += sanitizeTag(match[0], allowedTags, Boolean(options.displayRaw));
+    output += sanitizeTag(match[0], allowedTags, Boolean(options.displayRaw), options.internalRenderContext);
     cursor = match.index + match[0].length;
     match = tagPattern.exec(html);
   }
@@ -169,7 +199,10 @@ export function sanitizeHtmlFragment(html: string, options: { inlineOnly?: boole
   return output;
 }
 
-export function renderInlineMarkdownInHtml(html: string, options: { inlineOnly?: boolean } = {}) {
+export function renderInlineMarkdownInHtml(
+  html: string,
+  options: { inlineOnly?: boolean; internalRenderContext?: InternalRenderContext } = {},
+) {
   const sanitized = sanitizeHtmlFragment(html, { ...options, displayRaw: true });
   let output = "";
   let cursor = 0;
@@ -216,10 +249,6 @@ export function findInlineHtmlMatch(text: string): InlineHtmlMatch | null {
 
     const raw = match[0];
     if (voidTags.has(tag) || /\/\s*>$/.test(raw)) {
-      if (isLightMarkInternalHtml(raw)) {
-        match = tagPattern.exec(text);
-        continue;
-      }
       return { from: match.index, to: match.index + raw.length, html: raw };
     }
 
@@ -231,11 +260,6 @@ export function findInlineHtmlMatch(text: string): InlineHtmlMatch | null {
     if (close) {
       const to = afterOpen + close.index + close[0].length;
       const html = text.slice(match.index, to);
-      if (isLightMarkInternalHtml(html)) {
-        tagPattern.lastIndex = to;
-        match = tagPattern.exec(text);
-        continue;
-      }
       return { from: match.index, to, html };
     }
 
@@ -254,7 +278,7 @@ export function findRawHtmlMatch(text: string): InlineHtmlMatch | null {
   while (match) {
     const tag = match[1].toLowerCase();
     const raw = match[0];
-    if (isLightMarkInternalHtml(raw) || (!rawHtmlTags.has(tag) && inlineHtmlTags.has(tag))) {
+    if (!rawHtmlTags.has(tag) && inlineHtmlTags.has(tag)) {
       const candidate = findUnclosedInlineHtml(text, match.index, tag, raw);
       if (candidate && (!best || candidate.from < best.from)) best = candidate;
       match = rawTagPattern.exec(text);
@@ -308,10 +332,6 @@ function findCompleteRawHtml(text: string, from: number, tag: string, raw: strin
   return { from, to, html: text.slice(from, to) };
 }
 
-function isLightMarkInternalHtml(html: string) {
-  return /\sdata-(?:type|task-item|footnote|markdown|tex|code|yaml|html|ref-id)\s*=/i.test(html);
-}
-
 export function containsInlineHtml(text: string) {
   return Boolean(findInlineHtmlMatch(text));
 }
@@ -339,7 +359,12 @@ export function renderRawHtmlSource(html: string) {
   return renderRawHtmlToken(html, rawHtmlKind(html));
 }
 
-function sanitizeTag(rawTag: string, allowedTags: Set<string>, displayRaw: boolean) {
+function sanitizeTag(
+  rawTag: string,
+  allowedTags: Set<string>,
+  displayRaw: boolean,
+  internalRenderContext?: InternalRenderContext,
+) {
   if (rawTag.startsWith("<!--")) return displayRaw ? renderRawHtmlToken(rawTag, "comment") : "";
 
   const tagMatch = rawTag.match(/^<\s*(\/?)\s*([a-zA-Z][\w:-]*)([\s\S]*?)\s*(\/?)>$/);
@@ -347,6 +372,9 @@ function sanitizeTag(rawTag: string, allowedTags: Set<string>, displayRaw: boole
 
   const closing = Boolean(tagMatch[1]);
   const tag = tagMatch[2].toLowerCase();
+  if (!closing && allowedTags.has(tag) && internalRenderContext && hasInternalHtmlCapability(rawTag, internalRenderContext)) {
+    return rawTag;
+  }
   if (!allowedTags.has(tag)) return displayRaw ? renderRawHtmlToken(rawTag, "html") : escapeHtml(rawTag);
 
   if (closing) {
@@ -372,7 +400,7 @@ function sanitizeAttributes(tag: string, rawAttributes: string) {
   while (match) {
     const name = match[1].toLowerCase();
     const value = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
-    if (!isAllowedAttribute(tag, name)) {
+    if (isInternalLightMarkAttribute(name, value) || !isAllowedAttribute(tag, name)) {
       match = attrPattern.exec(rawAttributes);
       continue;
     }
@@ -388,6 +416,11 @@ function sanitizeAttributes(tag: string, rawAttributes: string) {
   }
 
   return attributes.length ? ` ${attributes.join(" ")}` : "";
+}
+
+function isInternalLightMarkAttribute(name: string, value: string) {
+  if (name === "data-type") return internalDataTypes.has(value.trim().toLowerCase());
+  return internalAttributeNames.has(name);
 }
 
 function isAllowedAttribute(tag: string, name: string) {

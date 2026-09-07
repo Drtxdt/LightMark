@@ -1,6 +1,11 @@
 import type { EditorMode, EditorPaneId } from "../types";
 import type { StructuredOutlineItem } from "../utils/outline";
 import type { WysiwygSnapshotDiagnostics } from "./wysiwygSnapshot";
+import {
+  documentMutationTokensEqual,
+  type DocumentFlushReceipt,
+  type DocumentMutationToken,
+} from "./documentMutationTracker";
 
 export type SnapshotReason =
   | "save"
@@ -17,6 +22,8 @@ export interface MarkdownSnapshot {
   revision: number;
   markdown: string;
   dirty: boolean;
+  mutationToken?: DocumentMutationToken;
+  flushReceipt?: DocumentFlushReceipt;
 }
 
 export interface DocumentDerivedState {
@@ -35,6 +42,10 @@ export interface SnapshotOptions {
   signal?: AbortSignal;
 }
 
+export interface PendingFlushOptions {
+  expectedToken?: DocumentMutationToken;
+}
+
 export interface EditorNavigationTarget {
   offset?: number;
   line?: number;
@@ -46,7 +57,16 @@ export interface DocumentSessionAdapter {
   readonly paneId: EditorPaneId;
   readonly mode: EditorMode;
   readonly revision: number;
-  flushPendingEdits?(reason: SnapshotReason): Promise<void>;
+  hasPendingEdits?(): boolean;
+  pendingEditVersion?(): number;
+  mutationToken?(): DocumentMutationToken;
+  flushPendingEdits?(
+    reason: SnapshotReason,
+    options?: PendingFlushOptions,
+  ): Promise<DocumentFlushReceipt | void>;
+  finalizeClosePrompt?(
+    options?: PendingFlushOptions,
+  ): Promise<DocumentFlushReceipt | void>;
   snapshot(reason: SnapshotReason, options?: SnapshotOptions): Promise<MarkdownSnapshot>;
   derivedState(): DocumentDerivedState;
   replaceMarkdown(markdown: string): Promise<void>;
@@ -156,16 +176,40 @@ function emitSessionChange() {
 export async function snapshotDocumentTab(tabId: string, reason: SnapshotReason, options: SnapshotOptions = {}) {
   const session = documentSessionForTab(tabId);
   if (!session) return null;
+  if (sessionsByTab.get(tabId) !== session) throw new Error("编辑器会话已被替换，已阻止使用旧正文。");
   if (options.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
-  await session.flushPendingEdits?.(reason);
+  const tokenBeforeFlush = session.mutationToken?.();
+  const flushReceipt = await session.flushPendingEdits?.(reason, {
+    expectedToken: tokenBeforeFlush,
+  });
+  if (sessionsByTab.get(tabId) !== session) throw new Error("编辑器会话已被替换，已阻止使用旧正文。");
   if (options.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+  const tokenAfterFlush = session.mutationToken?.();
+  if (flushReceipt && flushReceipt.sessionIdentity !== session) {
+    throw new Error("文档 flush receipt 不属于当前编辑器会话。");
+  }
+  if (flushReceipt && (!tokenAfterFlush || !documentMutationTokensEqual(tokenAfterFlush, flushReceipt.after))) {
+    throw new Error("文档 flush 完成后版本已变化，已阻止使用旧正文。");
+  }
+  const tokenBeforeSnapshot = tokenAfterFlush ?? tokenBeforeFlush;
   const expectedRevision = session.revision;
   const snapshot = await session.snapshot(reason, options);
+  if (sessionsByTab.get(tabId) !== session) throw new Error("编辑器会话已被替换，已阻止使用旧正文。");
   if (options.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+  const tokenAfterSnapshot = session.mutationToken?.();
+  if (tokenBeforeSnapshot && tokenAfterSnapshot
+    && !documentMutationTokensEqual(tokenBeforeSnapshot, tokenAfterSnapshot)) {
+    throw new Error("文档在生成快照时发生了变化，请重试。");
+  }
   const registeredTabId = currentTabIds.get(session) ?? session.tabId;
   if (registeredTabId !== tabId) throw new Error("编辑器返回了错误文档的快照。");
   if (snapshot.revision !== expectedRevision || snapshot.revision !== session.revision) throw new Error("文档在生成快照时发生了变化，请重试。");
-  return snapshot.tabId === tabId ? snapshot : { ...snapshot, tabId };
+  const normalized = snapshot.tabId === tabId ? snapshot : { ...snapshot, tabId };
+  return {
+    ...normalized,
+    ...(tokenAfterSnapshot ? { mutationToken: tokenAfterSnapshot } : {}),
+    ...(flushReceipt ? { flushReceipt } : {}),
+  };
 }
 
 export async function snapshotDocumentPane(paneId: EditorPaneId, reason: SnapshotReason) {

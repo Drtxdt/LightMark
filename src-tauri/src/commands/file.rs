@@ -1,39 +1,53 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::RegexBuilder;
 use rfd::FileDialog;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::models::{
-    AssetFileInfo, AssetInspection, DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent, LargeFileSession, LargeFindMatch,
-    LargeFindOptions, LargeFindResult, LargeOutlineItem, SimilarFileCandidate, TextEdit,
-    WorkspaceWatchEvent,
+    AssetFileInfo, AssetInspection, DirtyState, FileChunk, FileInfo, FileNode, FileWatchEvent,
+    LargeCloseDisposition, LargeCloseReceipt, LargeCoordinateSpace, LargeFileError,
+    LargeFileFingerprint, LargeFileSession, LargeFindMatch, LargeFindOptions, LargeFindResult,
+    LargeOutlineItem, LargeSaveReceipt, SimilarFileCandidate, TextEdit, WorkspaceWatchEvent,
 };
+use super::large_file_base::{FileBaseSnapshot, SnapshotError, SourceFingerprint};
+use super::large_text_view::{SegmentedTextView, ViewEdit, ViewError};
 
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 const FILE_WATCH_EVENT: &str = "lightmark-file-watch-event";
 const WORKSPACE_WATCH_EVENT: &str = "lightmark-workspace-watch-event";
 const ASSET_WATCH_EVENT: &str = "lightmark-asset-watch-event";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SessionState {
     path: PathBuf,
+    snapshot_root: PathBuf,
+    base: Arc<FileBaseSnapshot>,
+    view: SegmentedTextView<FileBaseSnapshot>,
     size_bytes: u64,
-    line_offsets: Vec<u64>,
-    edits: Vec<TextEdit>,
     outline: Vec<LargeOutlineItem>,
+    revision: u64,
+    saved_revision: u64,
+    pending_edit_count: usize,
+    base_fingerprint: SourceFingerprint,
+    disk_fingerprint: SourceFingerprint,
+    persistence_generation: u64,
 }
 
 static LARGE_SESSIONS: OnceLock<Mutex<HashMap<String, SessionState>>> = OnceLock::new();
 static FILE_WATCHERS: OnceLock<Mutex<HashMap<String, FileWatcherEntry>>> = OnceLock::new();
 static WORKSPACE_WATCHER: OnceLock<Mutex<Option<FileWatcherEntry>>> = OnceLock::new();
 static ASSET_WATCHER: OnceLock<Mutex<Option<FileWatcherEntry>>> = OnceLock::new();
+
+#[cfg(test)]
+static SAVE_PLAN_SYNC: OnceLock<Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>> =
+    OnceLock::new();
 
 struct FileWatcherEntry {
     _watcher: RecommendedWatcher,
@@ -53,6 +67,20 @@ fn workspace_watcher() -> &'static Mutex<Option<FileWatcherEntry>> {
 
 fn asset_watcher() -> &'static Mutex<Option<FileWatcherEntry>> {
     ASSET_WATCHER.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn save_plan_sync() -> &'static Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>> {
+    SAVE_PLAN_SYNC.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn pause_after_save_plan_capture() {
+    let hook = save_plan_sync().lock().ok().and_then(|mut value| value.take());
+    if let Some((captured, release)) = hook {
+        captured.wait();
+        release.wait();
+    }
 }
 
 #[tauri::command]
@@ -113,33 +141,70 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
 }
 
 #[tauri::command]
-pub fn open_large_file(path: String) -> Result<LargeFileSession, String> {
+pub fn open_large_file(app: AppHandle, path: String) -> Result<LargeFileSession, LargeFileError> {
+    let snapshot_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| {
+            LargeFileError::new(
+                "snapshot-root-unavailable",
+                format!("failed to resolve the application local data directory: {error}"),
+            )
+        })?
+        .join("large-file-snapshots");
+    open_large_file_at_root(path, snapshot_root)
+}
+
+fn open_large_file_at_root(
+    path: String,
+    snapshot_root: PathBuf,
+) -> Result<LargeFileSession, LargeFileError> {
     let path_buf = PathBuf::from(&path);
-    let metadata = fs::metadata(&path_buf)
-        .map_err(|err| format!("Failed to inspect {}: {err}", path_buf.display()))?;
-    let line_offsets = scan_line_offsets(&path_buf)?;
-    let outline = scan_outline(&path_buf)?;
     let session_id = new_session_id();
+    let base = Arc::new(
+        FileBaseSnapshot::create(
+            &path_buf,
+            &snapshot_root,
+            &session_id,
+        )
+        .map_err(|error| snapshot_error(error, &path_buf))?,
+    );
+    let view = SegmentedTextView::new(Arc::clone(&base));
+    let outline = scan_outline_view(&view, &session_id)?;
+    let total_lines = view.line_count();
+    let base_fingerprint = base.fingerprint().clone();
+    let size_bytes = base.size_bytes();
     let session = SessionState {
-        path: path_buf,
-        size_bytes: metadata.len(),
-        line_offsets,
-        edits: Vec::new(),
-        outline,
+        path: path_buf.clone(),
+        snapshot_root,
+        base,
+        view,
+        size_bytes,
+        outline: outline.clone(),
+        revision: 0,
+        saved_revision: 0,
+        pending_edit_count: 0,
+        base_fingerprint: base_fingerprint.clone(),
+        disk_fingerprint: base_fingerprint.clone(),
+        persistence_generation: 0,
     };
-    let total_lines = session.line_offsets.len();
-    let outline = session.outline.clone();
     sessions()
         .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
+        .map_err(|_| lock_error())?
         .insert(session_id.clone(), session);
 
     Ok(LargeFileSession {
         session_id,
         path,
-        size_bytes: metadata.len(),
+        size_bytes,
         total_lines,
         outline,
+        revision: 0,
+        saved_revision: 0,
+        pending_edit_count: 0,
+        base_fingerprint: fingerprint_model(&base_fingerprint),
+        disk_fingerprint: fingerprint_model(&base_fingerprint),
+        coordinate_space: LargeCoordinateSpace::Utf16CodeUnits,
     })
 }
 
@@ -148,67 +213,55 @@ pub fn read_file_chunk(
     session_id: String,
     start_line: usize,
     line_count: usize,
-) -> Result<FileChunk, String> {
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+) -> Result<FileChunk, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
     let session = sessions()
         .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
+        .map_err(|_| lock_error())?
         .get(&session_id)
         .cloned()
-        .ok_or_else(|| "Large file session was not found.".to_string())?;
-
-    let total_lines = session.line_offsets.len();
-    let start = start_line.min(total_lines);
-    let end = start.saturating_add(line_count).min(total_lines);
-    let mut file = File::open(&session.path)
-        .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?;
-    let mut text = String::new();
-
-    if start < end {
-        let start_offset = session.line_offsets[start];
-        let end_offset = if end < total_lines {
-            session.line_offsets[end]
-        } else {
-            session.size_bytes
-        };
-        let byte_count = end_offset.saturating_sub(start_offset) as usize;
-        let mut buffer = vec![0_u8; byte_count];
-        file.seek(SeekFrom::Start(start_offset))
-            .map_err(|err| format!("Failed to seek {}: {err}", session.path.display()))?;
-        file.read_exact(&mut buffer)
-            .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?;
-        text = String::from_utf8_lossy(&buffer).to_string();
-    }
-
+        .ok_or_else(|| session_not_found(&session_id))?;
+    require_revision(&session_id, expected_revision, session.revision)?;
+    let chunk = session
+        .view
+        .read_chunk(start_line, line_count)
+        .map_err(|error| view_error(&session_id, error))?;
     Ok(FileChunk {
         session_id,
-        start_line: start,
-        end_line: end,
-        total_lines,
-        text,
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        total_lines: chunk.total_lines,
+        text: chunk.text,
+        revision: chunk.revision,
+        coordinate_space,
     })
 }
 
 #[tauri::command]
-pub fn apply_file_edits(session_id: String, edits: Vec<TextEdit>) -> Result<DirtyState, String> {
-    let mut guard = sessions()
-        .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?;
+pub fn apply_file_edits(
+    session_id: String,
+    edits: Vec<TextEdit>,
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+) -> Result<DirtyState, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
+    let mut guard = sessions().lock().map_err(|_| lock_error())?;
     let session = guard
         .get_mut(&session_id)
-        .ok_or_else(|| "Large file session was not found.".to_string())?;
-    for edit in edits {
-        session
-            .edits
-            .retain(|existing| !edits_overlap(existing, &edit));
-        session.edits.push(edit);
-    }
-    session
-        .edits
-        .sort_by_key(|edit| (edit.start_line, edit.start_column));
-    Ok(DirtyState {
-        is_dirty: !session.edits.is_empty(),
-        pending_edit_count: session.edits.len(),
-    })
+        .ok_or_else(|| session_not_found(&session_id))?;
+    require_revision(&session_id, expected_revision, session.revision)?;
+    let view_edits = edits.iter().map(view_edit).collect::<Vec<_>>();
+    let next_revision = session
+        .view
+        .apply_batch(expected_revision, &view_edits)
+        .map_err(|error| view_error(&session_id, error))?;
+    session.revision = next_revision;
+    session.pending_edit_count = session
+        .pending_edit_count
+        .saturating_add(edits.len());
+    Ok(dirty_state(session, coordinate_space))
 }
 
 #[tauri::command]
@@ -218,47 +271,43 @@ pub fn search_large_file(
     options: LargeFindOptions,
     start_line: Option<usize>,
     limit: Option<usize>,
-) -> Result<LargeFindResult, String> {
-    if query.is_empty() {
-        return Ok(LargeFindResult {
-            matches: Vec::new(),
-            total: 0,
-            truncated: false,
-            error: String::new(),
-        });
-    }
-
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+) -> Result<LargeFindResult, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
     let session = sessions()
         .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
+        .map_err(|_| lock_error())?
         .get(&session_id)
         .cloned()
-        .ok_or_else(|| "Large file session was not found.".to_string())?;
-
-    let matcher = LargeMatcher::new(&query, &options);
-    if let Err(error) = matcher {
-        return Ok(LargeFindResult {
-            matches: Vec::new(),
-            total: 0,
-            truncated: false,
-            error,
-        });
+        .ok_or_else(|| session_not_found(&session_id))?;
+    require_revision(&session_id, expected_revision, session.revision)?;
+    if query.is_empty() {
+        return Ok(empty_find_result(session.revision, coordinate_space));
     }
-    let matcher = matcher?;
+
+    let matcher = match LargeMatcher::new(&query, &options) {
+        Ok(matcher) => matcher,
+        Err(error) => {
+            return Ok(LargeFindResult {
+                matches: Vec::new(),
+                total: 0,
+                truncated: false,
+                error,
+                revision: session.revision,
+                coordinate_space,
+            })
+        }
+    };
     let limit = limit.unwrap_or(2000).max(1);
     let start_line = start_line.unwrap_or(0);
-    let file = File::open(&session.path)
-        .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?;
-    let reader = BufReader::new(file);
     let mut matches = Vec::new();
     let mut total = 0_usize;
-
-    for (line_index, line) in reader.lines().enumerate() {
-        let line =
-            line.map_err(|err| format!("Failed to scan {}: {err}", session.path.display()))?;
-        if line_index < start_line {
-            continue;
-        }
+    for line_index in start_line.min(session.view.line_count())..session.view.line_count() {
+        let line = session
+            .view
+            .read_line_content(line_index)
+            .map_err(|error| view_error(&session_id, error))?;
         for item in matcher.find_line(&line, line_index) {
             total += 1;
             if matches.len() < limit {
@@ -272,6 +321,8 @@ pub fn search_large_file(
         matches,
         total,
         error: String::new(),
+        revision: session.revision,
+        coordinate_space,
     })
 }
 
@@ -282,27 +333,20 @@ pub fn replace_large_file_matches(
     replacement: String,
     options: LargeFindOptions,
     current_match: Option<LargeFindMatch>,
-) -> Result<DirtyState, String> {
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+) -> Result<DirtyState, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
+    let mut guard = sessions().lock().map_err(|_| lock_error())?;
+    let session = guard
+        .get_mut(&session_id)
+        .ok_or_else(|| session_not_found(&session_id))?;
+    require_revision(&session_id, expected_revision, session.revision)?;
     if query.is_empty() {
-        return Ok(DirtyState {
-            is_dirty: false,
-            pending_edit_count: sessions()
-                .lock()
-                .map_err(|_| "Large file session lock was poisoned.".to_string())?
-                .get(&session_id)
-                .map(|session| session.edits.len())
-                .unwrap_or(0),
-        });
+        return Ok(dirty_state(session, coordinate_space));
     }
-
-    let session = sessions()
-        .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "Large file session was not found.".to_string())?;
-
-    let matcher = LargeMatcher::new(&query, &options)?;
+    let matcher = LargeMatcher::new(&query, &options)
+        .map_err(|error| LargeFileError::new("invalid-query", error).with_session(&session_id))?;
     let edits = if let Some(item) = current_match {
         vec![TextEdit {
             start_line: item.line,
@@ -312,120 +356,752 @@ pub fn replace_large_file_matches(
             text: matcher.replace_text(&item.text, &replacement),
         }]
     } else {
-        collect_large_replace_edits(&session.path, &matcher, &replacement)?
+        collect_large_replace_edits_from_view(&session.view, &matcher, &replacement)
+            .map_err(|error| view_error(&session_id, error))?
     };
-
-    apply_file_edits(session_id, edits)
+    if edits.is_empty() {
+        return Ok(dirty_state(session, coordinate_space));
+    }
+    let view_edits = edits.iter().map(view_edit).collect::<Vec<_>>();
+    let next_revision = session
+        .view
+        .apply_batch(expected_revision, &view_edits)
+        .map_err(|error| view_error(&session_id, error))?;
+    session.revision = next_revision;
+    session.pending_edit_count = session
+        .pending_edit_count
+        .saturating_add(edits.len());
+    Ok(dirty_state(session, coordinate_space))
 }
 
 #[tauri::command]
-pub fn save_large_file(session_id: String) -> Result<DirtyState, String> {
-    let session = sessions()
-        .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "Large file session was not found.".to_string())?;
-
-    if session.edits.is_empty() {
-        return Ok(DirtyState {
-            is_dirty: false,
-            pending_edit_count: 0,
-        });
+pub fn save_large_file(
+    session_id: String,
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+) -> Result<LargeSaveReceipt, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
+    let plan = capture_save_plan(&session_id, expected_revision)?;
+    if plan.revision == plan.saved_revision && plan.pending_edit_count == 0 {
+        return Ok(save_receipt(&session_id, &plan, false, coordinate_space));
     }
 
-    let temp_path = session.path.with_extension(format!(
-        "{}.lightmark-tmp",
-        session
-            .path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("md")
-    ));
-    let input = File::open(&session.path)
-        .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?;
-    let output = File::create(&temp_path)
-        .map_err(|err| format!("Failed to create {}: {err}", temp_path.display()))?;
-    let mut writer = BufWriter::new(output);
-    let mut reader = BufReader::new(input);
-    let mut line = String::new();
-    let mut line_index = 0_usize;
-    let mut edit_index = 0_usize;
+    let temp_path = unique_large_temp_path(&plan.path, &session_id, plan.revision);
+    if let Err(error) = write_view_temp(&plan.view, &temp_path) {
+        return Err(cleanup_temp_error(
+            LargeFileError::new("save-write-failed", error.message)
+                .with_session(&session_id)
+                .with_path(plan.path.to_string_lossy()),
+            &temp_path,
+            error.owned,
+        ));
+    }
+    let output_fingerprint = match FileBaseSnapshot::fingerprint_path(&temp_path, 64 * 1024) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return Err(cleanup_temp_error(
+                snapshot_error(error, &temp_path).with_session(&session_id),
+                &temp_path,
+                true,
+            ))
+        }
+    };
+    let prepared = match prepare_rebase(
+        &plan,
+        &temp_path,
+        &plan.path,
+        &session_id,
+        &output_fingerprint,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(cleanup_temp_error(error, &temp_path, true)),
+    };
+    let live_fingerprint = match FileBaseSnapshot::fingerprint_path(&plan.path, 64 * 1024) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return Err(discard_prepared_and_temp(
+                prepared,
+                &temp_path,
+                snapshot_error(error, &plan.path)
+                    .with_session(&session_id)
+                    .with_path(plan.path.to_string_lossy()),
+            ))
+        }
+    };
+    if live_fingerprint != plan.disk_fingerprint {
+        return Err(discard_prepared_and_temp(
+            prepared,
+            &temp_path,
+            LargeFileError::new(
+                "external-conflict",
+                "the source changed while the large-file snapshot was being saved",
+            )
+            .with_session(&session_id)
+            .with_path(plan.path.to_string_lossy()),
+        ));
+    }
 
-    while reader
-        .read_line(&mut line)
-        .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?
-        > 0
+    let mut guard = match sessions().lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err(discard_prepared_and_temp(prepared, &temp_path, lock_error())),
+    };
+    let current = match guard.get_mut(&session_id) {
+        Some(current) => current,
+        None => {
+            let error = session_not_found(&session_id);
+            drop(guard);
+            return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+        }
+    };
+    if current.persistence_generation != plan.persistence_generation
+        || current.revision != plan.revision
+        || current.path != plan.path
+        || current.disk_fingerprint != plan.disk_fingerprint
     {
-        if edit_index >= session.edits.len() || line_index < session.edits[edit_index].start_line {
-            writer
-                .write_all(line.as_bytes())
-                .map_err(|err| format!("Failed to write {}: {err}", temp_path.display()))?;
-            line.clear();
-            line_index += 1;
-            continue;
-        }
-
-        let edit = &session.edits[edit_index];
-        if line_index == edit.start_line {
-            let mut affected = vec![line.clone()];
-            while line_index + affected.len() <= edit.end_line {
-                let mut next = String::new();
-                if reader
-                    .read_line(&mut next)
-                    .map_err(|err| format!("Failed to read {}: {err}", session.path.display()))?
-                    == 0
-                {
-                    break;
-                }
-                affected.push(next);
-            }
-            let replacement = apply_edit_to_lines(&affected, edit);
-            writer
-                .write_all(replacement.as_bytes())
-                .map_err(|err| format!("Failed to write {}: {err}", temp_path.display()))?;
-            line_index += affected.len();
-            edit_index += 1;
-            line.clear();
-            continue;
-        }
-
-        line.clear();
-        line_index += 1;
+        let error = LargeFileError::new(
+            "save-plan-stale",
+            "the session identity changed while the large-file save was prepared",
+        )
+        .with_session(&session_id)
+        .with_revision(plan.revision, current.revision)
+        .with_path(plan.path.to_string_lossy());
+        drop(guard);
+        return Err(discard_prepared_and_temp(prepared, &temp_path, error));
     }
-
-    writer
-        .flush()
-        .map_err(|err| format!("Failed to flush {}: {err}", temp_path.display()))?;
-    replace_file(&session.path, &temp_path)?;
-
-    let line_offsets = scan_line_offsets(&session.path)?;
-    let outline = scan_outline(&session.path)?;
-    let mut guard = sessions()
-        .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?;
-    if let Some(current) = guard.get_mut(&session_id) {
-        current.size_bytes = fs::metadata(&current.path)
-            .map_err(|err| format!("Failed to inspect {}: {err}", current.path.display()))?
-            .len();
-        current.line_offsets = line_offsets;
-        current.outline = outline;
-        current.edits.clear();
+    if current.disk_fingerprint != live_fingerprint {
+        let error = LargeFileError::new(
+            "external-conflict",
+            "the source changed during the save boundary",
+        )
+        .with_session(&session_id)
+        .with_path(plan.path.to_string_lossy());
+        drop(guard);
+        return Err(discard_prepared_and_temp(prepared, &temp_path, error));
     }
+    if let Err(error) = replace_file(&plan.path, &temp_path) {
+        let error = LargeFileError::new("save-replace-failed", error)
+            .with_session(&session_id)
+            .with_path(plan.path.to_string_lossy());
+        drop(guard);
+        return Err(retain_temp_after_replace_error(prepared, &temp_path, error));
+    }
+    let old_base = Arc::clone(&current.base);
+    let old_base_directory = old_base.snapshot_dir().to_path_buf();
+    let PreparedRebase {
+        base: new_base,
+        view: new_view,
+        outline,
+    } = prepared;
+    current.base = new_base;
+    current.view = new_view;
+    current.base_fingerprint = output_fingerprint.clone();
+    current.outline = outline;
+    current.size_bytes = output_fingerprint.size_bytes;
+    current.disk_fingerprint = output_fingerprint;
+    current.saved_revision = plan.revision;
+    current.pending_edit_count = 0;
+    let mut receipt = save_receipt(&session_id, current, true, coordinate_space);
+    drop(guard);
+    drop(plan);
+    if let Err(warning) = cleanup_base_arc(old_base) {
+        receipt.cleanup_warning = Some(warning.clone());
+        receipt.recovery_artifact = Some(old_base_directory.to_string_lossy().to_string());
+    }
+    Ok(receipt)
+}
 
-    Ok(DirtyState {
-        is_dirty: false,
-        pending_edit_count: 0,
+#[tauri::command]
+pub fn save_large_file_as(
+    session_id: String,
+    target_path: String,
+    expected_revision: u64,
+    coordinate_space: LargeCoordinateSpace,
+    expected_target_fingerprint: Option<LargeFileFingerprint>,
+) -> Result<LargeSaveReceipt, LargeFileError> {
+    require_coordinate_space(coordinate_space)?;
+    let target = PathBuf::from(&target_path);
+    let plan = capture_save_plan(&session_id, expected_revision)?;
+    let captured_target = fingerprint_if_exists(&target)?;
+    if captured_target != expected_target_fingerprint {
+        return Err(LargeFileError::new(
+            "target-conflict",
+            "the Save As target changed or was not authorized at the save boundary",
+        )
+        .with_session(&session_id)
+        .with_path(target.to_string_lossy()));
+    }
+    let temp_path = unique_large_temp_path(&target, &session_id, plan.revision);
+    if let Err(error) = write_view_temp(&plan.view, &temp_path) {
+        return Err(cleanup_temp_error(
+            LargeFileError::new("save-write-failed", error.message)
+                .with_session(&session_id)
+                .with_path(target.to_string_lossy()),
+            &temp_path,
+            error.owned,
+        ));
+    }
+    let output_fingerprint = match FileBaseSnapshot::fingerprint_path(&temp_path, 64 * 1024) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return Err(cleanup_temp_error(
+                snapshot_error(error, &temp_path).with_session(&session_id),
+                &temp_path,
+                true,
+            ))
+        }
+    };
+    let prepared = match prepare_rebase(
+        &plan,
+        &temp_path,
+        &target,
+        &session_id,
+        &output_fingerprint,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(cleanup_temp_error(error, &temp_path, true)),
+    };
+    let prepared_target_fingerprint = match fingerprint_if_exists(&target) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+        }
+    };
+    if prepared_target_fingerprint != expected_target_fingerprint {
+        return Err(discard_prepared_and_temp(
+            prepared,
+            &temp_path,
+            LargeFileError::new(
+                "target-conflict",
+                "the Save As target changed while the file was being prepared",
+            )
+            .with_session(&session_id)
+            .with_path(target.to_string_lossy()),
+        ));
+    }
+    let mut guard = match sessions().lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err(discard_prepared_and_temp(prepared, &temp_path, lock_error())),
+    };
+    let current = match guard.get_mut(&session_id) {
+        Some(current) => current,
+        None => {
+            let error = session_not_found(&session_id);
+            drop(guard);
+            return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+        }
+    };
+    if current.persistence_generation != plan.persistence_generation
+        || current.revision != plan.revision
+        || current.path != plan.path
+        || current.disk_fingerprint != plan.disk_fingerprint
+    {
+        let error = LargeFileError::new(
+            "save-plan-stale",
+            "the session identity changed while Save As was prepared",
+        )
+        .with_session(&session_id)
+        .with_revision(plan.revision, current.revision)
+        .with_path(target.to_string_lossy());
+        drop(guard);
+        return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+    }
+    let final_target_fingerprint = match fingerprint_if_exists(&target) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            drop(guard);
+            return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+        }
+    };
+    if final_target_fingerprint != expected_target_fingerprint {
+        let error = LargeFileError::new(
+            "target-conflict",
+            "the Save As target changed at the final save boundary",
+        )
+        .with_session(&session_id)
+        .with_path(target.to_string_lossy());
+        drop(guard);
+        return Err(discard_prepared_and_temp(prepared, &temp_path, error));
+    }
+    if let Err(error) = replace_or_create_file(&target, &temp_path) {
+        let error = LargeFileError::new("save-replace-failed", error)
+            .with_session(&session_id)
+            .with_path(target.to_string_lossy());
+        drop(guard);
+        return Err(retain_temp_after_replace_error(prepared, &temp_path, error));
+    }
+    let old_base = Arc::clone(&current.base);
+    let old_base_directory = old_base.snapshot_dir().to_path_buf();
+    let PreparedRebase {
+        base: new_base,
+        view: new_view,
+        outline,
+    } = prepared;
+    current.base = new_base;
+    current.view = new_view;
+    current.base_fingerprint = output_fingerprint.clone();
+    current.outline = outline;
+    current.path = target.clone();
+    current.size_bytes = output_fingerprint.size_bytes;
+    current.disk_fingerprint = output_fingerprint;
+    current.saved_revision = plan.revision;
+    current.pending_edit_count = 0;
+    let mut receipt = save_receipt(&session_id, current, true, coordinate_space);
+    drop(guard);
+    drop(plan);
+    if let Err(warning) = cleanup_base_arc(old_base) {
+        receipt.cleanup_warning = Some(warning.clone());
+        receipt.recovery_artifact = Some(old_base_directory.to_string_lossy().to_string());
+    }
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub fn close_large_file(
+    session_id: String,
+    expected_revision: u64,
+    disposition: LargeCloseDisposition,
+) -> Result<LargeCloseReceipt, LargeFileError> {
+    let state = {
+        let mut guard = sessions().lock().map_err(|_| lock_error())?;
+        let current = guard
+            .get(&session_id)
+            .ok_or_else(|| session_not_found(&session_id))?;
+        require_revision(&session_id, expected_revision, current.revision)?;
+        if disposition == LargeCloseDisposition::Saved
+            && (current.revision != current.saved_revision || current.pending_edit_count != 0)
+        {
+            return Err(LargeFileError::new(
+                "unsaved-changes",
+                "close(saved) requires the requested revision to be saved",
+            )
+            .with_session(&session_id)
+            .with_revision(current.saved_revision, current.revision));
+        }
+        guard
+            .remove(&session_id)
+            .ok_or_else(|| session_not_found(&session_id))?
+    };
+    let SessionState { base, view, .. } = state;
+    let recovery_artifact = base.snapshot_dir().to_string_lossy().to_string();
+    drop(view);
+    let (cleanup_completed, cleanup_warning) = match Arc::try_unwrap(base) {
+        Ok(base) => match base.cleanup() {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error.to_string())),
+        },
+        Err(_) => (
+            false,
+            Some("session snapshot remained referenced after close".to_string()),
+        ),
+    };
+    Ok(LargeCloseReceipt {
+        session_id,
+        closed: true,
+        cleanup_completed,
+        recovery_artifact: (!cleanup_completed).then_some(recovery_artifact),
+        cleanup_warning,
     })
 }
 
-#[tauri::command]
-pub fn close_large_file(session_id: String) -> Result<(), String> {
-    sessions()
-        .lock()
-        .map_err(|_| "Large file session lock was poisoned.".to_string())?
-        .remove(&session_id);
-    Ok(())
+#[cfg(test)]
+fn default_large_snapshot_root() -> PathBuf {
+    std::env::temp_dir().join("lightmark-large-sessions")
+}
+
+fn lock_error() -> LargeFileError {
+    LargeFileError::new("session-lock-poisoned", "large-file session lock was poisoned")
+}
+
+fn session_not_found(session_id: &str) -> LargeFileError {
+    LargeFileError::new("session-not-found", "large-file session was not found")
+        .with_session(session_id)
+}
+
+fn stale_revision(session_id: &str, expected: u64, actual: u64) -> LargeFileError {
+    LargeFileError::new(
+        "stale-revision",
+        "the large-file view changed since the command was prepared",
+    )
+    .with_session(session_id)
+    .with_revision(expected, actual)
+}
+
+fn require_revision(
+    session_id: &str,
+    expected: u64,
+    actual: u64,
+) -> Result<(), LargeFileError> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(stale_revision(session_id, expected, actual))
+    }
+}
+
+fn require_coordinate_space(space: LargeCoordinateSpace) -> Result<(), LargeFileError> {
+    match space {
+        LargeCoordinateSpace::Utf16CodeUnits => Ok(()),
+    }
+}
+
+fn view_error(session_id: &str, error: ViewError) -> LargeFileError {
+    match error {
+        ViewError::StaleRevision { expected, actual } => {
+            stale_revision(session_id, expected, actual)
+        }
+        ViewError::InvalidUtf16Boundary { .. } => LargeFileError::new(
+            "invalid-utf16-boundary",
+            error.to_string(),
+        )
+        .with_session(session_id),
+        ViewError::OverlappingEdits => {
+            LargeFileError::new("overlapping-edits", error.to_string()).with_session(session_id)
+        }
+        _ => LargeFileError::new("invalid-edit", error.to_string()).with_session(session_id),
+    }
+}
+
+fn snapshot_error(error: SnapshotError, path: &Path) -> LargeFileError {
+    let message = error.to_string();
+    let code = match &error {
+        SnapshotError::InvalidUtf8 { .. } => "invalid-utf8",
+        SnapshotError::SourceChanged { .. } => "external-conflict",
+        SnapshotError::InvalidOwnerId | SnapshotError::InvalidChunkSize => "snapshot-config",
+        SnapshotError::InvalidSpan { .. } => "snapshot-span",
+        SnapshotError::Cleanup { .. } | SnapshotError::CleanupAfterFailure { .. } => {
+            "snapshot-cleanup-failed"
+        }
+        SnapshotError::Io { .. } => "snapshot-io-failed",
+    };
+    LargeFileError::new(code, message).with_path(path.to_string_lossy())
+}
+
+fn fingerprint_model(fingerprint: &SourceFingerprint) -> LargeFileFingerprint {
+    LargeFileFingerprint {
+        size_bytes: fingerprint.size_bytes,
+        modified_millis: fingerprint.modified.map(system_time_millis),
+        sha256: fingerprint.sha256_hex(),
+    }
+}
+
+fn dirty_state(session: &SessionState, coordinate_space: LargeCoordinateSpace) -> DirtyState {
+    DirtyState {
+        is_dirty: session.revision != session.saved_revision || session.pending_edit_count != 0,
+        pending_edit_count: session.pending_edit_count,
+        revision: session.revision,
+        saved_revision: session.saved_revision,
+        coordinate_space,
+    }
+}
+
+fn empty_find_result(revision: u64, coordinate_space: LargeCoordinateSpace) -> LargeFindResult {
+    LargeFindResult {
+        matches: Vec::new(),
+        total: 0,
+        truncated: false,
+        error: String::new(),
+        revision,
+        coordinate_space,
+    }
+}
+
+fn save_receipt(
+    session_id: &str,
+    session: &SessionState,
+    saved: bool,
+    coordinate_space: LargeCoordinateSpace,
+) -> LargeSaveReceipt {
+    LargeSaveReceipt {
+        session_id: session_id.to_string(),
+        requested_revision: session.revision,
+        saved_revision: session.saved_revision,
+        current_revision: session.revision,
+        saved,
+        is_dirty: session.revision != session.saved_revision || session.pending_edit_count != 0,
+        pending_edit_count: session.pending_edit_count,
+        path: path_to_string(session.path.clone()),
+        base_fingerprint: fingerprint_model(&session.base_fingerprint),
+        disk_fingerprint: fingerprint_model(&session.disk_fingerprint),
+        coordinate_space,
+        recovery_artifact: None,
+        cleanup_warning: None,
+    }
+}
+
+fn capture_save_plan(
+    session_id: &str,
+    expected_revision: u64,
+) -> Result<SessionState, LargeFileError> {
+    let mut guard = sessions().lock().map_err(|_| lock_error())?;
+    let session = guard
+        .get_mut(session_id)
+        .ok_or_else(|| session_not_found(session_id))?;
+    require_revision(session_id, expected_revision, session.revision)?;
+    session.persistence_generation = session.persistence_generation.saturating_add(1);
+    let plan = session.clone();
+    drop(guard);
+    #[cfg(test)]
+    pause_after_save_plan_capture();
+    Ok(plan)
+}
+
+struct PreparedRebase {
+    base: Arc<FileBaseSnapshot>,
+    view: SegmentedTextView<FileBaseSnapshot>,
+    outline: Vec<LargeOutlineItem>,
+}
+
+fn prepare_rebase(
+    plan: &SessionState,
+    temp_path: &Path,
+    logical_source_path: &Path,
+    session_id: &str,
+    expected_fingerprint: &SourceFingerprint,
+) -> Result<PreparedRebase, LargeFileError> {
+    let owner_id = format!(
+        "{session_id}-rebase-{}-{}",
+        plan.revision,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    );
+    let base = Arc::new(
+        FileBaseSnapshot::create_from_stable_owned_file(
+            temp_path,
+            logical_source_path,
+            &plan.snapshot_root,
+            &owner_id,
+        )
+        .map_err(|error| snapshot_error(error, temp_path))?,
+    );
+    if base.fingerprint() != expected_fingerprint {
+        let error = LargeFileError::new(
+            "rebase-fingerprint-mismatch",
+            "the prepared snapshot did not match the rendered save bytes",
+        )
+        .with_session(session_id)
+        .with_path(logical_source_path.to_string_lossy());
+        let view = SegmentedTextView::new(Arc::clone(&base));
+        let prepared = PreparedRebase {
+            base,
+            view,
+            outline: Vec::new(),
+        };
+        return Err(discard_prepared_error(prepared, error));
+    }
+    let view = SegmentedTextView::new(Arc::clone(&base)).with_revision(plan.revision);
+    let outline = match scan_outline_view(&view, session_id) {
+        Ok(outline) => outline,
+        Err(error) => {
+            let prepared = PreparedRebase {
+                base,
+                view,
+                outline: Vec::new(),
+            };
+            return Err(discard_prepared_error(prepared, error));
+        }
+    };
+    Ok(PreparedRebase { base, view, outline })
+}
+
+fn discard_prepared(prepared: PreparedRebase) -> Result<(), String> {
+    let PreparedRebase { base, view, .. } = prepared;
+    let directory = base.snapshot_dir().to_path_buf();
+    drop(view);
+    match Arc::try_unwrap(base) {
+        Ok(base) => base.cleanup().map_err(|error| error.to_string()),
+        Err(_) => Err(format!(
+            "prepared snapshot remains in use; recovery directory was retained at {}",
+            directory.display()
+        )),
+    }
+}
+
+fn discard_prepared_error(
+    prepared: PreparedRebase,
+    mut error: LargeFileError,
+) -> LargeFileError {
+    let recovery_directory = prepared.base.snapshot_dir().to_path_buf();
+    if let Err(warning) = discard_prepared(prepared) {
+        error = error
+            .with_recovery_artifact(recovery_directory.to_string_lossy())
+            .with_cleanup_warning(warning);
+    }
+    error
+}
+
+fn discard_prepared_and_temp(
+    prepared: PreparedRebase,
+    temp_path: &Path,
+    mut error: LargeFileError,
+) -> LargeFileError {
+    let recovery_directory = prepared.base.snapshot_dir().to_path_buf();
+    if let Err(warning) = discard_prepared(prepared) {
+        error = error
+            .with_recovery_artifact(recovery_directory.to_string_lossy())
+            .with_cleanup_warning(warning);
+    }
+    if let Err(warning) = cleanup_owned_temp(temp_path) {
+        error = error
+            .with_recovery_artifact(temp_path.to_string_lossy())
+            .with_cleanup_warning(warning);
+    }
+    error
+}
+
+fn cleanup_owned_temp(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|error| format!("failed to clean {}: {error}", path.display()))
+}
+
+fn cleanup_temp_error(
+    mut error: LargeFileError,
+    temp_path: &Path,
+    owned: bool,
+) -> LargeFileError {
+    if !owned {
+        return error;
+    }
+    if let Err(warning) = cleanup_owned_temp(temp_path) {
+        error = error
+            .with_recovery_artifact(temp_path.to_string_lossy())
+            .with_cleanup_warning(warning);
+    }
+    error
+}
+
+fn cleanup_base_arc(base: Arc<FileBaseSnapshot>) -> Result<(), String> {
+    let directory = base.snapshot_dir().to_path_buf();
+    match Arc::try_unwrap(base) {
+        Ok(base) => base.cleanup().map_err(|error| error.to_string()),
+        Err(_) => Err(format!(
+            "previous session base remains referenced at {}",
+            directory.display()
+        )),
+    }
+}
+
+fn retain_temp_after_replace_error(
+    prepared: PreparedRebase,
+    temp_path: &Path,
+    mut error: LargeFileError,
+) -> LargeFileError {
+    let recovery_directory = prepared.base.snapshot_dir().to_path_buf();
+    if let Err(warning) = discard_prepared(prepared) {
+        error = error
+            .with_recovery_artifact(recovery_directory.to_string_lossy())
+            .with_cleanup_warning(warning);
+    }
+    if temp_path.exists() {
+        error = error.with_recovery_artifact(temp_path.to_string_lossy());
+    }
+    error
+}
+
+fn view_edit(edit: &TextEdit) -> ViewEdit {
+    ViewEdit::new(
+        edit.start_line,
+        edit.start_column,
+        edit.end_line,
+        edit.end_column,
+        edit.text.clone(),
+    )
+}
+
+fn unique_large_temp_path(path: &Path, session_id: &str, revision: u64) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("document");
+    let safe_session = session_id
+        .chars()
+        .map(|value| if value.is_ascii_alphanumeric() { value } else { '-' })
+        .collect::<String>();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!(
+        ".{name}.lightmark-{safe_session}-{revision}-{stamp}.tmp"
+    ))
+}
+
+struct TempWriteError {
+    message: String,
+    owned: bool,
+}
+
+fn write_view_temp(
+    view: &SegmentedTextView<FileBaseSnapshot>,
+    path: &Path,
+) -> Result<(), TempWriteError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| TempWriteError {
+            message: format!("failed to create {}: {error}", path.display()),
+            owned: false,
+        })?;
+    let mut writer = BufWriter::new(file);
+    view.write_to(&mut writer)
+        .map_err(|error| TempWriteError {
+            message: format!("failed to stream {}: {error}", path.display()),
+            owned: true,
+        })?;
+    writer
+        .flush()
+        .map_err(|error| TempWriteError {
+            message: format!("failed to flush {}: {error}", path.display()),
+            owned: true,
+        })
+}
+
+fn replace_or_create_file(target: &Path, replacement: &Path) -> Result<(), String> {
+    if target.exists() {
+        replace_file(target, replacement)
+    } else {
+        fs::rename(replacement, target).map_err(|error| {
+            format!(
+                "Failed to move {} to {}: {error}",
+                replacement.display(),
+                target.display()
+            )
+        })
+    }
+}
+
+fn fingerprint_if_exists(
+    path: &Path,
+) -> Result<Option<LargeFileFingerprint>, LargeFileError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let fingerprint = FileBaseSnapshot::fingerprint_path(path, 64 * 1024)
+        .map_err(|error| snapshot_error(error, path))?;
+    Ok(Some(fingerprint_model(&fingerprint)))
+}
+
+fn scan_outline_view(
+    view: &SegmentedTextView<FileBaseSnapshot>,
+    session_id: &str,
+) -> Result<Vec<LargeOutlineItem>, LargeFileError> {
+    let mut outline = Vec::new();
+    for line_index in 0..view.line_count() {
+        let line = view
+            .read_line_content(line_index)
+            .map_err(|error| view_error(session_id, error))?;
+        if let Some((level, text)) = parse_heading(&line) {
+            outline.push(LargeOutlineItem {
+                id: format!("large-heading-{line_index}"),
+                text,
+                level,
+                line: line_index,
+            });
+        }
+    }
+    Ok(outline)
 }
 
 #[tauri::command]
@@ -1271,18 +1947,16 @@ fn find_literal_line(
     matches
 }
 
-fn collect_large_replace_edits(
-    path: &Path,
+fn collect_large_replace_edits_from_view(
+    view: &SegmentedTextView<FileBaseSnapshot>,
     matcher: &LargeMatcher,
     replacement: &str,
-) -> Result<Vec<TextEdit>, String> {
-    let file =
-        File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
-    let reader = BufReader::new(file);
+) -> Result<Vec<TextEdit>, ViewError> {
     let mut edits = Vec::new();
-
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|err| format!("Failed to scan {}: {err}", path.display()))?;
+    for line_index in 0..view.line_count() {
+        let line = view
+            .read_line_content(line_index)
+            ?;
         let matches = matcher.find_line(&line, line_index);
         if !matches.is_empty() {
             let next = replace_line_matches(&line, &matches, matcher, replacement);
@@ -1290,13 +1964,11 @@ fn collect_large_replace_edits(
                 start_line: line_index,
                 start_column: 0,
                 end_line: line_index,
-                end_column: line.chars().count(),
+                end_column: line.encode_utf16().count(),
                 text: next,
             });
         }
     }
-
-    edits.sort_by_key(|edit| (edit.start_line, edit.start_column));
     Ok(edits)
 }
 
@@ -1306,30 +1978,58 @@ fn replace_line_matches(
     matcher: &LargeMatcher,
     replacement: &str,
 ) -> String {
-    let chars: Vec<char> = line.chars().collect();
     let mut next = String::new();
     let mut cursor = 0_usize;
     for item in matches {
-        next.extend(chars[cursor..item.start_column].iter());
+        let Some(start_byte) = utf16_column_to_byte(line, item.start_column) else {
+            continue;
+        };
+        let Some(end_byte) = utf16_column_to_byte(line, item.end_column) else {
+            continue;
+        };
+        if start_byte < cursor || end_byte < start_byte {
+            continue;
+        }
+        next.push_str(&line[cursor..start_byte]);
         next.push_str(&matcher.replace_text(&item.text, replacement));
-        cursor = item.end_column;
+        cursor = end_byte;
     }
-    next.extend(chars[cursor..].iter());
+    next.push_str(&line[cursor..]);
     next
 }
 
 fn large_find_match(line: &str, line_index: usize, start: usize, end: usize) -> LargeFindMatch {
     LargeFindMatch {
         line: line_index,
-        start_column: byte_to_char_column(line, start),
-        end_column: byte_to_char_column(line, end),
+        start_column: byte_to_utf16_column(line, start),
+        end_column: byte_to_utf16_column(line, end),
         text: line[start..end].to_string(),
         preview: line.chars().take(180).collect(),
     }
 }
 
-fn byte_to_char_column(value: &str, byte_index: usize) -> usize {
-    value[..byte_index].chars().count()
+fn byte_to_utf16_column(value: &str, byte_index: usize) -> usize {
+    value[..byte_index].encode_utf16().count()
+}
+
+fn utf16_column_to_byte(value: &str, column: usize) -> Option<usize> {
+    if column == 0 {
+        return Some(0);
+    }
+    let mut units = 0_usize;
+    for (byte, character) in value.char_indices() {
+        if units == column {
+            return Some(byte);
+        }
+        units = units.saturating_add(character.len_utf16());
+        if units > column {
+            return None;
+        }
+        if units == column {
+            return Some(byte + character.len_utf8());
+        }
+    }
+    (units == column).then_some(value.len())
 }
 
 fn is_whole_word_bytes(value: &str, start: usize, end: usize) -> bool {
@@ -1342,25 +2042,6 @@ fn is_word_char(value: Option<char>) -> bool {
     value
         .map(|char| char.is_alphanumeric() || char == '_')
         .unwrap_or(false)
-}
-
-fn scan_outline(path: &Path) -> Result<Vec<LargeOutlineItem>, String> {
-    let file =
-        File::open(path).map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut outline = Vec::new();
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|err| format!("Failed to scan {}: {err}", path.display()))?;
-        if let Some((level, text)) = parse_heading(&line) {
-            outline.push(LargeOutlineItem {
-                id: format!("large-heading-{line_index}"),
-                text,
-                level,
-                line: line_index,
-            });
-        }
-    }
-    Ok(outline)
 }
 
 fn parse_heading(line: &str) -> Option<(u8, String)> {
@@ -1381,32 +2062,12 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
     }
 }
 
-fn apply_edit_to_lines(lines: &[String], edit: &TextEdit) -> String {
-    let first = lines.first().map(String::as_str).unwrap_or("");
-    let last = lines.last().map(String::as_str).unwrap_or("");
-    let prefix = take_chars(first, edit.start_column);
-    let suffix = skip_chars(last, edit.end_column);
-    format!("{prefix}{}{suffix}", edit.text)
-}
-
-fn take_chars(value: &str, count: usize) -> String {
-    value.chars().take(count).collect()
-}
-
-fn skip_chars(value: &str, count: usize) -> String {
-    value.chars().skip(count).collect()
-}
-
 fn new_session_id() -> String {
-    let millis = SystemTime::now()
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
+        .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("large-{millis}")
-}
-
-fn edits_overlap(a: &TextEdit, b: &TextEdit) -> bool {
-    a.start_line <= b.end_line && b.start_line <= a.end_line
+    format!("large-{}-{nanos}", std::process::id())
 }
 
 fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
@@ -1439,8 +2100,15 @@ fn replace_file(target: &Path, replacement: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        percent_decode_path, resolve_asset_folder, sanitize_asset_file_name,
-        similar_markdown_files, watch_path_key, write_text_file_safely,
+        apply_file_edits, close_large_file, open_large_file_at_root, percent_decode_path,
+        default_large_snapshot_root, read_file_chunk, resolve_asset_folder, save_plan_sync,
+        sanitize_asset_file_name, cleanup_temp_error, sessions, write_view_temp,
+        FileBaseSnapshot,
+        save_large_file, save_large_file_as, similar_markdown_files, watch_path_key,
+        write_text_file_safely,
+    };
+    use super::super::models::{
+        LargeCloseDisposition, LargeCoordinateSpace, LargeFileError, TextEdit,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1507,6 +2175,588 @@ mod tests {
     #[test]
     fn asset_file_name_preserves_unicode_letters() {
         assert_eq!(sanitize_asset_file_name("旅行 照片.jpg"), "旅行-照片.jpg");
+    }
+
+    #[test]
+    fn large_file_edit_boundaries_preserve_pending_chunks_utf16_columns_and_same_line_edits() {
+        let dir = unique_test_dir("large-edit-boundaries");
+        fs::create_dir_all(&dir).unwrap();
+        let mut failures = Vec::new();
+
+        let pending_path = dir.join("pending.md");
+        fs::write(&pending_path, "before\nsecond\n").unwrap();
+        let pending_session =
+            open_large_file_at_root(pending_path.to_string_lossy().into_owned(), default_large_snapshot_root()).unwrap();
+        apply_file_edits(
+            pending_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 6,
+                text: "after".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        let pending_chunk = read_file_chunk(
+            pending_session.session_id.clone(),
+            0,
+            2,
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+            .unwrap()
+            .text;
+        close_large_file(
+            pending_session.session_id,
+            1,
+            LargeCloseDisposition::Discard,
+        )
+        .unwrap();
+        if pending_chunk != "after\nsecond\n" {
+            failures.push(format!(
+                "pending chunk: expected {:?}, got {:?}",
+                "after\nsecond\n", pending_chunk,
+            ));
+        }
+
+        let emoji_path = dir.join("emoji.md");
+        fs::write(&emoji_path, "😀abc\n").unwrap();
+        let emoji_session =
+            open_large_file_at_root(emoji_path.to_string_lossy().into_owned(), default_large_snapshot_root()).unwrap();
+        apply_file_edits(
+            emoji_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 3,
+                end_line: 0,
+                end_column: 4,
+                text: "X".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        save_large_file(
+            emoji_session.session_id.clone(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        close_large_file(
+            emoji_session.session_id,
+            1,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        let emoji_result = fs::read_to_string(&emoji_path).unwrap();
+        if emoji_result != "😀aXc\n" {
+            failures.push(format!(
+                "emoji edit: expected {:?}, got {:?}",
+                "😀aXc\n", emoji_result,
+            ));
+        }
+
+        let same_line_path = dir.join("same-line.md");
+        fs::write(&same_line_path, "abcdef\n").unwrap();
+        let same_line_session =
+            open_large_file_at_root(same_line_path.to_string_lossy().into_owned(), default_large_snapshot_root()).unwrap();
+        apply_file_edits(
+            same_line_session.session_id.clone(),
+            vec![
+                TextEdit {
+                    start_line: 0,
+                    start_column: 1,
+                    end_line: 0,
+                    end_column: 2,
+                    text: "B".to_string(),
+                },
+                TextEdit {
+                    start_line: 0,
+                    start_column: 4,
+                    end_line: 0,
+                    end_column: 5,
+                    text: "E".to_string(),
+                },
+            ],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        save_large_file(
+            same_line_session.session_id.clone(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        close_large_file(
+            same_line_session.session_id,
+            1,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        let same_line_result = fs::read_to_string(&same_line_path).unwrap();
+        if same_line_result != "aBcdEf\n" {
+            failures.push(format!(
+                "same-line edits: expected {:?}, got {:?}",
+                "aBcdEf\n", same_line_result,
+            ));
+        }
+
+        let insertion_path = dir.join("line-insertion.md");
+        fs::write(&insertion_path, "one\ntwo\nthree\n").unwrap();
+        let insertion_session =
+            open_large_file_at_root(
+                insertion_path.to_string_lossy().into_owned(),
+                default_large_snapshot_root(),
+            )
+            .unwrap();
+        apply_file_edits(
+            insertion_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 3,
+                text: "inserted-a\ninserted-b".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        // The second edit uses the visible line produced by the first insertion.
+        apply_file_edits(
+            insertion_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 10,
+                text: "changed-b".to_string(),
+            }],
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        let insertion_chunk = read_file_chunk(
+            insertion_session.session_id.clone(),
+            0,
+            5,
+            2,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        if insertion_chunk.text != "one\ninserted-a\nchanged-b\nthree\n"
+            || insertion_chunk.total_lines != 4
+        {
+            failures.push(format!(
+                "line insertion projection: expected text {:?} with 4 lines, got {:?} with {} lines",
+                "one\ninserted-a\nchanged-b\nthree\n",
+                insertion_chunk.text,
+                insertion_chunk.total_lines,
+            ));
+        }
+        if let Err(error) = save_large_file(
+            insertion_session.session_id.clone(),
+            2,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        ) {
+            failures.push(format!("line insertion save failed: {error}"));
+        }
+        close_large_file(
+            insertion_session.session_id,
+            2,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        let insertion_result = fs::read_to_string(&insertion_path).unwrap();
+        if insertion_result != "one\ninserted-a\nchanged-b\nthree\n" {
+            failures.push(format!(
+                "line insertion save: expected {:?}, got {:?}",
+                "one\ninserted-a\nchanged-b\nthree\n", insertion_result,
+            ));
+        }
+
+        let deletion_path = dir.join("line-deletion.md");
+        fs::write(&deletion_path, "keep\ndelete-me\nedit-me\n").unwrap();
+        let deletion_session = open_large_file_at_root(
+            deletion_path.to_string_lossy().into_owned(),
+            default_large_snapshot_root(),
+        )
+        .unwrap();
+        apply_file_edits(
+            deletion_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 1,
+                start_column: 0,
+                end_line: 2,
+                end_column: 0,
+                text: String::new(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        // After deleting row 1, row 2 becomes visible row 1 and is edited there.
+        apply_file_edits(
+            deletion_session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 7,
+                text: "edited".to_string(),
+            }],
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        let deletion_chunk = read_file_chunk(
+            deletion_session.session_id.clone(),
+            0,
+            4,
+            2,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        if deletion_chunk.text != "keep\nedited\n" || deletion_chunk.total_lines != 2 {
+            failures.push(format!(
+                "line deletion projection: expected text {:?} with 2 lines, got {:?} with {} lines",
+                "keep\nedited\n", deletion_chunk.text, deletion_chunk.total_lines,
+            ));
+        }
+        if let Err(error) = save_large_file(
+            deletion_session.session_id.clone(),
+            2,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        ) {
+            failures.push(format!("line deletion save failed: {error}"));
+        }
+        close_large_file(
+            deletion_session.session_id,
+            2,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        let deletion_result = fs::read_to_string(&deletion_path).unwrap();
+        if deletion_result != "keep\nedited\n" {
+            failures.push(format!(
+                "line deletion save: expected {:?}, got {:?}",
+                "keep\nedited\n", deletion_result,
+            ));
+        }
+
+        fs::remove_dir_all(dir).unwrap();
+        assert!(failures.is_empty(), "large-file boundary red cases: {failures:?}");
+    }
+
+    #[test]
+    fn large_file_save_rebases_private_base_before_the_next_edit() {
+        let dir = unique_test_dir("large-save-rebase");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rebase.md");
+        let snapshot_root = dir.join("snapshots");
+        fs::write(&path, "😀abc\n").unwrap();
+
+        let session = open_large_file_at_root(
+            path.to_string_lossy().into_owned(),
+            snapshot_root.clone(),
+        )
+        .unwrap();
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 3,
+                end_line: 0,
+                end_column: 4,
+                text: "X".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        let first_save = save_large_file(
+            session.session_id.clone(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        assert_eq!(first_save.saved_revision, 1);
+        assert_eq!(first_save.base_fingerprint, first_save.disk_fingerprint);
+
+        // This edit is anchored to the rebased revision. If save had only
+        // cleared the old pending list while retaining the old base, the
+        // second save would either lose X or apply Y to the wrong bytes.
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 3,
+                end_line: 0,
+                end_column: 4,
+                text: "Y".to_string(),
+            }],
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        let second_save = save_large_file(
+            session.session_id.clone(),
+            2,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        assert_eq!(second_save.saved_revision, 2);
+        assert_eq!(second_save.base_fingerprint, second_save.disk_fingerprint);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "😀aYc\n");
+
+        let close = close_large_file(
+            session.session_id,
+            2,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        assert!(close.closed);
+        assert!(close.cleanup_completed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_save_plan_is_rejected_after_a_new_edit() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = unique_test_dir("large-save-generation");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("generation.md");
+        let snapshot_root = dir.join("snapshots");
+        fs::write(&path, "first\nsecond\n").unwrap();
+        let session = open_large_file_at_root(
+            path.to_string_lossy().into_owned(),
+            snapshot_root,
+        )
+        .unwrap();
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 5,
+                text: "FIRST".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+
+        let captured = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        *save_plan_sync().lock().unwrap() = Some((Arc::clone(&captured), Arc::clone(&release)));
+        let thread_session_id = session.session_id.clone();
+        let saver = thread::spawn(move || {
+            save_large_file(
+                thread_session_id,
+                1,
+                LargeCoordinateSpace::Utf16CodeUnits,
+            )
+        });
+
+        captured.wait();
+        // The saver has captured revision 1 and is paused before writing.
+        // A new edit advances both the document revision and the persistence
+        // generation, so the old save must not publish its temp file.
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 6,
+                text: "SECOND".to_string(),
+            }],
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        release.wait();
+
+        let error = saver.join().unwrap().expect_err("stale save must be rejected");
+        assert_eq!(error.code, "save-plan-stale");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("lightmark-")));
+
+        close_large_file(
+            session.session_id,
+            2,
+            LargeCloseDisposition::Discard,
+        )
+        .unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn external_conflict_cleans_prepared_temp_and_keeps_pending_view() {
+        let dir = unique_test_dir("large-save-conflict");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conflict.md");
+        let snapshot_root = dir.join("snapshots");
+        fs::write(&path, "before\n").unwrap();
+        let session = open_large_file_at_root(
+            path.to_string_lossy().into_owned(),
+            snapshot_root,
+        )
+        .unwrap();
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 6,
+                text: "pending".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+        fs::write(&path, "external\n").unwrap();
+
+        let error = save_large_file(
+            session.session_id.clone(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .expect_err("external modification must block save");
+        assert_eq!(error.code, "external-conflict");
+        assert_eq!(error.recovery_artifact, None);
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("lightmark-")));
+
+        let close = close_large_file(
+            session.session_id,
+            1,
+            LargeCloseDisposition::Discard,
+        )
+        .unwrap();
+        assert!(close.closed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_as_requires_target_fingerprint_and_rebases_path_identity() {
+        let dir = unique_test_dir("large-save-as");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.md");
+        let target = dir.join("target.md");
+        let snapshot_root = dir.join("snapshots");
+        fs::write(&source, "source\n").unwrap();
+        fs::write(&target, "target\n").unwrap();
+        let target_fingerprint = super::fingerprint_model(
+            &FileBaseSnapshot::fingerprint_path(&target, 64 * 1024).unwrap(),
+        );
+        let session = open_large_file_at_root(
+            source.to_string_lossy().into_owned(),
+            snapshot_root,
+        )
+        .unwrap();
+        apply_file_edits(
+            session.session_id.clone(),
+            vec![TextEdit {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 6,
+                text: "saved-as".to_string(),
+            }],
+            0,
+            LargeCoordinateSpace::Utf16CodeUnits,
+        )
+        .unwrap();
+
+        let unauthorized = save_large_file_as(
+            session.session_id.clone(),
+            target.to_string_lossy().into_owned(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+            None,
+        )
+        .expect_err("existing target without a captured fingerprint must be rejected");
+        assert_eq!(unauthorized.code, "target-conflict");
+
+        let receipt = save_large_file_as(
+            session.session_id.clone(),
+            target.to_string_lossy().into_owned(),
+            1,
+            LargeCoordinateSpace::Utf16CodeUnits,
+            Some(target_fingerprint),
+        )
+        .unwrap();
+        assert_eq!(receipt.path, target.to_string_lossy());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "saved-as\n");
+        let close = close_large_file(
+            session.session_id,
+            1,
+            LargeCloseDisposition::Saved,
+        )
+        .unwrap();
+        assert!(close.closed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preexisting_save_temp_collision_is_never_deleted_by_cleanup() {
+        let dir = unique_test_dir("large-save-temp-collision");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.md");
+        let snapshot_root = dir.join("snapshots");
+        let sentinel = dir.join(".existing-lightmark-temp");
+        fs::write(&path, "source\n").unwrap();
+        fs::write(&sentinel, "keep me\n").unwrap();
+        let session = open_large_file_at_root(
+            path.to_string_lossy().into_owned(),
+            snapshot_root,
+        )
+        .unwrap();
+        let view = sessions()
+            .lock()
+            .unwrap()
+            .get(&session.session_id)
+            .unwrap()
+            .view
+            .clone();
+        let write_error = write_view_temp(&view, &sentinel).expect_err("sentinel must block create_new");
+        assert!(!write_error.owned);
+        let cleanup_error = cleanup_temp_error(
+            LargeFileError::new("save-write-failed", write_error.message),
+            &sentinel,
+            write_error.owned,
+        );
+        assert_eq!(cleanup_error.recovery_artifact, None);
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep me\n");
+        drop(view);
+        close_large_file(
+            session.session_id,
+            0,
+            LargeCloseDisposition::Discard,
+        )
+        .unwrap();
+        fs::remove_file(&sentinel).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

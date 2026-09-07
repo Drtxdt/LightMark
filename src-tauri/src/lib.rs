@@ -20,6 +20,7 @@ pub fn run() {
             commands::file::search_large_file,
             commands::file::replace_large_file_matches,
             commands::file::save_large_file,
+            commands::file::save_large_file_as,
             commands::file::close_large_file,
             commands::file::write_text_file,
             commands::file::save_asset_file,

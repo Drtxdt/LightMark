@@ -45,6 +45,16 @@ import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingMode
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
 import { buildSourceOutlineIndex, sourceContextAtLine, updateSourceOutlineIndex } from "../../editor/sourceOutlineIndex";
 import { recordStartupStage } from "../../editor/startupMetrics";
+import {
+  normalizeSourceLineBreaks,
+  parseSourceDocument,
+  rawOffsetToSourceOffset,
+  resetSourceLineEndings,
+  serializeSourceDocument,
+  sourceOffsetToRawOffset,
+  sourceLineEndingsExtension,
+  sourceLineEndingsField,
+} from "../../editor/sourceLineEndings";
 import { expandSnippet } from "../../utils/snippets";
 import {
   clipboardPayloadFromDataTransfer,
@@ -531,7 +541,7 @@ const sourceInputKeymap: KeyBinding[] = [
   },
 ];
 
-function extensions() {
+function extensions(sourceDocument: ReturnType<typeof parseSourceDocument>) {
   return [
     lineNumbers(),
     history(),
@@ -539,6 +549,7 @@ function extensions() {
     keymap.of([...sourceInputKeymap, ...historyKeymap]),
     sourceFindField,
     mathDiagnosticField,
+    sourceLineEndingsExtension(sourceDocument.lineEndings),
     sourceFocusPlugin,
     sourceOutlineField,
     sourceHeadingFoldField,
@@ -754,15 +765,16 @@ function handleSourcePair(currentView: EditorView, key: string) {
     return true;
   }
   if (action.type === "wrap") {
-    const insert = `${action.open}${selectedText}${action.close}`;
+    const insert = normalizeSourceLineBreaks(`${action.open}${selectedText}${action.close}`);
     currentView.dispatch({
       changes: { from: selection.from, to: selection.to, insert },
       selection: { anchor: selection.from + 1, head: selection.from + 1 + selectedText.length },
     });
     return true;
   }
+  const insert = normalizeSourceLineBreaks(`${action.open}${action.close}`);
   currentView.dispatch({
-    changes: { from: selection.from, to: selection.to, insert: `${action.open}${action.close}` },
+    changes: { from: selection.from, to: selection.to, insert },
     selection: { anchor: selection.from + action.open.length },
   });
   return true;
@@ -780,9 +792,10 @@ function handleSourceListEnter(currentView: EditorView) {
     currentView.dispatch({ changes: { from: line.from, to: selection.from, insert: "" }, selection: { anchor: line.from } });
     return true;
   }
+  const insert = normalizeSourceLineBreaks(action.insert);
   currentView.dispatch({
-    changes: { from: selection.from, to: selection.from, insert: action.insert },
-    selection: { anchor: selection.from + action.insert.length },
+    changes: { from: selection.from, to: selection.from, insert },
+    selection: { anchor: selection.from + insert.length },
     scrollIntoView: true,
   });
   return true;
@@ -861,7 +874,7 @@ function insertImageMarkdownIntoSource(markdown: string, currentView: EditorView
   const state = currentView.state;
   const from = position ?? state.selection.main.from;
   const to = position ?? state.selection.main.to;
-  const insert = withBlockSpacing(state.doc.toString(), from, to, markdown);
+  const insert = normalizeSourceLineBreaks(withBlockSpacing(state.doc.toString(), from, to, markdown));
   currentView.dispatch({
     changes: { from, to, insert },
     selection: { anchor: from + insert.length },
@@ -881,11 +894,12 @@ function withBlockSpacing(documentText: string, from: number, to: number, markdo
 onMounted(() => {
   if (!host.value) return;
   sourceWordCount = countWords(paneContent.value);
+  const sourceDocument = parseSourceDocument(paneContent.value);
   view = new EditorView({
     parent: host.value,
     state: EditorState.create({
-      doc: paneContent.value,
-      extensions: extensions(),
+      doc: sourceDocument.text,
+      extensions: extensions(sourceDocument),
     }),
   });
   // CodeMirror is ready here. Capture this boundary before the diagnostic
@@ -920,12 +934,16 @@ watch(
   () => {
     if (!view) return;
     sourceWordCount = countWords(paneContent.value);
+    const sourceDocument = parseSourceDocument(paneContent.value);
     applyingExternalChange = true;
-    view.setState(EditorState.create({
-      doc: paneContent.value,
-      extensions: extensions(),
-    }));
-    applyingExternalChange = false;
+    try {
+      view.setState(EditorState.create({
+        doc: sourceDocument.text,
+        extensions: extensions(sourceDocument),
+      }));
+    } finally {
+      applyingExternalChange = false;
+    }
     registerSourceDocumentSession();
     scheduleMathDiagnostics(view, 0);
     syncSourceWritingModes();
@@ -997,7 +1015,7 @@ function registerSourceDocumentSession() {
     async snapshot(_reason, options) {
       if (!view) throw new Error("源码编辑器已经关闭。");
       if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
-      const markdown = view.state.doc.toString();
+      const markdown = serializeSourceDocument(view.state.doc, view.state.field(sourceLineEndingsField));
       if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
       return {
         tabId,
@@ -1019,10 +1037,17 @@ function registerSourceDocumentSession() {
     },
     async replaceMarkdown(markdown) {
       if (!view) throw new Error("源码编辑器已经关闭。");
-      sourceWordCount = countWords(markdown);
+      const sourceDocument = parseSourceDocument(markdown);
+      sourceWordCount = countWords(sourceDocument.text);
       applyingExternalChange = true;
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: markdown } });
-      applyingExternalChange = false;
+      try {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: sourceDocument.text },
+          effects: resetSourceLineEndings.of(sourceDocument.lineEndings),
+        });
+      } finally {
+        applyingExternalChange = false;
+      }
       sourceRevision += 1;
       publishDocumentDerivedState(tabId, {
         revision: sourceRevision,
@@ -1046,11 +1071,25 @@ function registerSourceDocumentSession() {
 function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean }>) {
   if (event.detail?.paneId !== props.paneId || paneEditorMode.value !== "source" || paneDocumentMode.value !== "normal" || !view) return;
   const selection = view.state.selection.main;
-  const anchor = mapMarkdownOffset(event.detail.source, event.detail.result, selection.anchor);
-  const head = mapMarkdownOffset(event.detail.source, event.detail.result, selection.head);
+  const sourceDocument = parseSourceDocument(event.detail.result.text);
+  const mapSourceOffset = (offset: number) => rawOffsetToSourceOffset(
+    event.detail.result.text,
+    mapMarkdownOffset(
+      event.detail.source,
+      event.detail.result,
+      sourceOffsetToRawOffset(event.detail.source, offset),
+    ),
+  );
+  const anchor = mapSourceOffset(selection.anchor);
+  const head = mapSourceOffset(selection.head);
   event.detail.handled = true;
   view.dispatch({
-    changes: { from: 0, to: view.state.doc.length, insert: event.detail.result.text },
+    changes: {
+      from: 0,
+      to: view.state.doc.length,
+      insert: sourceDocument.text,
+    },
+    effects: resetSourceLineEndings.of(sourceDocument.lineEndings),
     selection: { anchor, head },
     scrollIntoView: true,
     annotations: isolateHistory.of("full"),
@@ -1084,10 +1123,14 @@ function handleSourcePlainPasteCapture(event: KeyboardEvent) {
 }
 
 function insertSmartPasteIntoSource(markdown: string, currentView: EditorView) {
+  // Pasted CRLF/CR is canonicalized at this source-mode entry point. The
+  // metadata field assigns the document's main EOL to these new line breaks;
+  // existing line-ending bytes remain attached to the untouched document.
+  const normalized = normalizeSourceLineBreaks(markdown);
   const selection = currentView.state.selection.main;
   currentView.dispatch({
-    changes: { from: selection.from, to: selection.to, insert: markdown },
-    selection: { anchor: selection.from + markdown.length },
+    changes: { from: selection.from, to: selection.to, insert: normalized },
+    selection: { anchor: selection.from + normalized.length },
     scrollIntoView: true,
   });
   currentView.focus();
@@ -1262,9 +1305,11 @@ function insertSnippetIntoSource(event: CustomEvent<{ snippetId: string; target:
     return;
   }
   const expansion = expandSnippet(snippet.markdown, { selection: target.selection });
+  const normalizedSnippet = normalizeSourceLineBreaks(expansion.markdown);
+  const normalizedCursorOffset = normalizeSourceLineBreaks(expansion.markdown.slice(0, expansion.cursorOffset)).length;
   view.dispatch({
-    changes: { from, to, insert: expansion.markdown },
-    selection: { anchor: from + expansion.cursorOffset },
+    changes: { from, to, insert: normalizedSnippet },
+    selection: { anchor: from + normalizedCursorOffset },
     scrollIntoView: true,
     annotations: isolateHistory.of("full"),
   });
@@ -1456,7 +1501,7 @@ function replaceCurrentSourceFind() {
   const current = normalizeMatchIndex(findReplaceStore.currentIndex, sourceFindMatches.length);
   const match = sourceFindMatches[current];
   if (!match || findReplaceStore.error) return;
-  const insert = replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex);
+  const insert = normalizeSourceLineBreaks(replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex));
   view.dispatch({
     changes: { from: match.from, to: match.to, insert },
     selection: { anchor: match.from + insert.length },
@@ -1472,7 +1517,7 @@ function replaceAllSourceFind() {
   const changes = [...sourceFindMatches].reverse().map((match) => ({
     from: match.from,
     to: match.to,
-    insert: replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex),
+    insert: normalizeSourceLineBreaks(replacementForMatch(match, findReplaceStore.replaceText, findReplaceStore.regex)),
   }));
   view.dispatch({ changes, scrollIntoView: true });
   appStore.statusMessage = `已替换 ${changes.length} 处`;

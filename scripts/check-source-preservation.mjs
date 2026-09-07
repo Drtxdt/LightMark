@@ -31,17 +31,18 @@ try {
   const mappedSource = "\uFEFF#  Keep heading\r\n\r\nParagraph  \r\n\r\n-  keep list marker\r\n";
   const mapped = markdownTools.markdownTopLevelSourceBlocks(mappedSource);
   assert.equal(mapped.prefix, "\uFEFF");
-  assert.equal(mapped.blocks.length, 3);
+  assert.equal(mapped.blocks.length, 4);
   const headingNode = {};
   const paragraphNode = {};
   const listNode = {};
+  const trailingParagraphNode = {};
   const changedParagraphNode = {};
   assert.equal(
     sourceTools.combinePreservedSourceBlocks(
-      [headingNode, paragraphNode, listNode],
+      [headingNode, paragraphNode, listNode, trailingParagraphNode],
       mapped.blocks,
-      [headingNode, changedParagraphNode, listNode],
-      ["# Keep heading", "Changed", "- keep list marker"],
+      [headingNode, changedParagraphNode, listNode, trailingParagraphNode],
+      ["# Keep heading", "Changed", "- keep list marker", ""],
       mapped.prefix,
       "\r\n",
     ),
@@ -50,14 +51,119 @@ try {
   const insertedNode = {};
   assert.equal(
     sourceTools.combinePreservedSourceBlocks(
-      [headingNode, paragraphNode, listNode],
+      [headingNode, paragraphNode, listNode, trailingParagraphNode],
       mapped.blocks,
-      [headingNode, insertedNode, paragraphNode, listNode],
-      ["# Keep heading", "Inserted", "Paragraph", "- keep list marker"],
+      [headingNode, insertedNode, paragraphNode, listNode, trailingParagraphNode],
+      ["# Keep heading", "Inserted", "Paragraph", "- keep list marker", ""],
       mapped.prefix,
       "\r\n",
     ),
     "\uFEFF#  Keep heading\r\n\r\nInserted\r\n\r\nParagraph  \r\n\r\n-  keep list marker\r\n",
+  );
+
+  const noTerminalNewline = "abc";
+  const noTerminalNewlineMapped = markdownTools.markdownTopLevelSourceBlocks(noTerminalNewline);
+  const noTerminalNewlineOriginalNode = {};
+  const noTerminalNewlineChangedNode = {};
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks(
+      [noTerminalNewlineOriginalNode],
+      noTerminalNewlineMapped.blocks,
+      [noTerminalNewlineChangedNode],
+      ["abcd"],
+      noTerminalNewlineMapped.prefix,
+      "\n",
+    ),
+    "abcd",
+  );
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks(
+      [noTerminalNewlineOriginalNode],
+      noTerminalNewlineMapped.blocks,
+      [noTerminalNewlineOriginalNode, {}],
+      ["abc", "new block"],
+      noTerminalNewlineMapped.prefix,
+      "\n",
+    ),
+    "abc\n\nnew block",
+  );
+
+  const combineWithFreshFinalBlock = (source, serialized) => {
+    const mappedSource = markdownTools.markdownTopLevelSourceBlocks(source);
+    const originalNodes = mappedSource.blocks.map(() => ({}));
+    const currentNodes = originalNodes.slice();
+    const targetIndex = mappedSource.blocks.findLastIndex((block) => block.source.length > 0);
+    if (targetIndex >= 0) currentNodes[targetIndex] = {};
+    const serializedBlocks = mappedSource.blocks.map((block, index) => index === targetIndex ? serialized[0] : block.source);
+    return sourceTools.combinePreservedSourceBlocks(
+      originalNodes,
+      mappedSource.blocks,
+      currentNodes,
+      serializedBlocks,
+      mappedSource.prefix,
+      source.match(/\r\n|\r|\n/)?.[0] ?? "\n",
+    );
+  };
+
+  assert.equal(combineWithFreshFinalBlock("abc\n", ["abcd"]), "abcd\n");
+  assert.equal(combineWithFreshFinalBlock("abc\r\n", ["abcd"]), "abcd\r\n");
+  assert.equal(combineWithFreshFinalBlock("\uFEFFabc", ["abcd"]), "\uFEFFabcd");
+  assert.equal(combineWithFreshFinalBlock("- one", ["- two"]), "- two");
+  assert.equal(
+    combineWithFreshFinalBlock("| a |\n| --- |\n| b |", ["| a |\n| --- |\n| c |"]),
+    "| a |\n| --- |\n| c |",
+  );
+
+  const emptyMapped = markdownTools.markdownTopLevelSourceBlocks("");
+  const emptyNode = {};
+  const changedEmptyNode = {};
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks([emptyNode], emptyMapped.blocks, [changedEmptyNode], ["new block"], emptyMapped.prefix, "\n"),
+    "new block",
+  );
+
+  const multiLine = "first line\nsecond line";
+  const multiLineMapped = markdownTools.markdownTopLevelSourceBlocks(multiLine);
+  assert.equal(multiLineMapped.blocks.length, 1);
+  assert.equal(multiLineMapped.blocks[0].source, multiLine);
+  assert.equal(combineWithFreshFinalBlock(multiLine, ["first line\nupdated line"]), "first line\nupdated line");
+
+  const multiBlock = "first\n\nsecond";
+  const multiBlockMapped = markdownTools.markdownTopLevelSourceBlocks(multiBlock);
+  const firstNode = {};
+  const secondNode = {};
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks(
+      [firstNode, secondNode],
+      multiBlockMapped.blocks,
+      [firstNode, {}],
+      ["first", "updated"],
+      multiBlockMapped.prefix,
+      "\n",
+    ),
+    "first\n\nupdated",
+  );
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks(
+      [firstNode, secondNode],
+      multiBlockMapped.blocks,
+      [firstNode],
+      ["first"],
+      multiBlockMapped.prefix,
+      "\n",
+    ),
+    "first\n\n",
+  );
+  assert.equal(
+    sourceTools.combinePreservedSourceBlocks(
+      [firstNode, secondNode],
+      multiBlockMapped.blocks,
+      [firstNode, secondNode, {}],
+      ["first", "second", "new block"],
+      multiBlockMapped.prefix,
+      "\n",
+    ),
+    "first\n\nsecond\n\nnew block",
   );
 
   const snapshotSource = fs.readFileSync(path.resolve("src/editor/wysiwygSnapshot.ts"), "utf8");

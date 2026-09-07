@@ -15,7 +15,12 @@ const transpile = (sourcePath, destination, rewrites = []) => {
 };
 
 try {
-  transpile(path.join(root, "src", "editor", "documentRuntime.ts"), path.join(tempDir, "documentRuntime.mjs"));
+  transpile(path.join(root, "src", "editor", "documentMutationTracker.ts"), path.join(tempDir, "documentMutationTracker.mjs"));
+  transpile(
+    path.join(root, "src", "editor", "documentRuntime.ts"),
+    path.join(tempDir, "documentRuntime.mjs"),
+    [["./documentMutationTracker", "./documentMutationTracker.mjs"]],
+  );
   transpile(
     path.join(root, "src", "editor", "documentSnapshotCoordinator.ts"),
     path.join(tempDir, "documentSnapshotCoordinator.mjs"),

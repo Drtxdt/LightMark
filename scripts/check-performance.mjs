@@ -13,13 +13,35 @@ const [sourceEditor, wysiwygEditor, wysiwygFocus, appStore, workspaceIndexClient
   read("src/extensions/MermaidNode.ts"),
 ]);
 
-const sourceUpdate = sourceEditor.match(/EditorView\.updateListener\.of\(\(update\) => \{[\s\S]*?\n    \}\),/)?.[0] ?? "";
-const wysiwygUpdate = wysiwygEditor.match(/onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/)?.[0] ?? "";
+const requiredMatch = (source, expression, description) => {
+  const match = source.match(expression)?.[0];
+  assert.ok(match, description);
+  return match;
+};
+
+const sourceUpdate = requiredMatch(
+  sourceEditor,
+  /EditorView\.updateListener\.of\(\(update\) => \{[\s\S]*?\n    \}\),/,
+  "SourceEditor update listener was not found; performance assertions would otherwise be vacuous",
+);
+const wysiwygUpdate = requiredMatch(
+  wysiwygEditor,
+  /onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/,
+  "WysiwygEditor update handler was not found; performance assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(sourceUpdate, /doc\.toString\(\)|setPaneContent/, "CodeMirror input copied the full document");
-const sourceTab = sourceEditor.match(/function handleSourceTab[\s\S]*?\n}/)?.[0] ?? "";
+const sourceTab = requiredMatch(
+  sourceEditor,
+  /function handleSourceTab[\s\S]*?\n}/,
+  "SourceEditor Tab handler was not found; performance assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(sourceTab, /doc\.toString\(\)|isInsideFencedCode/, "CodeMirror Tab handler copied or rescanned the full document");
 assert.match(sourceTab, /sourceContextAtLine/);
-const sourcePositionCapture = sourceEditor.match(/function captureSourcePosition[\s\S]*?\n}/)?.[0] ?? "";
+const sourcePositionCapture = requiredMatch(
+  sourceEditor,
+  /function captureSourcePosition[\s\S]*?\n}/,
+  "Source position capture was not found; performance assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(sourcePositionCapture, /doc\.toString\(\)|buildEditorPositionSnapshot/, "CodeMirror position capture copied or rescanned the full document");
 assert.match(sourcePositionCapture, /state\.doc\.lineAt/);
 assert.doesNotMatch(wysiwygUpdate, /getHTML\(\)|editorHtmlToMarkdown|setPaneContent/, "Tiptap input serialized the full document");
@@ -35,10 +57,18 @@ assert.doesNotMatch(wysiwygEditor, /createLowlight\(all\)/, "all Lowlight gramma
 assert.match(wysiwygEditor, /ensureLowlightLanguage/);
 assert.match(wysiwygEditor, /installLowlightPlainTextFallback/);
 assert.match(wysiwygEditor, /incrementalLowlightPlugin/);
-const positionCapture = wysiwygEditor.match(/function captureWysiwygPosition[\s\S]*?\n}/)?.[0] ?? "";
+const positionCapture = requiredMatch(
+  wysiwygEditor,
+  /function captureWysiwygPosition[\s\S]*?\n}/,
+  "WYSIWYG position capture was not found; performance assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(positionCapture, /editorHtmlToMarkdown|docPosToMarkdownOffset|getHTML/, "WYSIWYG position capture serialized Markdown on input");
 assert.match(positionCapture, /editorAnchor: anchor/);
-const selectionCapture = wysiwygEditor.match(/function captureWysiwygSelectionAnchor[\s\S]*?\n}/)?.[0] ?? "";
+const selectionCapture = requiredMatch(
+  wysiwygEditor,
+  /function captureWysiwygSelectionAnchor[\s\S]*?\n}/,
+  "WYSIWYG selection capture was not found; performance assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(selectionCapture, /editorHtmlToMarkdown|docPosToMarkdownOffset|getHTML/, "WYSIWYG selection anchor serialized Markdown on input");
 assert.match(selectionCapture, /getWysiwygDerivedState/);
 assert.match(appStore, /documentRuntimeMetadata/);
@@ -61,4 +91,4 @@ for (let group = 0; Buffer.byteLength(fixture, "utf8") < 1024 * 1024; group += 1
 assert.ok(Buffer.byteLength(fixture, "utf8") >= 1024 * 1024);
 assert.ok(fixture.includes("[[Wiki Link]]") && fixture.includes("```mermaid"));
 
-console.log(`performance architecture checks passed (${Buffer.byteLength(fixture, "utf8")} byte deterministic fixture)`);
+console.log(`static performance architecture checks passed; no UI timing was performed (${Buffer.byteLength(fixture, "utf8")} byte deterministic fixture)`);

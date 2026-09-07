@@ -39,9 +39,12 @@
     "check:source-outline": "node scripts/check-source-outline-incremental.mjs",
     "check:document-runtime": "node scripts/check-document-runtime.mjs",
     "check:source-preservation": "node scripts/check-source-preservation.mjs",
+    "check:save-transaction": "node scripts/check-save-transaction.mjs",
     "check:editor-boundaries": "node scripts/check-editor-boundaries.mjs",
     "check:webview-markdown-editing": "node scripts/webview-markdown-editing-qa.mjs",
-    "check:bundle-budget": "node scripts/check-bundle-budget.mjs"
+    "check:bundle-budget": "node scripts/check-bundle-budget.mjs",
+    "check:all": "node scripts/check-all.mjs",
+    "qa:prepare-native": "node scripts/qa/isolated-native-evidence.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

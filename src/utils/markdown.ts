@@ -26,6 +26,12 @@ import {
 } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
 import { protectEnhancedImagesForEditor, protectEnhancedImagesForPreview, unwrapEnhancedImageParagraphs } from "./enhancedImages";
+import {
+  createInternalRenderContext,
+  markInternalHtml,
+  stripInternalHtmlCapabilities,
+  type InternalRenderContext,
+} from "./internalRenderContext";
 
 const LEADING_FRONT_MATTER_PATTERN = /^(?:\uFEFF)?---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[^\S\r\n]*(?=\r?\n|$)/;
 
@@ -47,26 +53,40 @@ const editorMd = new MarkdownIt({
   linkify: true,
   typographer: true,
 });
-installLightMarkMarkdown(editorMd, { preserveLightMarkInternal: true });
+installLightMarkMarkdown(editorMd);
 
 export function renderMarkdown(
   markdown: string,
   options: { mathNumbering?: MathNumberingMode } = {},
 ) {
   const placeholders: string[] = [];
+  const internalRenderContext = createInternalRenderContext();
+  const placeholderPrefix = `@@LIGHTMARK_PLACEHOLDER_${internalRenderContext.token}_`;
   const stash = (html: string) => {
-    const token = `@@LIGHTMARK_PLACEHOLDER_${placeholders.length}@@`;
+    const token = `${placeholderPrefix}${placeholders.length}@@`;
     placeholders.push(html);
     return token;
   };
-  const enhanced = enhanceMarkdownForRender(markdown, stash, options.mathNumbering);
-  const withTables = renderMarkdownTables(enhanced, (source) => md.renderInline(source));
-  return unwrapEnhancedImageParagraphs(restorePlaceholders(md.render(withTables), placeholders));
+  const enhanced = enhanceMarkdownForRender(markdown, stash, options.mathNumbering, internalRenderContext);
+  const withTables = renderMarkdownTables(
+    enhanced,
+    (source) => md.renderInline(source, { internalRenderContext }),
+  );
+  const rendered = md.render(withTables, { internalRenderContext });
+  return stripInternalHtmlCapabilities(
+    unwrapEnhancedImageParagraphs(restorePlaceholders(rendered, placeholders, undefined, placeholderPrefix)),
+    internalRenderContext,
+  );
 }
 
 export function renderMarkdownForEditor(markdown: string) {
-  const prepared = markSpecialBlocksForEditor(markdown);
-  return editorMd.render(renderMarkdownTables(prepared, (source) => editorMd.renderInline(source)));
+  const internalRenderContext = createInternalRenderContext();
+  const prepared = markSpecialBlocksForEditor(markdown, undefined, internalRenderContext);
+  const tableReady = renderMarkdownTables(
+    prepared,
+    (source) => editorMd.renderInline(source, { internalRenderContext }),
+  );
+  return stripInternalHtmlCapabilities(editorMd.render(tableReady, { internalRenderContext }), internalRenderContext);
 }
 
 export interface MarkdownSourceBlock {
@@ -75,29 +95,79 @@ export interface MarkdownSourceBlock {
   to: number;
   source: string;
   separator: string;
+  synthetic?: "trailing-paragraph";
+  generated?: "footnotes";
 }
 
+interface SourceMapSegment {
+  from: number;
+  to: number;
+  rawFrom: number;
+  rawTo: number;
+  exact: boolean;
+  generated?: "footnotes";
+}
+
+interface SourceMapSpan {
+  from: number;
+  to: number;
+  generated?: "footnotes";
+}
+
+interface SourceMapReplacement {
+  from: number;
+  to: number;
+  replacement: string;
+  rawSpan?: SourceMapSpan;
+}
+
+interface SourceMapObserver {
+  readonly value: string;
+  readonly rawLength: number;
+  replace(from: number, to: number, replacement: string, rawSpan?: SourceMapSpan): void;
+  replaceMany(replacements: readonly SourceMapReplacement[]): void;
+  insert(position: number, replacement: string): void;
+  rawSpan(from: number, to: number): SourceMapSpan;
+  rawBoundary(position: number, bias: "start" | "end"): number;
+  assertValue(value: string): void;
+}
+
+type PreparedSourceRange = SourceMapSpan & { synthetic?: "trailing-paragraph" };
+
 export function markdownTopLevelSourceBlocks(markdown: string): { prefix: string; blocks: MarkdownSourceBlock[] } {
-  const prepared = markSpecialBlocksForEditor(markdown);
+  const observer = createSourceMapObserver(markdown);
+  const prepared = markSpecialBlocksForEditor(markdown, observer);
+  observer.assertValue(prepared);
   const tokens = editorMd.parse(prepared, {});
-  const lineStarts = markdownLineStarts(markdown);
-  const documentPrefixLength = markdown.startsWith("\uFEFF") ? 1 : 0;
-  const ranges = tokens
+  const preparedLineStarts = markdownLineStarts(prepared);
+  const preparedTopLevelTokens = tokens
     .filter((token) => token.level === 0 && token.map && token.nesting !== -1)
+  const preparedRanges = preparedTopLevelTokens
     .map((token) => ({ fromLine: token.map![0], toLine: token.map![1] }))
     .filter((range, index, items) => index === 0 || range.fromLine !== items[index - 1].fromLine || range.toLine !== items[index - 1].toLine);
-  const blocks = ranges.map((range, index) => {
-    const lineFrom = lineStarts[Math.min(range.fromLine, lineStarts.length - 1)] ?? markdown.length;
-    const from = index === 0 ? Math.max(lineFrom, documentPrefixLength) : lineFrom;
-    const contentTo = lineStarts[Math.min(range.toLine, lineStarts.length - 1)] ?? markdown.length;
-    const nextLine = ranges[index + 1]?.fromLine;
-    const to = nextLine == null ? markdown.length : lineStarts[Math.min(nextLine, lineStarts.length - 1)] ?? markdown.length;
+  const sourceRanges: PreparedSourceRange[] = preparedRanges.map((range) => {
+    const preparedFrom = preparedLineStarts[range.fromLine] ?? prepared.length;
+    const preparedTo = preparedLineStarts[range.toLine] ?? prepared.length;
+    return mapPreparedRange(observer, preparedFrom, preparedContentEnd(prepared, preparedTo));
+  });
+  const lastPreparedToken = preparedTopLevelTokens.at(-1);
+  if (!lastPreparedToken || lastPreparedToken.type !== "paragraph_open") {
+    sourceRanges.push({ from: markdown.length, to: markdown.length, synthetic: "trailing-paragraph" });
+  }
+  assertMonotonicSourceRanges(sourceRanges, markdown.length);
+  const blocks = sourceRanges.map((rawRange, index) => {
+    const documentPrefixLength = index === 0 && markdown.startsWith("\uFEFF") ? 1 : 0;
+    const from = Math.max(rawRange.from, documentPrefixLength);
+    const contentTo = rawRange.to;
+    const to = sourceRanges[index + 1]?.from ?? markdown.length;
     return {
       from,
       contentTo,
       to,
       source: markdown.slice(from, contentTo),
       separator: markdown.slice(contentTo, to),
+      synthetic: rawRange.synthetic,
+      generated: rawRange.generated,
     };
   });
   return { prefix: markdown.slice(0, blocks[0]?.from ?? markdown.length), blocks };
@@ -107,6 +177,282 @@ function markdownLineStarts(markdown: string) {
   const starts = [0];
   for (const match of markdown.matchAll(/\r\n|\r|\n/g)) starts.push((match.index ?? 0) + match[0].length);
   return starts;
+}
+
+function preparedContentEnd(prepared: string, to: number) {
+  if (to <= 0) return to;
+  if (prepared[to - 1] === "\n") return prepared[to - 2] === "\r" ? to - 2 : to - 1;
+  if (prepared[to - 1] === "\r") return to - 1;
+  return to;
+}
+
+function assertMonotonicSourceRanges(ranges: SourceMapSpan[], sourceLength: number) {
+  let previousTo = 0;
+  for (const range of ranges) {
+    if (range.from < previousTo || range.to < range.from || range.to > sourceLength) {
+      throw new Error("source provenance produced overlapping or out-of-bounds source blocks");
+    }
+    previousTo = range.to;
+  }
+}
+
+function createSourceMapObserver(source: string): SourceMapObserver {
+  let mapped = source.length === 0
+    ? { value: source, segments: [] as SourceMapSegment[] }
+    : { value: source, segments: [{ from: 0, to: source.length, rawFrom: 0, rawTo: source.length, exact: true }] };
+  return {
+    get value() {
+      return mapped.value;
+    },
+    rawLength: source.length,
+    replace(from, to, replacement, rawSpan) {
+      this.replaceMany([{ from, to, replacement, rawSpan }]);
+    },
+    replaceMany(replacements) {
+      mapped = sourceMappedBatchReplace(mapped, replacements);
+    },
+    insert(position, replacement) {
+      this.replace(position, position, replacement, sourceMappedRawSpan(mapped, position, position));
+    },
+    rawSpan(from, to) {
+      return sourceMappedRawSpan(mapped, from, to);
+    },
+    rawBoundary(position, bias) {
+      if (bias === "start") {
+        let low = 0;
+        let high = mapped.segments.length;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (mapped.segments[middle].from < position) low = middle + 1;
+          else high = middle;
+        }
+        const right = mapped.segments[low];
+        if (right?.from === position) return right.rawFrom;
+        const containing = mapped.segments[low - 1];
+        if (containing && containing.from < position && containing.to > position) {
+          if (containing.exact && containing.to - containing.from === containing.rawTo - containing.rawFrom) {
+            return containing.rawFrom + position - containing.from;
+          }
+          return containing.rawFrom;
+        }
+        if (right) return right.rawFrom;
+        return containing?.rawTo ?? 0;
+      }
+
+      let low = 0;
+      let high = mapped.segments.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (mapped.segments[middle].to <= position) low = middle + 1;
+        else high = middle;
+      }
+      const containing = mapped.segments[low];
+      const left = mapped.segments[low - 1];
+      if (left?.to === position) return left.rawTo;
+      if (containing && containing.from < position && containing.to > position) {
+        if (containing.exact && containing.to - containing.from === containing.rawTo - containing.rawFrom) {
+          return containing.rawFrom + position - containing.from;
+        }
+        return containing.rawTo;
+      }
+      if (left) return left.rawTo;
+      return containing?.rawFrom ?? 0;
+    },
+    assertValue(value) {
+      if (mapped.value !== value) throw new Error("source provenance observer diverged from editor preprocessing");
+    },
+  };
+}
+
+function sourceMappedBatchReplace(
+  value: { value: string; segments: SourceMapSegment[] },
+  replacements: readonly SourceMapReplacement[],
+) {
+  if (replacements.length === 0) return value;
+  const ordered = [...replacements].sort((left, right) => left.from - right.from || left.to - right.to);
+  let cursor = 0;
+  let segmentIndex = 0;
+  let output = "";
+  const segments: SourceMapSegment[] = [];
+
+  const appendSegment = (segment: SourceMapSegment) => {
+    const previous = segments[segments.length - 1];
+    const canMerge = previous
+      && previous.to === segment.from
+      && previous.generated === segment.generated
+      && ((previous.exact && segment.exact && previous.rawTo === segment.rawFrom)
+        || (!previous.exact && !segment.exact && previous.rawFrom === segment.rawFrom && previous.rawTo === segment.rawTo));
+    if (canMerge) {
+      previous.to = segment.to;
+      previous.rawTo = segment.rawTo;
+    } else {
+      segments.push(segment);
+    }
+  };
+
+  const appendRange = (from: number, to: number) => {
+    if (to <= from) return;
+    const outputFrom = output.length;
+    output += value.value.slice(from, to);
+    while (segmentIndex < value.segments.length && value.segments[segmentIndex].to <= from) segmentIndex += 1;
+    let index = segmentIndex;
+    while (index < value.segments.length && value.segments[index].from < to) {
+      const segment = value.segments[index];
+      const pieceFrom = Math.max(from, segment.from);
+      const pieceTo = Math.min(to, segment.to);
+      if (pieceTo > pieceFrom) {
+        const exact = segment.exact && segment.to - segment.from === segment.rawTo - segment.rawFrom;
+        const rawFrom = exact ? segment.rawFrom + pieceFrom - segment.from : segment.rawFrom;
+        const rawTo = exact ? rawFrom + pieceTo - pieceFrom : segment.rawTo;
+          appendSegment({
+            from: outputFrom + pieceFrom - from,
+            to: outputFrom + pieceTo - from,
+            rawFrom,
+            rawTo,
+            exact,
+            generated: segment.generated,
+          });
+      }
+      index += 1;
+    }
+    segmentIndex = index > segmentIndex && value.segments[index - 1].to <= to ? index : segmentIndex;
+  };
+
+  for (const item of ordered) {
+    if (!Number.isInteger(item.from) || !Number.isInteger(item.to) || item.from < 0 || item.to < item.from || item.to > value.value.length) {
+      throw new Error("source provenance replacement is out of bounds");
+    }
+    if (item.from < cursor) throw new Error("source provenance replacements overlap");
+    appendRange(cursor, item.from);
+    const span = item.rawSpan ?? sourceMappedRawSpan(value, item.from, item.to);
+    const original = value.value.slice(item.from, item.to);
+    if (item.replacement === original) {
+      appendRange(item.from, item.to);
+    } else {
+      const replacementFrom = output.length;
+      output += item.replacement;
+      if (item.replacement.length > 0) {
+        appendSegment({
+          from: replacementFrom,
+          to: replacementFrom + item.replacement.length,
+          rawFrom: span.from,
+          rawTo: span.to,
+          exact: false,
+          generated: span.generated,
+        });
+      }
+    }
+    cursor = item.to;
+  }
+  appendRange(cursor, value.value.length);
+  return { value: output, segments };
+}
+
+function sourceMappedRawSpan(value: { value: string; segments: SourceMapSegment[] }, from: number, to: number): SourceMapSpan {
+  let low = 0;
+  let high = value.segments.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (value.segments[middle].to <= from) low = middle + 1;
+    else high = middle;
+  }
+  const firstRelevant = low;
+  if (from < to && firstRelevant < value.segments.length && value.segments[firstRelevant].from < to) {
+    let rawFrom = Number.POSITIVE_INFINITY;
+    let rawTo = Number.NEGATIVE_INFINITY;
+    let generated: "footnotes" | undefined;
+    let allGenerated = true;
+    for (let index = firstRelevant; index < value.segments.length && value.segments[index].from < to; index += 1) {
+      const segment = value.segments[index];
+      const pieceFrom = Math.max(from, segment.from);
+      const pieceTo = Math.min(to, segment.to);
+      if (pieceTo <= pieceFrom) continue;
+      if (segment.generated) {
+        if (generated && generated !== segment.generated) allGenerated = false;
+        generated = segment.generated;
+      } else {
+        allGenerated = false;
+      }
+      const exact = segment.exact && segment.to - segment.from === segment.rawTo - segment.rawFrom;
+      const pieceRawFrom = exact ? segment.rawFrom + pieceFrom - segment.from : segment.rawFrom;
+      const pieceRawTo = exact ? segment.rawFrom + pieceTo - segment.from : segment.rawTo;
+      rawFrom = Math.min(rawFrom, pieceRawFrom);
+      rawTo = Math.max(rawTo, pieceRawTo);
+    }
+    if (rawFrom !== Number.POSITIVE_INFINITY) return {
+      from: rawFrom,
+      to: rawTo,
+      generated: allGenerated ? generated : undefined,
+    };
+  }
+  low = 0;
+  high = value.segments.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (value.segments[middle].from < to) low = middle + 1;
+    else high = middle;
+  }
+  const right = value.segments[low];
+  if (right) return { from: right.rawFrom, to: right.rawFrom };
+  let leftIndex = 0;
+  low = 0;
+  high = value.segments.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (value.segments[middle].to <= from) {
+      leftIndex = middle + 1;
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  const left = value.segments[leftIndex - 1];
+  if (left) return { from: left.rawTo, to: left.rawTo };
+  return { from: 0, to: 0 };
+}
+
+function mapPreparedRange(observer: SourceMapObserver, from: number, to: number) {
+  const interior = observer.rawSpan(from, to);
+  const span = {
+    from: Math.min(observer.rawBoundary(from, "start"), interior.from),
+    to: Math.max(observer.rawBoundary(to, "end"), interior.to),
+    generated: interior.generated,
+  };
+  assertSourceMapRange(span, observer.rawLength);
+  return span;
+}
+
+function assertSourceMapRange(span: SourceMapSpan, sourceLength: number) {
+  if (!Number.isInteger(span.from) || !Number.isInteger(span.to) || span.from < 0 || span.to < span.from || span.to > sourceLength) {
+    throw new Error("source provenance produced an invalid raw range");
+  }
+}
+
+function replaceWithSourceObserver(
+  value: string,
+  pattern: RegExp,
+  replacer: (...args: any[]) => string,
+  observer?: SourceMapObserver,
+) {
+  if (!observer) return value.replace(pattern, replacer);
+  observer.assertValue(value);
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const regex = new RegExp(pattern.source, flags);
+  const matches: Array<{ from: number; to: number; replacement: string }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(value))) {
+    const replacement = replacer(...match, match.index, value, match.groups);
+    matches.push({ from: match.index, to: match.index + match[0].length, replacement });
+    if (match[0].length === 0) regex.lastIndex += 1;
+  }
+  observer.replaceMany(matches);
+  let output = "";
+  let cursor = 0;
+  for (const replacement of matches) {
+    output += value.slice(cursor, replacement.from) + replacement.replacement;
+    cursor = replacement.to;
+  }
+  return output + value.slice(cursor);
 }
 
 export function buildExportHtml(
@@ -236,106 +582,129 @@ function fileBaseHref(currentPath: string | undefined) {
   return `file:///${encoded.replace(/^\/+/, "")}`;
 }
 
-function markSpecialBlocksForEditor(markdown: string) {
+function markSpecialBlocksForEditor(
+  markdown: string,
+  observer?: SourceMapObserver,
+  internalRenderContext?: InternalRenderContext,
+) {
   const placeholders: string[] = [];
-  const stash = (html: string) => {
-    const token = `@@LIGHTMARK_PLACEHOLDER_${placeholders.length}@@`;
-    placeholders.push(html);
+  const placeholderPrefix = `@@LIGHTMARK_PLACEHOLDER_${internalRenderContext?.token ?? createInternalRenderContext().token}_`;
+  const stash = (html: string, trusted = true) => {
+    const token = `${placeholderPrefix}${placeholders.length}@@`;
+    placeholders.push(trusted && internalRenderContext ? markInternalHtml(html, internalRenderContext) : html);
     return token;
   };
+  const stashUntrusted = (html: string) => stash(html, false);
 
-  let next = protectEnhancedImagesForEditor(markdown, stash);
-  next = next.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
+  const enhancedImagePattern = /<figure\b([^>]*\bdata-lightmark-image(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*)>\s*<img\b([^>]*)>\s*(?:<figcaption>([\s\S]*?)<\/figcaption>\s*)?<\/figure>/gi;
+  let next = observer
+    ? replaceWithSourceObserver(markdown, enhancedImagePattern, (source) => protectEnhancedImagesForEditor(source, stashUntrusted), observer)
+    : protectEnhancedImagesForEditor(markdown, stashUntrusted);
+  next = replaceWithSourceObserver(next, LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
-  });
+  }, observer);
 
-  next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => {
+  next = replaceWithSourceObserver(next, /(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => {
     return `${prefix}\n${stash(buildTocHtml(markdown).replace("class=\"toc-node\" ", ""))}\n`;
-  });
+  }, observer);
 
-  next = next.replace(/(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
+  next = replaceWithSourceObserver(next, /(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
     return `${prefix}\n${stash(`<div data-type="mermaid" data-code="${escapeHtml(code.trim())}"></div>`)}\n`;
-  });
+  }, observer);
 
-  next = convertFootnotes(next, stash, true);
-  next = next.replace(/```[\s\S]*?```/g, (code) => stash(code));
+  next = convertFootnotes(next, stash, true, observer);
+  next = replaceWithSourceObserver(next, /```[\s\S]*?```/g, (code) => stashUntrusted(code), observer);
   next = replaceInlineCodeSpans(next, (source, code) => {
     const delimiterLength = source.match(/^`+/)?.[0].length ?? 1;
     return stash(
       `<code data-code-raw="${escapeAttribute(source)}" data-code-original="${escapeAttribute(code)}" data-code-delimiter-length="${delimiterLength}">${escapeHtml(code)}</code>`,
     );
-  });
-  next = protectHtmlBlocks(next, stash);
-  next = protectInlineHtml(next, stash);
-  next = protectRawHtml(next, stash);
-  next = protectMathForEditor(next, stash);
-  next = protectEscapedDollarsForEditor(next, stash);
+  }, observer);
+  next = protectHtmlBlocks(next, stash, observer);
+  next = protectInlineHtml(next, stash, observer);
+  next = protectRawHtml(next, stash, observer);
+  next = protectMathForEditor(next, stash, observer);
+  next = protectEscapedDollarsForEditor(next, stash, observer);
 
-  next = next.replace(/==([^=\n]+)==/g, (_match, text) => {
+  next = replaceWithSourceObserver(next, /==([^=\n]+)==/g, (_match, text) => {
     return `<mark>${renderInlineMarkdownInsideMark(text)}</mark>`;
-  });
+  }, observer);
 
-  next = next.replace(/(^|[^^\s])\^([^^\n]+)\^/g, (_match, prefix, text) => {
+  next = replaceWithSourceObserver(next, /(^|[^^\s])\^([^^\n]+)\^/g, (_match, prefix, text) => {
     return `${prefix}<sup>${escapeHtml(text)}</sup>`;
-  });
+  }, observer);
 
-  next = next.replace(/(^|[^~\s])~([^~\n]+)~/g, (_match, prefix, text) => {
+  next = replaceWithSourceObserver(next, /(^|[^~\s])~([^~\n]+)~/g, (_match, prefix, text) => {
     return `${prefix}<sub>${escapeHtml(text)}</sub>`;
-  });
+  }, observer);
 
-  next = convertTaskItems(next);
-  next = convertDefinitionLists(next);
+  next = convertTaskItems(next, observer, stash);
+  next = convertDefinitionLists(next, observer);
 
-  next = restorePlaceholders(next, placeholders);
+  next = restorePlaceholders(next, placeholders, observer, placeholderPrefix);
 
   return next;
 }
 
-function protectEscapedDollarsForEditor(value: string, stash: (html: string) => string) {
-  return value.replace(/\\+\$/g, (raw) => {
+function protectEscapedDollarsForEditor(value: string, stash: (html: string) => string, observer?: SourceMapObserver) {
+  return replaceWithSourceObserver(value, /\\+\$/g, (raw) => {
     const slashCount = raw.length - 1;
     if (slashCount % 2 === 0) return raw;
     const display = `${"\\".repeat(Math.floor(slashCount / 2))}$`;
     return stash(
       `<span data-type="escaped-dollar" data-raw="${escapeAttribute(raw)}" data-display="${escapeAttribute(display)}">${escapeHtml(display)}</span>`,
     );
-  });
+  }, observer);
 }
 
-function restorePlaceholders(value: string, placeholders: string[]) {
+function restorePlaceholders(
+  value: string,
+  placeholders: string[],
+  observer: SourceMapObserver | undefined,
+  placeholderPrefix: string,
+) {
   let next = value;
   let changed = true;
+  const placeholderPattern = new RegExp(`${escapeRegExp(placeholderPrefix)}(\\d+)@@`, "g");
   while (changed) {
     changed = false;
-    placeholders.forEach((html, index) => {
-      const token = `@@LIGHTMARK_PLACEHOLDER_${index}@@`;
-      if (!next.includes(token)) return;
-      next = next.split(token).join(html);
+    next = replaceWithSourceObserver(next, placeholderPattern, (match, index) => {
+      const html = placeholders[Number(index)];
+      if (html == null) return match;
       changed = true;
-    });
+      return html;
+    }, observer);
   }
   return next;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function enhanceMarkdownForRender(
   markdown: string,
   stash?: (html: string) => string,
   mathNumbering: MathNumberingMode = "none",
+  internalRenderContext?: InternalRenderContext,
 ) {
-  let next = stash ? protectEnhancedImagesForPreview(markdown, stash) : markdown;
+  let next = stash
+    ? protectEnhancedImagesForPreview(markdown, (html) => stash(sanitizeHtmlFragment(html)))
+    : markdown;
   next = next.replace(LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
-    return `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>\n\n`;
+    const html = `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>`;
+    return `${markGeneratedHtml(html, undefined, internalRenderContext)}\n\n`;
   });
-  next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${buildTocHtml(markdown)}\n`);
-  next = convertFootnotes(next);
+  next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${markGeneratedHtml(buildTocHtml(markdown), undefined, internalRenderContext)}\n`);
+  next = convertFootnotes(next, undefined, false, undefined, internalRenderContext);
   next = renderLatexMathForMarkdown(next, stash, mathNumbering);
   next = renderRawHtmlForPreview(next, stash);
-  next = convertTaskItems(next);
+  next = convertTaskItems(next, undefined, undefined, internalRenderContext);
   next = convertDefinitionLists(next);
   return next;
 }
 
-function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLightMarkInternal?: boolean } = {}) {
+function installLightMarkMarkdown(instance: MarkdownIt) {
   instance.linkify.set({ fuzzyLink: true });
   instance.core.ruler.after("block", "lightmark_github_alerts", (state) => transformGithubAlerts(state.tokens, state.Token, state.md, state.env));
 
@@ -343,17 +712,17 @@ function installLightMarkMarkdown(instance: MarkdownIt, options: { preserveLight
     const escaped = instance.utils.escapeHtml(tokens[idx].content);
     return isTextInsideInlineCodeHtml(tokens, idx) ? escaped : renderInlineEnhancements(escaped);
   };
-  instance.renderer.rules.html_inline = (tokens, idx) => {
+  instance.renderer.rules.html_inline = (tokens, idx, _options, env) => {
     const content = tokens[idx].content;
-    if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    const context = getInternalRenderContext(env);
     if (isRawHtmlToken(content)) return renderRawHtmlSource(content);
-    return renderInlineMarkdownInHtml(content, { inlineOnly: true });
+    return renderInlineMarkdownInHtml(content, { inlineOnly: true, internalRenderContext: context || undefined });
   };
-  instance.renderer.rules.html_block = (tokens, idx) => {
+  instance.renderer.rules.html_block = (tokens, idx, _options, env) => {
     const content = tokens[idx].content;
-    if (options.preserveLightMarkInternal && isLightMarkInternalPlaceholder(content)) return content;
+    const context = getInternalRenderContext(env);
     if (isRawHtmlToken(content)) return renderRawHtmlSource(content);
-    return renderInlineMarkdownInHtml(content);
+    return renderInlineMarkdownInHtml(content, { internalRenderContext: context || undefined });
   };
 
   instance.renderer.rules.fence = (tokens, idx, options, env, self) => {
@@ -414,11 +783,26 @@ function renderInlineEnhancements(html: string) {
   return enhanced;
 }
 
-function convertTaskItems(markdown: string) {
-  return markdown.replace(/^(\s*)([-*+]|\d+\.)\s+\[([ xX])\](?:\s+(.*))?$/gm, (_match, indent, marker, checked, text = "") => {
+function markGeneratedHtml(
+  html: string,
+  stash?: (html: string) => string,
+  internalRenderContext?: InternalRenderContext,
+) {
+  if (stash) return stash(html);
+  return internalRenderContext ? markInternalHtml(html, internalRenderContext) : html;
+}
+
+function convertTaskItems(
+  markdown: string,
+  observer?: SourceMapObserver,
+  stash?: (html: string) => string,
+  internalRenderContext?: InternalRenderContext,
+) {
+  return replaceWithSourceObserver(markdown, /^(\s*)([-*+]|\d+\.)\s+\[([ xX])\](?:\s+(.*))?$/gm, (_match, indent, marker, checked, text = "") => {
     const isChecked = checked.toLowerCase() === "x";
-    return `${indent}${marker} <span data-task-item="${isChecked ? "checked" : "unchecked"}">${text || "&nbsp;"}</span>`;
-  });
+    const item = `<span data-task-item="${isChecked ? "checked" : "unchecked"}">${text || "&nbsp;"}</span>`;
+    return `${indent}${marker} ${markGeneratedHtml(item, stash, internalRenderContext)}`;
+  }, observer);
 }
 
 function transformGithubAlerts(tokens: Token[], _TokenCtor: typeof Token, parser: MarkdownIt, env: unknown) {
@@ -445,21 +829,30 @@ function transformGithubAlerts(tokens: Token[], _TokenCtor: typeof Token, parser
   }
 }
 
-function isLightMarkInternalPlaceholder(html: string) {
-  return /\sdata-type="(?:front-matter|mermaid|block-math|inline-math|inline-html|raw-html|html-block|footnote-ref|footnotes|table-of-contents|horizontal-rule)"/.test(html);
+function getInternalRenderContext(env: unknown) {
+  if (!env || typeof env !== "object") return null;
+  const context = (env as { internalRenderContext?: InternalRenderContext }).internalRenderContext;
+  return context || null;
 }
 
-function convertDefinitionLists(markdown: string) {
-  return markdown.replace(/(^|\n)([^\n:][^\n]+)\n:\s+([^\n]+)(?=\n|$)/g, (_match, prefix, term, definition) => {
+function convertDefinitionLists(markdown: string, observer?: SourceMapObserver) {
+  return replaceWithSourceObserver(markdown, /(^|\n)([^\n:][^\n]+)\n:\s+([^\n]+)(?=\n|$)/g, (_match, prefix, term, definition) => {
     return `${prefix}<dl><dt>${escapeHtml(term.trim())}</dt><dd>${escapeHtml(definition.trim())}</dd></dl>`;
-  });
+  }, observer);
 }
 
-function convertFootnotes(markdown: string, stash?: (html: string) => string, forEditor = false) {
+function convertFootnotes(
+  markdown: string,
+  stash?: (html: string) => string,
+  forEditor = false,
+  observer?: SourceMapObserver,
+  internalRenderContext?: InternalRenderContext,
+) {
   const definitions = new Map<string, string>();
   const lines = markdown.split(/\r?\n/);
+  const lineStarts = markdownLineStarts(markdown);
   const definitionOrder = new Map<string, number>();
-  const definitionBlocks: Array<{ token: string; entries: Array<[string, string]> }> = [];
+  const definitionBlocks: Array<{ token: string; entries: Array<[string, string]>; rawSpan: SourceMapSpan }> = [];
   const bodyLines: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const definition = parseFootnoteDefinitionAt(lines, index);
@@ -471,16 +864,37 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
     if (!definitionOrder.has(definition.id)) definitionOrder.set(definition.id, definitionOrder.size + 1);
     definitions.set(definition.id, definition.text);
     const token = `@@LIGHTMARK_FOOTNOTE_SECTION_${definitionBlocks.length}@@`;
-    definitionBlocks.push({ token, entries: [[definition.id, definition.text]] });
+    const from = lineStarts[index] ?? markdown.length;
+    const contentEnd = lineStarts[definition.nextIndex] ?? markdown.length;
+    const lineEnd = contentEnd + lines[definition.nextIndex].length;
+    definitionBlocks.push({ token, entries: [[definition.id, definition.text]], rawSpan: { from, to: lineEnd } });
     bodyLines.push(token);
     index = definition.nextIndex;
   }
 
   const referenceOrder = new Map<string, number>();
   const referenceCounts = new Map<string, number>();
-  let next = protectCodeForFootnoteRefs(bodyLines.join("\n"));
+  let bodyText = bodyLines.join("\n");
+  if (observer) {
+    observer.assertValue(markdown);
+    observer.replaceMany(definitionBlocks.map((block) => ({
+      from: block.rawSpan.from,
+      to: block.rawSpan.to,
+      replacement: block.token,
+      rawSpan: block.rawSpan,
+    })));
+    const normalized = observer.value.replace(/\r\n/g, "\n");
+    if (normalized !== bodyText) throw new Error("footnote provenance body diverged from editor preprocessing");
+    const crlf = [...observer.value.matchAll(/\r\n/g)];
+    observer.replaceMany(crlf.map((match) => {
+      const position = match.index ?? 0;
+      return { from: position, to: position + 2, replacement: "\n" };
+    }));
+    bodyText = observer.value;
+  }
+  let next = protectCodeForFootnoteRefs(bodyText, observer);
 
-  next = next.replace(/\[\^([^\]]+)\]/g, (_match, id) => {
+  next = replaceWithSourceObserver(next, /\[\^([^\]]+)\]/g, (_match, id) => {
     const safeId = escapeHtml(id);
     if (!referenceOrder.has(id)) referenceOrder.set(id, referenceOrder.size + 1);
     const order = referenceOrder.get(id) || 1;
@@ -488,11 +902,18 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
     referenceCounts.set(id, count);
     const preview = definitions.get(id) || "";
     if (forEditor) {
-      return `<span data-type="footnote-ref" data-footnote-ref="${safeId}" data-footnote-index="${order}" data-ref-id="fnref-${safeId}-${count}" data-preview="${escapeAttribute(preview)}"></span>`;
+      const reference = `<span data-type="footnote-ref" data-footnote-ref="${safeId}" data-footnote-index="${order}" data-ref-id="fnref-${safeId}-${count}" data-preview="${escapeAttribute(preview)}"></span>`;
+      return markGeneratedHtml(reference, stash, internalRenderContext);
     }
-    return `<sup data-footnote-ref="${safeId}" data-footnote-index="${order}" data-preview="${escapeAttribute(preview)}"><a href="#fn-${safeId}" id="fnref-${safeId}-${count}" data-footnote-link="ref">[${order}]</a></sup>`;
-  });
-  next = restoreCodeForFootnoteRefs(next);
+    const link = markGeneratedHtml(
+      `<a href="#fn-${safeId}" id="fnref-${safeId}-${count}" data-footnote-link="ref">[${order}]</a>`,
+      stash,
+      internalRenderContext,
+    );
+    const reference = `<sup data-footnote-ref="${safeId}" data-footnote-index="${order}" data-preview="${escapeAttribute(preview)}">${link}</sup>`;
+    return markGeneratedHtml(reference, stash, internalRenderContext);
+  }, observer);
+  next = restoreCodeForFootnoteRefs(next, observer);
 
   if (definitions.size === 0 && referenceOrder.size === 0) return next;
 
@@ -504,13 +925,36 @@ function convertFootnotes(markdown: string, stash?: (html: string) => string, fo
   });
 
   definitionBlocks.forEach((block) => {
-    const section = renderFootnoteSection(block.entries, referenceOrder, referenceCounts, definitionOrder, stash);
-    next = next.split(block.token).join(section);
+    const section = renderFootnoteSection(
+      block.entries,
+      referenceOrder,
+      referenceCounts,
+      definitionOrder,
+      stash,
+      internalRenderContext,
+    );
+    next = replaceWithSourceObserver(next, new RegExp(escapeRegExp(block.token), "g"), () => section, observer);
   });
 
   if (missingDefinitions.length > 0) {
-    const missingSection = renderFootnoteSection(missingDefinitions, referenceOrder, referenceCounts, definitionOrder, stash);
-    next = `${next.trimEnd()}\n\n${missingSection}\n\n`;
+    const missingSection = renderFootnoteSection(
+      missingDefinitions,
+      referenceOrder,
+      referenceCounts,
+      definitionOrder,
+      stash,
+      internalRenderContext,
+    );
+    const trimmed = next.trimEnd();
+    const generatedSuffix = `\n\n${missingSection}\n\n`;
+    if (observer) {
+      observer.replace(trimmed.length, next.length, generatedSuffix, {
+        from: observer.rawLength,
+        to: observer.rawLength,
+        generated: "footnotes",
+      });
+    }
+    next = `${trimmed}${generatedSuffix}`;
   }
 
   return next;
@@ -539,6 +983,7 @@ function renderFootnoteSection(
   referenceCounts: Map<string, number>,
   definitionOrder: Map<string, number>,
   stash?: (html: string) => string,
+  internalRenderContext?: InternalRenderContext,
 ) {
   const items = entries
     .map(([id, text]) => {
@@ -546,14 +991,18 @@ function renderFootnoteSection(
       const order = referenceOrder.get(id) || definitionOrder.get(id) || 1;
       const count = referenceCounts.get(id) || 0;
       const backrefs = Array.from({ length: count }, (_item, index) => {
-        return `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${index + 1}</a>`;
+        return markGeneratedHtml(
+          `<a href="#fnref-${safeId}-${index + 1}" class="footnote-backref" data-footnote-link="backref">返回${index + 1}</a>`,
+          stash,
+          internalRenderContext,
+        );
       }).join(" ");
-      return `<li id="fn-${safeId}" class="footnote-item"><span class="footnote-id">[${order}]</span><div class="footnote-content">${renderFootnoteContent(text)}</div><div class="footnote-backrefs">${backrefs}</div></li>`;
+      return `<li id="fn-${safeId}" class="footnote-item"><span class="footnote-id">[${order}]</span><div class="footnote-content">${renderFootnoteContent(text, internalRenderContext)}</div><div class="footnote-backrefs">${backrefs}</div></li>`;
     })
     .join("");
   const source = entries.map(([id, text]) => formatFootnoteSource(id, text)).join("\n\n");
   const section = `<section class="footnotes" data-type="footnotes" data-markdown="${escapeAttribute(source)}"><ol class="footnotes-list">${items}</ol></section>`;
-  return stash ? stash(section) : section;
+  return markGeneratedHtml(section, stash, internalRenderContext);
 }
 
 function formatFootnoteSource(id: string, text: string) {
@@ -567,21 +1016,26 @@ function formatFootnoteSource(id: string, text: string) {
   return `[^${id}]:\n\n${indented}`;
 }
 
-function protectCodeForFootnoteRefs(markdown: string) {
+function protectCodeForFootnoteRefs(markdown: string, observer?: SourceMapObserver) {
   const codePlaceholders: string[] = [];
   const stashCode = (code: string) => {
     const token = `@@LIGHTMARK_FOOTNOTE_CODE_${codePlaceholders.length}@@`;
     codePlaceholders.push(code);
     return token;
   };
-  const withoutFences = markdown.replace(/```[\s\S]*?```/g, (code) => stashCode(code));
-  const protectedMarkdown = replaceInlineCodeSpans(withoutFences, (source) => stashCode(source));
-  return `${protectedMarkdown}\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_${codePlaceholders.map((item) => encodeURIComponent(item)).join("|")}@@`;
+  const withoutFences = replaceWithSourceObserver(markdown, /```[\s\S]*?```/g, (code) => stashCode(code), observer);
+  const protectedMarkdown = replaceInlineCodeSpans(withoutFences, (source) => stashCode(source), observer);
+  const map = `\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_${codePlaceholders.map((item) => encodeURIComponent(item)).join("|")}@@`;
+  if (observer) observer.insert(protectedMarkdown.length, map);
+  return `${protectedMarkdown}${map}`;
 }
 
-function replaceInlineCodeSpans(markdown: string, replacement: (source: string, code: string) => string) {
+function replaceInlineCodeSpans(markdown: string, replacement: (source: string, code: string) => string, observer?: SourceMapObserver) {
   const lines = markdown.split("\n");
-  return lines.map((line) => {
+  const lineStarts = markdownLineStarts(markdown);
+  const replacements: Array<{ from: number; to: number; value: string }> = [];
+  const outputLines = lines.map((line, lineIndex) => {
+    const lineStart = lineStarts[lineIndex] ?? 0;
     let output = "";
     let cursor = 0;
     for (let index = 0; index < line.length;) {
@@ -599,28 +1053,36 @@ function replaceInlineCodeSpans(markdown: string, replacement: (source: string, 
       }
       output += line.slice(cursor, index);
       const source = line.slice(index, close + length);
-      output += replacement(source, line.slice(index + length, close));
+      const value = replacement(source, line.slice(index + length, close));
+      output += value;
+      replacements.push({ from: lineStart + index, to: lineStart + close + length, value });
       cursor = close + length;
       index = cursor;
     }
     return `${output}${line.slice(cursor)}`;
-  }).join("\n");
+  });
+  if (observer) {
+    observer.assertValue(markdown);
+    observer.replaceMany(replacements.map((item) => ({ from: item.from, to: item.to, replacement: item.value })));
+  }
+  return outputLines.join("\n");
 }
 
-function restoreCodeForFootnoteRefs(markdown: string) {
+function restoreCodeForFootnoteRefs(markdown: string, observer?: SourceMapObserver) {
   const map = markdown.match(/\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_([^@]*)@@$/);
   if (!map) return markdown;
   const codePlaceholders = map[1] ? map[1].split("|").map((item) => decodeURIComponent(item)) : [];
   let next = markdown.slice(0, map.index);
+  if (observer) observer.replace(map.index ?? 0, markdown.length, "");
   codePlaceholders.forEach((code, index) => {
-    next = next.split(`@@LIGHTMARK_FOOTNOTE_CODE_${index}@@`).join(code);
+    next = replaceWithSourceObserver(next, new RegExp(escapeRegExp(`@@LIGHTMARK_FOOTNOTE_CODE_${index}@@`), "g"), () => code, observer);
   });
   return next;
 }
 
-function renderFootnoteContent(markdown: string) {
+function renderFootnoteContent(markdown: string, internalRenderContext?: InternalRenderContext) {
   const source = markdown.trim();
-  return source ? md.render(source) : "";
+  return source ? md.render(source, internalRenderContext ? { internalRenderContext } : undefined) : "";
 }
 
 function buildTocHtml(markdown: string) {
@@ -637,15 +1099,19 @@ function buildTocHtml(markdown: string) {
   return `<nav class="toc-node" data-type="table-of-contents"><div class="toc-node-label">[TOC]</div>${items}</nav>`;
 }
 
-function protectMathForEditor(markdown: string, stash: (html: string) => string) {
+function protectMathForEditor(markdown: string, stash: (html: string) => string, observer?: SourceMapObserver) {
   const { tokens } = parseMarkdownMath(markdown);
   let next = markdown;
+  const replacements: SourceMapReplacement[] = [];
   for (const token of [...tokens].reverse()) {
     const tag = token.kind === "display" && token.delimiter !== "inline-double-dollar" ? "div" : "span";
     const type = tag === "div" ? "block-math" : "inline-math";
     const html = `<${tag} data-type="${type}" data-tex="${escapeAttribute(token.tex)}" data-original-tex="${escapeAttribute(token.tex)}" data-math-raw="${escapeAttribute(token.raw)}" data-math-delimiter="${token.delimiter}" data-display-mode="${String(token.displayMode)}"></${tag}>`;
-    next = `${next.slice(0, token.from)}${stash(html)}${next.slice(token.to)}`;
+    const replacement = stash(html);
+    if (observer) replacements.push({ from: token.from, to: token.to, replacement });
+    next = `${next.slice(0, token.from)}${replacement}${next.slice(token.to)}`;
   }
+  if (observer) observer.replaceMany(replacements);
   return next;
 }
 
@@ -674,9 +1140,11 @@ function renderLatexMathForMarkdown(
   return next;
 }
 
-function protectHtmlBlocks(markdown: string, stash: (html: string) => string) {
+function protectHtmlBlocks(markdown: string, stash: (html: string) => string, observer?: SourceMapObserver) {
   const lines = markdown.split("\n");
   const result: string[] = [];
+  const replacements: Array<{ from: number; to: number; value: string }> = [];
+  const lineStarts = markdownLineStarts(markdown);
 
   for (let index = 0; index < lines.length; index += 1) {
     const block = collectHtmlBlock(lines, index);
@@ -685,19 +1153,32 @@ function protectHtmlBlocks(markdown: string, stash: (html: string) => string) {
       continue;
     }
 
-    result.push(stash(`<div data-type="html-block" data-html="${escapeAttribute(block.html.trim())}"></div>`));
+    const value = stash(`<div data-type="html-block" data-html="${escapeAttribute(block.html.trim())}"></div>`);
+    result.push(value);
+    if (observer) {
+      const from = lineStarts[index] ?? markdown.length;
+      const endLine = lineStarts[block.endIndex + 1] ?? markdown.length;
+      const to = endLine > from && markdown[endLine - 1] === "\n" ? endLine - 1 : endLine;
+      replacements.push({ from, to, value });
+    }
     index = block.endIndex;
   }
 
-  return result.join("\n");
+  const output = result.join("\n");
+  if (observer) {
+    observer.assertValue(markdown);
+    observer.replaceMany(replacements.map((item) => ({ from: item.from, to: item.to, replacement: item.value })));
+  }
+  return output;
 }
 
-function protectInlineHtml(markdown: string, stash: (html: string) => string) {
+function protectInlineHtml(markdown: string, stash: (html: string) => string, observer?: SourceMapObserver) {
   let next = markdown;
   let match = findInlineHtmlMatch(next);
   while (match) {
     const html = sanitizeInlineHtmlSource(match.html);
     const placeholder = stash(`<span data-type="inline-html" data-html="${escapeAttribute(html)}"></span>`);
+    if (observer) observer.replace(match.from, match.to, placeholder);
     next = `${next.slice(0, match.from)}${placeholder}${next.slice(match.to)}`;
     match = findInlineHtmlMatch(next);
   }
@@ -710,12 +1191,13 @@ function renderInlineMarkdownInsideMark(value: string) {
   });
 }
 
-function protectRawHtml(markdown: string, stash: (html: string) => string) {
+function protectRawHtml(markdown: string, stash: (html: string) => string, observer?: SourceMapObserver) {
   let next = markdown;
   let match = findRawHtmlMatch(next);
   while (match) {
     const kind = rawHtmlKind(match.html);
     const placeholder = stash(`<span data-type="raw-html" data-kind="${kind}" data-html="${escapeAttribute(match.html)}"></span>`);
+    if (observer) observer.replace(match.from, match.to, placeholder);
     next = `${next.slice(0, match.from)}${placeholder}${next.slice(match.to)}`;
     match = findRawHtmlMatch(next);
   }

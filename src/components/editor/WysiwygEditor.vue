@@ -14,7 +14,7 @@ import { TableRow } from "@tiptap/extension-table-row";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import TurndownService from "turndown";
 import { createLowlight } from "lowlight";
-import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { closeHistory } from "@tiptap/pm/history";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -36,7 +36,21 @@ import {
   updatePaneOutlineAnchor,
   updatePanePosition,
 } from "../../stores/appStore";
-import { publishDocumentDerivedState, registerDocumentSession } from "../../editor/documentRuntime";
+import {
+  publishDocumentDerivedState,
+  registerDocumentSession,
+  type DocumentSessionAdapter,
+  type PendingFlushOptions,
+  type SnapshotReason,
+} from "../../editor/documentRuntime";
+import {
+  DOCUMENT_APPENDED_TRANSACTION_META_KEY,
+  DOCUMENT_FLUSH_META_KEY,
+  createDocumentMutationTracker,
+  documentMutationTokensEqual,
+  type DocumentMutationTracker,
+  type PendingMathFlushRequest,
+} from "../../editor/documentMutationTracker";
 import { WysiwygSnapshotCache } from "../../editor/wysiwygSnapshot";
 import { createWysiwygDerivedPlugin, getWysiwygDerivedState } from "../../editor/wysiwygDerived";
 import { createWysiwygFocusPlugin } from "../../editor/wysiwygFocus";
@@ -75,7 +89,7 @@ import { recordStartupStage } from "../../editor/startupMetrics";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { normalizeMatchIndex, replacementForMatch } from "../../utils/findReplace";
 import { markdownTopLevelSourceBlocks, renderMarkdownForEditor } from "../../utils/markdown";
-import { combinePreservedSourceBlocks, inspectSourceEnvelope } from "../../editor/sourcePreservation";
+import { combinePreservedSourceBlocks, inspectSourceEnvelope, sourceBlocksForNodeCount } from "../../editor/sourcePreservation";
 import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import {
@@ -130,7 +144,15 @@ import {
   type ImageAlignment,
 } from "../../utils/enhancedImages";
 import { MarkdownHeading } from "../../extensions/MarkdownHeading";
-import { BlockMath, InlineMath, flushPendingMathEdits } from "../../extensions/MathNodes";
+import {
+  BlockMath,
+  InlineMath,
+  finalizePendingMathForClosePrompt,
+  flushPendingMathEdits,
+  getPendingMathEditVersion,
+  getPendingMathInputVersion,
+  hasPendingMathEdits,
+} from "../../extensions/MathNodes";
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { EscapedDollarNode } from "../../extensions/EscapedDollarNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
@@ -143,6 +165,8 @@ const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
 
 const lowlight = installLowlightPlainTextFallback(createLowlight());
 let wysiwygRevision = 0;
+let documentMutationTracker: DocumentMutationTracker | null = null;
+let observedPendingMathInputVersion = 0;
 let unregisterDocumentSession = () => {};
 let snapshotCache: WysiwygSnapshotCache | null = null;
 let cachedWysiwygFind: { items: WysiwygFindMatch[]; error: string } = { items: [], error: "" };
@@ -153,6 +177,44 @@ const outlineHeadingDecorationsKey = new PluginKey<{
   epoch: number;
   collapsed: string;
 }>("lightmarkOutlineHeadingDecorations");
+
+function syncTrackedPendingMathInput(editor: object) {
+  const nextVersion = getPendingMathInputVersion(editor);
+  if (nextVersion === observedPendingMathInputVersion) return nextVersion;
+  observedPendingMathInputVersion = nextVersion;
+  documentMutationTracker?.recordPendingInput();
+  return nextVersion;
+}
+
+function recordTrackedTransactions(
+  editor: object,
+  transaction: Transaction,
+  appendedTransactions: Transaction[] = [],
+) {
+  const tracker = documentMutationTracker;
+  if (!tracker) return;
+  syncTrackedPendingMathInput(editor);
+  const activeFlushId = tracker.activeFlushId;
+  const transactions = [transaction, ...appendedTransactions];
+  for (const current of transactions) {
+    if (!current.docChanged) continue;
+    const isRoot = current === transaction;
+    const authorized = Boolean(activeFlushId) && (
+      isRoot
+        ? current.getMeta(DOCUMENT_FLUSH_META_KEY) === activeFlushId
+        : transaction.getMeta(DOCUMENT_FLUSH_META_KEY) === activeFlushId
+          && (
+            current.getMeta(DOCUMENT_APPENDED_TRANSACTION_META_KEY) === transaction
+            || current.getMeta(DOCUMENT_FLUSH_META_KEY) === activeFlushId
+          )
+    );
+    tracker.recordDocumentChange(
+      authorized
+        ? { kind: "pending-flush", flushId: activeFlushId! }
+        : { kind: "document" },
+    );
+  }
+}
 
 const slashMenu = ref({
   visible: false,
@@ -2721,12 +2783,16 @@ const editor = useEditor({
       return true;
     },
   },
+  onTransaction({ editor, transaction, appendedTransactions }) {
+    recordTrackedTransactions(editor, transaction, appendedTransactions);
+  },
   onUpdate({ editor, transaction }) {
     if (transaction.getMeta(markdownPresentationMeta)) return;
     reconcileExposedHeading(editor.view);
     if (suppressWysiwygUpdate || transaction.getMeta("lightmarkLowlightRefresh")) return;
     getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
     wysiwygRevision += 1;
+    documentMutationTracker?.setRevision(wysiwygRevision);
     snapshotCache?.invalidate();
     const tab = getPaneTab(props.paneId);
     const derived = getWysiwygDerivedState(editor.state);
@@ -3718,6 +3784,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  documentMutationTracker = null;
+  observedPendingMathInputVersion = 0;
   unregisterDocumentSession();
   snapshotCache = null;
   document.removeEventListener("pointerdown", handleDocumentTablePointerDown, true);
@@ -3753,8 +3821,15 @@ function registerWysiwygDocumentSession() {
     const nodes: object[] = [];
     activeEditor.state.doc.forEach((node: object) => nodes.push(node));
     const source = markdownTopLevelSourceBlocks(markdown);
-    return source.blocks.length === nodes.length
-      ? { nodes, blocks: source.blocks, prefix: source.prefix, lineEnding: inspectSourceEnvelope(markdown).lineEnding }
+    const alignment = sourceBlocksForNodeCount(source.blocks, nodes.length);
+    return alignment
+      ? {
+        nodes,
+        blocks: alignment.blocks,
+        syntheticTailOmitted: alignment.syntheticTailOmitted,
+        prefix: source.prefix,
+        lineEnding: inspectSourceEnvelope(markdown).lineEnding,
+      }
       : null;
   };
   let preservationBaseline = capturePreservationBaseline(getPaneContent(props.paneId));
@@ -3786,6 +3861,7 @@ function registerWysiwygDocumentSession() {
         blocks,
         preservationBaseline.prefix,
         preservationBaseline.lineEnding,
+        preservationBaseline.syntheticTailOmitted,
       );
       if (previousMarkdown.length > 0) {
         throw new Error("无法建立 Markdown 源码映射，已阻止静默覆盖。请切换到源码模式恢复或另存为副本。");
@@ -3812,18 +3888,100 @@ function registerWysiwygDocumentSession() {
     verifyIncremental: () => window.localStorage.getItem("lightmark:verify-wysiwyg-snapshot") === "1",
     trustIncremental: () => Boolean(preservationBaseline),
   });
-  unregisterDocumentSession = registerDocumentSession({
+  const sessionAdapter: DocumentSessionAdapter = {
     tabId,
     paneId: props.paneId,
     mode: "wysiwyg",
     get revision() {
       return wysiwygRevision;
     },
-    async flushPendingEdits() {
+    hasPendingEdits() {
+      const currentEditor = editor.value;
+      return currentEditor ? hasPendingMathEdits(currentEditor) : false;
+    },
+    pendingEditVersion() {
+      const currentEditor = editor.value;
+      return currentEditor ? getPendingMathEditVersion(currentEditor) : 0;
+    },
+    mutationToken() {
+      const currentEditor = editor.value;
+      if (currentEditor) syncTrackedPendingMathInput(currentEditor);
+      if (!documentMutationTracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
+      return documentMutationTracker.token();
+    },
+    async flushPendingEdits(_reason: SnapshotReason, options?: PendingFlushOptions) {
       const currentEditor = editor.value;
       if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
-      await finalizeMarkdownExposure(currentEditor.view);
-      await flushPendingMathEdits(currentEditor);
+      const tracker = documentMutationTracker;
+      if (!tracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
+      syncTrackedPendingMathInput(currentEditor);
+      const expectedToken = options?.expectedToken ?? tracker.token();
+      if (!documentMutationTokensEqual(tracker.token(), expectedToken)) {
+        throw new Error("公式或文档版本在 flush 开始前已变化。");
+      }
+      const flush = tracker.beginFlush(expectedToken);
+      try {
+        await finalizeMarkdownExposure(currentEditor.view, flush.id);
+      } catch (error) {
+        flush.fail();
+        throw error;
+      }
+      if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+        flush.fail();
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
+      syncTrackedPendingMathInput(currentEditor);
+      try {
+        const request: PendingMathFlushRequest = { flushId: flush.id };
+        await flushPendingMathEdits(currentEditor, request);
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+          flush.fail();
+          throw new Error("所见即所得编辑器会话已被替换。");
+        }
+        syncTrackedPendingMathInput(currentEditor);
+        return flush.complete(tracker.token());
+      } catch (error) {
+        flush.fail();
+        throw error;
+      }
+    },
+    async finalizeClosePrompt(options?: PendingFlushOptions) {
+      const currentEditor = editor.value;
+      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      const tracker = documentMutationTracker;
+      if (!tracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
+      if (currentEditor.view.composing) {
+        throw new Error("输入法组合尚未结束，已保留当前窗口。");
+      }
+      syncTrackedPendingMathInput(currentEditor);
+      const expectedToken = options?.expectedToken ?? tracker.token();
+      if (!documentMutationTokensEqual(tracker.token(), expectedToken)) {
+        throw new Error("公式或文档版本在关闭提示准备开始前已变化。");
+      }
+      const flush = tracker.beginFlush(expectedToken);
+      try {
+        const request: PendingMathFlushRequest = { flushId: flush.id };
+        await finalizeMarkdownExposure(currentEditor.view, flush.id);
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+          flush.fail();
+          throw new Error("所见即所得编辑器会话已被替换。");
+        }
+        syncTrackedPendingMathInput(currentEditor);
+        await finalizePendingMathForClosePrompt(currentEditor, request);
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+          flush.fail();
+          throw new Error("所见即所得编辑器会话已被替换。");
+        }
+        syncTrackedPendingMathInput(currentEditor);
+        if (hasPendingMathEdits(currentEditor)) {
+          flush.fail();
+          throw new Error("公式编辑界面尚未安全收束，已保留当前窗口。");
+        }
+        return flush.complete(tracker.token());
+      } catch (error) {
+        flush.fail();
+        throw error;
+      }
     },
     async snapshot(reason, options) {
       if (!snapshotCache) throw new Error("所见即所得快照会话已经关闭。");
@@ -3867,6 +4025,7 @@ function registerWysiwygDocumentSession() {
       currentEditor.commands.setContent(renderMarkdownForEditorWithAssets(markdown), { emitUpdate: false });
       preservationBaseline = capturePreservationBaseline(markdown);
       wysiwygRevision += 1;
+      documentMutationTracker?.setRevision(wysiwygRevision);
       snapshotCache?.invalidate();
       outlineDecorationEpoch += 1;
       void ensureInitialCodeLanguages(currentEditor.view);
@@ -3886,7 +4045,13 @@ function registerWysiwygDocumentSession() {
       const position = Math.max(1, Math.min(currentEditor.state.doc.content.size, requested ?? 1));
       currentEditor.chain().focus().setTextSelection(position).scrollIntoView().run();
     },
+  };
+  observedPendingMathInputVersion = 0;
+  documentMutationTracker = createDocumentMutationTracker({
+    sessionIdentity: sessionAdapter,
+    initialRevision: wysiwygRevision,
   });
+  unregisterDocumentSession = registerDocumentSession(sessionAdapter);
 }
 
 function handleWysiwygHeadingFoldsChanged(event: CustomEvent<{ paneId?: EditorPaneId }>) {
@@ -5769,7 +5934,7 @@ function getActiveMarkRange(state: any, markName: string) {
   return { from, to, mark: activeMark };
 }
 
-function restoreExposedMarkdownWhenOutside(view: any, force = false) {
+function restoreExposedMarkdownWhenOutside(view: any, force = false, flushId?: string) {
   const exposed = exposedMarkdownLifecycleKey.getState(view.state);
   if (!exposed) return false;
   if (exposed.kind === "heading" && exposed.headingInvalid) return false;
@@ -5777,7 +5942,7 @@ function restoreExposedMarkdownWhenOutside(view: any, force = false) {
   if (!force && from === to && from >= exposed.from && from <= exposed.to) return false;
 
   const options = { targetBlockFrom: exposed.blockFrom };
-  const tr = exposed.kind === "heading"
+  let tr = exposed.kind === "heading"
     ? convertMarkdownHeading(view.state, { force: true, ...options })
     : convertInlineCodeSyntax(view.state, options) || convertInlineMarkdownSyntax(view.state, options);
   if (!tr) {
@@ -5787,6 +5952,7 @@ function restoreExposedMarkdownWhenOutside(view: any, force = false) {
       .setMeta("addToHistory", false));
     return false;
   }
+  if (flushId) tr = tr.setMeta(DOCUMENT_FLUSH_META_KEY, flushId);
   view.dispatch(tr
     .setMeta(clearExposeMarkdownMeta, true)
     .setMeta(markdownPresentationMeta, true)
@@ -5795,14 +5961,14 @@ function restoreExposedMarkdownWhenOutside(view: any, force = false) {
   return true;
 }
 
-async function finalizeMarkdownExposure(view: any) {
+async function finalizeMarkdownExposure(view: any, flushId?: string) {
   if (view.composing) {
     await new Promise<void>((resolve) => {
       view.dom.addEventListener("compositionend", () => resolve(), { once: true });
     });
   }
-  reconcileExposedHeading(view);
-  restoreExposedMarkdownWhenOutside(view, true);
+  reconcileExposedHeading(view, flushId);
+  restoreExposedMarkdownWhenOutside(view, true, flushId);
 }
 
 function handleExposedMarkdownDeletion(view: any, event: KeyboardEvent) {
@@ -5859,11 +6025,12 @@ function handleExposedMarkdownTextInput(view: any, from: number, to: number, tex
   return true;
 }
 
-function reconcileExposedHeading(view: any) {
+function reconcileExposedHeading(view: any, flushId?: string) {
   const exposed = exposedMarkdownLifecycleKey.getState(view.state);
   if (!exposed || exposed.kind !== "heading") return false;
-  const tr = reconcileExposedHeadingTransaction(view.state, exposed);
+  let tr = reconcileExposedHeadingTransaction(view.state, exposed);
   if (!tr) return false;
+  if (flushId) tr = tr.setMeta(DOCUMENT_FLUSH_META_KEY, flushId);
   view.dispatch(tr.scrollIntoView());
   return true;
 }

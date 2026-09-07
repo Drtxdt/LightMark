@@ -17,6 +17,7 @@ import { wordCountPlugin } from "./plugins/wordCountPlugin";
 import {
   appStore,
   applyTheme,
+  captureWindowCloseAuthorization,
   currentFileName,
   ensureDefaultTab,
   getDirtyTabs,
@@ -24,11 +25,13 @@ import {
   goForwardNavigation,
   checkOpenFileSnapshots,
   loadConfig,
+  isWindowCloseAuthorizationCurrent,
   openCommandPalette,
   openHeadingJump,
   openGoToLine,
   openQuickOpen,
-  saveAllDirtyTabs,
+  prepareWindowClosePrompt,
+  saveAllDirtyTabsForClose,
   saveCurrentFile,
   scheduleWorkspaceKnowledgeRefresh,
   showSaveFailure,
@@ -39,14 +42,30 @@ import {
   toggleDistractionFreeMode,
   toggleFocusMode,
   toggleTypewriterMode,
+  type WindowCloseAuthorization,
+  type WindowCloseSaveReceipt,
 } from "./stores/appStore";
 import { closeFindPanel, openFindPanel } from "./stores/findReplaceStore";
 import { bindShortcut } from "./utils/shortcuts";
 import { hasVisibleBlockingOverlay } from "./utils/writingModes";
 import { getImageFilesFromClipboard, getImageFilesFromDrop } from "./utils/imageAssets";
 import { syncWindowChrome } from "./utils/windowChrome";
-import { flushCurrentDraft, recoverStartupDrafts, startDraftAutosave, stopDraftAutosave } from "./stores/draftStore";
+import {
+  flushDraftsForWindowClose,
+  recoverStartupDrafts,
+  startDraftAutosave,
+  stopDraftAutosave,
+  type WindowCloseDraftPolicy,
+} from "./stores/draftStore";
 import { showDialog } from "./stores/dialogStore";
+import {
+  closeWindowWithTicket,
+  createWindowClosePreparationGate,
+  invalidateWindowCloseTicketIfStale,
+  prepareWindowClose,
+  type WindowCloseTicket,
+} from "./stores/windowCloseCoordinator";
+import type { WindowCloseDraftReceipt } from "./stores/saveTransaction";
 
 let unbindSave = () => {};
 let unbindPalette = () => {};
@@ -66,7 +85,13 @@ let unlistenExternalFileWatch: (() => void) | null = null;
 let unlistenWorkspaceWatch: (() => void) | null = null;
 let unwatchWindowChrome = () => {};
 let unwatchDraftAutosave = () => {};
-let closingBypass = false;
+let closingTicket: WindowCloseTicket<
+  WindowCloseAuthorization,
+  WindowCloseSaveReceipt,
+  WindowCloseDraftReceipt
+> | null = null;
+const closePreparationGate = createWindowClosePreparationGate();
+const windowCloseDraftPolicy: WindowCloseDraftPolicy = "preserve";
 
 onMounted(async () => {
   activatePlugins([wordCountPlugin]);
@@ -188,64 +213,93 @@ onUnmounted(() => {
 });
 
 async function handleCloseRequested(event: { preventDefault: () => void }) {
-  if (closingBypass) return;
-  event.preventDefault();
-  const dirtyTabs = getDirtyTabs();
-  if (dirtyTabs.length === 0) {
-    await closeWindowNow();
+  if (closingTicket) {
+    if (invalidateWindowCloseTicketIfStale(
+      closingTicket,
+      isWindowCloseAuthorizationCurrent,
+      () => getDirtyTabs().length > 0,
+      () => closePreparationGate.release(),
+    )) {
+      event.preventDefault();
+      closingTicket = null;
+      appStore.statusMessage = "关闭期间文档发生了变化，未退出。";
+    }
     return;
   }
-
-  const result = await showDialog({
-    title: "关闭 LightMark 前保存修改？",
-    message: `${dirtyTabs.length} 个文档有未保存的修改。`,
-    details: dirtyTabs.map((tab) => tab.name),
-    cancelId: "cancel",
-    defaultId: "save",
-    buttons: [
-      { id: "cancel", label: "取消", variant: "secondary" },
-      { id: "discard", label: "不保存退出", variant: "danger" },
-      { id: "save", label: "保存全部并退出", variant: "primary" },
-    ],
-  });
-
-  if (result === "cancel") return;
-  if (result === "save") {
-    try {
-      const saved = await saveAllDirtyTabs();
-      if (!saved) return;
-    } catch (error) {
-      appStore.statusMessage = String(error);
-      await showSaveFailure(error);
+  if (!closePreparationGate.tryEnter()) {
+    event.preventDefault();
+    return;
+  }
+  event.preventDefault();
+  try {
+    const preparation = await prepareWindowClose({
+      captureAuthorization: captureWindowCloseAuthorization,
+      preparePromptAuthorization: async () => prepareWindowClosePrompt(),
+      getDirtyTabs,
+      requestDecision: async (dirtyTabs) => {
+        const result = await showDialog({
+          title: "关闭 LightMark 前保存修改？",
+          message: `${dirtyTabs.length} 个文档有未保存的修改。`,
+          details: dirtyTabs.map((tab) => tab.name),
+          cancelId: "cancel",
+          defaultId: "save",
+          buttons: [
+            { id: "cancel", label: "取消", variant: "secondary" },
+            { id: "discard", label: "不保存退出", variant: "danger" },
+            { id: "save", label: "保存全部并退出", variant: "primary" },
+          ],
+        });
+        return result as "cancel" | "discard" | "save";
+      },
+      saveAll: saveAllDirtyTabsForClose,
+      flushDrafts: (authorization, tabs) => flushDraftsForWindowClose(
+        tabs,
+        windowCloseDraftPolicy,
+        authorization.tabs,
+      ),
+      isAuthorizationCurrent: isWindowCloseAuthorizationCurrent,
+    });
+    if (preparation.status === "cancelled") return;
+    if (preparation.status === "blocked") {
+      reportWindowClosePreparationFailure(preparation.error);
+      if (preparation.action === "save") await showSaveFailure(preparation.error);
       return;
     }
-  }
-  await closeWindowNow();
-}
-
-async function closeWindowNow() {
-  await recoverPendingDraftBeforeClose();
-  closingBypass = true;
-  const window = getCurrentWindow();
-  try {
-    await window.close();
-  } catch (closeError) {
-    try {
-      await window.destroy();
-    } catch (destroyError) {
-      closingBypass = false;
-      appStore.statusMessage = `关闭窗口失败：${destroyError || closeError}`;
-      await showSaveFailure(destroyError || closeError);
-    }
+    await closeWindowNow(preparation.ticket);
+  } catch (error) {
+    appStore.statusMessage = String(error);
+    await showSaveFailure(error);
+  } finally {
+    if (!closingTicket) closePreparationGate.release();
   }
 }
 
-async function recoverPendingDraftBeforeClose() {
-  try {
-    await flushCurrentDraft();
-  } catch {
-    // Closing should not be blocked by a best-effort autosave failure when the user chose to exit.
+async function closeWindowNow(
+  ticket: WindowCloseTicket<WindowCloseAuthorization, WindowCloseSaveReceipt, WindowCloseDraftReceipt>,
+) {
+  closingTicket = ticket;
+  const result = await closeWindowWithTicket(
+    ticket,
+    isWindowCloseAuthorizationCurrent,
+    () => getDirtyTabs().length > 0,
+    () => getCurrentWindow().close(),
+  );
+  if (!result.closed) {
+    if (closingTicket === ticket) closingTicket = null;
+    const error = result.error;
+    appStore.statusMessage = error
+      ? `关闭窗口失败：${error}`
+      : "关闭期间文档发生了变化，未退出。";
+    if (error) await showSaveFailure(error);
   }
+}
+
+function reportWindowClosePreparationFailure(result: unknown) {
+  const error = result && typeof result === "object" && "failures" in result
+    ? (result as { failures?: Array<{ error: unknown }> }).failures?.[0]?.error
+    : result;
+  const message = error ? String(error) : "退出前的文档准备未完成。";
+  appStore.statusMessage = message;
 }
 
 function isEditableTarget(target: EventTarget | null) {

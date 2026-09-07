@@ -87,6 +87,8 @@ body {
   --lm-accent: #3f6f9f;
   --lm-accent-soft: rgba(63, 111, 159, 0.12);
   --lm-focus: rgba(63, 111, 159, 0.34);
+  --lm-selection: rgba(63, 111, 159, 0.22);
+  --lm-disabled: rgba(102, 112, 133, 0.58);
   --lm-error: #b42318;
   --lm-error-soft: rgba(180, 35, 24, 0.1);
   --lm-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 5px 16px rgba(15, 23, 42, 0.04);
@@ -119,6 +121,8 @@ body {
   --lm-accent: #78a6d3;
   --lm-accent-soft: rgba(120, 166, 211, 0.15);
   --lm-focus: rgba(120, 166, 211, 0.38);
+  --lm-selection: rgba(120, 166, 211, 0.28);
+  --lm-disabled: rgba(152, 162, 179, 0.58);
   --lm-error: #fda29b;
   --lm-error-soft: rgba(253, 162, 155, 0.12);
   --lm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 7px 20px rgba(0, 0, 0, 0.13);
@@ -127,39 +131,105 @@ body {
 
 @layer components {
   .btn {
-    @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm text-ink-700 transition-colors hover:bg-paper-200/60 hover:text-ink-900 focus:outline-none focus:ring-2 focus:ring-amber-700/20 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-sm transition-colors;
+    color: var(--lm-ink-soft);
+  }
+
+  .btn:hover {
+    background: var(--lm-accent-soft);
+    color: var(--lm-ink);
   }
 
   .btn-primary {
-    @apply rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 text-sm text-paper-50 transition-colors hover:bg-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-300 dark:border-ink-300 dark:bg-ink-100 dark:text-paper-950 dark:hover:bg-paper-200;
+    @apply rounded-md border px-2.5 py-1.5 text-sm transition-colors;
+    background: var(--lm-accent);
+    border-color: var(--lm-accent);
+    color: var(--lm-surface);
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--lm-accent) 84%, var(--lm-ink));
   }
 
   .btn-small {
-    @apply rounded-md border border-transparent bg-transparent px-2 py-1 text-xs text-ink-500 transition-colors hover:bg-paper-200/70 hover:text-ink-900 focus:outline-none focus:ring-2 focus:ring-amber-700/20 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply rounded-md border border-transparent bg-transparent px-2 py-1 text-xs transition-colors;
+    color: var(--lm-ink-muted);
+  }
+
+  .btn-small:hover {
+    background: var(--lm-accent-soft);
+    color: var(--lm-ink);
   }
 
   .select {
-    @apply rounded-md border border-paper-200 bg-paper-50 px-2 py-1 text-sm text-ink-700 outline-none focus:ring-1 focus:ring-ink-300 dark:border-paper-800 dark:bg-paper-900 dark:text-ink-100;
+    @apply rounded-md border px-2 py-1 text-sm outline-none;
+    border-color: var(--lm-border);
+    background: var(--lm-surface-soft);
+    color: var(--lm-ink);
   }
 
   .segmented {
-    @apply inline-flex overflow-hidden rounded-md border border-paper-200 bg-paper-50 dark:border-paper-800 dark:bg-paper-900;
+    @apply inline-flex overflow-hidden rounded-md border;
+    border-color: var(--lm-border);
+    background: var(--lm-surface-soft);
   }
 
   .segmented button {
-    @apply px-3 py-1.5 text-sm text-ink-500 transition-colors hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply px-3 py-1.5 text-sm transition-colors;
+    border: 0;
+    background: transparent;
+    color: var(--lm-ink-muted);
+  }
+
+  .segmented button:hover {
+    background: var(--lm-accent-soft);
+    color: var(--lm-ink);
   }
 
   .segmented button.active {
-    @apply bg-ink-900 text-paper-50 dark:bg-ink-100 dark:text-paper-950;
+    background: var(--lm-accent);
+    color: var(--lm-surface);
   }
 
   .file-node {
-    @apply mb-0.5 block w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-ink-500 transition-colors hover:bg-paper-200/70 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100;
+    @apply mb-0.5 block w-full truncate rounded-md px-2 py-1.5 text-left text-sm transition-colors;
+    background: transparent;
+    color: var(--lm-ink-muted);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  .file-node:hover {
+    background: var(--lm-accent-soft);
+    color: var(--lm-ink);
   }
 
   .file-node-active {
-    @apply bg-amber-900/10 text-ink-900 shadow-[inset_2px_0_0_rgba(154,106,53,.65)] dark:bg-amber-200/10 dark:text-ink-100;
+    background: var(--lm-accent-soft);
+    color: var(--lm-ink);
+    box-shadow: inset 2px 0 0 var(--lm-accent);
+  }
+
+  .btn:focus-visible,
+  .btn-small:focus-visible,
+  .btn-primary:focus-visible,
+  .select:focus-visible,
+  .segmented button:focus-visible,
+  .file-node:focus-visible {
+    outline: 2px solid var(--lm-accent);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px var(--lm-focus);
+  }
+
+  .btn:disabled,
+  .btn-small:disabled,
+  .btn-primary:disabled,
+  .select:disabled,
+  .segmented button:disabled,
+  .file-node:disabled {
+    color: var(--lm-disabled);
+    cursor: not-allowed;
+    opacity: 0.72;
   }
 }
 
@@ -184,7 +254,7 @@ body {
 .cm-gutters {
   background: transparent !important;
   border-right: 0 !important;
-  color: #b9b3a8 !important;
+  color: var(--lm-ink-muted) !important;
 }
 
 .ProseMirror,
@@ -197,14 +267,14 @@ body {
 .ProseMirror ::selection,
 .markdown-preview ::selection,
 .cm-editor ::selection {
-  background: #d9d2c3;
+  background: var(--lm-selection);
   color: inherit;
 }
 
 .dark .ProseMirror ::selection,
 .dark .markdown-preview ::selection,
 .dark .cm-editor ::selection {
-  background: #4a4338;
+  background: var(--lm-selection);
   color: inherit;
 }
 
@@ -2886,21 +2956,21 @@ sub {
 
 .ProseMirror table tr,
 .markdown-preview table tr {
-  border: 1px solid #dfe2e5;
+  border: 1px solid var(--lm-border);
 }
 
 .ProseMirror table tr:nth-child(2n),
 .ProseMirror thead,
 .markdown-preview table tr:nth-child(2n),
 .markdown-preview thead {
-  background-color: #f8f8f8;
+  background-color: var(--lm-surface-soft);
 }
 
 .ProseMirror table th,
 .ProseMirror table td,
 .markdown-preview table th,
 .markdown-preview table td {
-  border: 1px solid #dfe2e5;
+  border: 1px solid var(--lm-border);
   padding: 6px 13px;
   max-width: min(52rem, 100%);
   overflow-wrap: anywhere;
@@ -2934,14 +3004,14 @@ sub {
 .dark .markdown-preview table tr,
 .dark .markdown-preview table th,
 .dark .markdown-preview table td {
-  border-color: #3b3833;
+  border-color: var(--lm-border);
 }
 
 .dark .ProseMirror table tr:nth-child(2n),
 .dark .ProseMirror thead,
 .dark .markdown-preview table tr:nth-child(2n),
 .dark .markdown-preview thead {
-  background-color: #1b1a18;
+  background-color: var(--lm-surface-soft);
 }
 
 .hljs {
@@ -3593,6 +3663,10 @@ sub {
 
 .cm-editor { color: var(--lm-ink); }
 .cm-gutters { color: var(--lm-ink-muted) !important; }
+.cm-editor .cm-selectionBackground,
+.cm-editor .cm-selectionMatch {
+  background: var(--lm-selection) !important;
+}
 .cm-activeLine, .cm-activeLineGutter { background: var(--lm-accent-soft) !important; }
 .cm-cursor, .cm-dropCursor { border-left-color: var(--lm-accent) !important; }
 

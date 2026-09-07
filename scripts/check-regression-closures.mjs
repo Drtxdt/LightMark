@@ -20,7 +20,16 @@ assert.match(wysiwyg, /wysiwygFormatHistory\.undo\.push/);
 assert.match(wysiwyg, /before:\s*event\.detail\.source/);
 assert.match(wysiwyg, /setMeta\("addToHistory", false\)/);
 assert.match(wysiwyg, /const markdown = paneContent\.value;/);
-const wysiwygUpdate = wysiwyg.match(/onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/)?.[0] ?? "";
+const requiredMatch = (source, expression, description) => {
+  const match = source.match(expression)?.[0];
+  assert.ok(match, description);
+  return match;
+};
+const wysiwygUpdate = requiredMatch(
+  wysiwyg,
+  /onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/,
+  "WysiwygEditor update handler was not found; regression assertions would otherwise be vacuous",
+);
 assert.match(wysiwyg, /registerDocumentSession/);
 assert.match(wysiwyg, /blocks:\s*\(\) => \{[\s\S]*?currentEditor\.state\.doc\.forEach/);
 assert.match(wysiwyg, /serializeBlock:\s*\(block\)[\s\S]*?DOMSerializer\.fromSchema/);
@@ -29,8 +38,13 @@ assert.match(wysiwyg, /oracle:\s*\(previousMarkdown\)[\s\S]*?currentEditor\.getH
 assert.doesNotMatch(wysiwygUpdate, /getHTML|editorHtmlToMarkdown|setPaneContent/,
   "WYSIWYG input updates must not serialize or copy the full document");
 assert.match(wysiwygUpdate, /markDocumentChanged/);
+const modeCursorCapture = requiredMatch(
+  wysiwyg,
+  /function handleModeCursorCapture[\s\S]*?\n}/,
+  "mode cursor capture was not found; regression assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(
-  wysiwyg.match(/function handleModeCursorCapture[\s\S]*?\n}/)?.[0] ?? "",
+  modeCursorCapture,
   /setPaneContent/,
   "mode switches must not mark a document dirty or reserialize Markdown",
 );
@@ -45,8 +59,13 @@ assert.match(overlay, /overlayZIndex/);
 assert.match(overlay, /!panel\?\.contains\(activeElement\)/);
 assert.match(overlay, /\.lm-modal-backdrop, \.dialog-backdrop/);
 assert.match(overlay, /closingBackdrop/);
+const isTopmost = requiredMatch(
+  overlay,
+  /function isTopmost[\s\S]*?\n  }/,
+  "overlay topmost predicate was not found; regression assertions would otherwise be vacuous",
+);
 assert.doesNotMatch(
-  overlay.match(/function isTopmost[\s\S]*?\n  }/)?.[0] ?? "",
+  isTopmost,
   /offsetParent/,
   "fixed modal backdrops must not be treated as hidden",
 );
@@ -68,7 +87,11 @@ assert.match(appDialog, /useOverlayFocus/);
 assert.match(appDialog, /active: isOpen/);
 
 const experimentalBlock =
-  settings.match(/const experimentalGroups[\s\S]*?^];/m)?.[0] ?? "";
+  requiredMatch(
+    settings,
+    /const experimentalGroups[\s\S]*?^];/m,
+    "experimental groups block was not found; regression assertions would otherwise be vacuous",
+  );
 assert.doesNotMatch(experimentalBlock, /自动配对/, "implemented auto-pairing must not be listed as experimental");
 assert.match(settings, /自动配对已作为默认编辑行为启用/);
 

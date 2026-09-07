@@ -19,6 +19,12 @@ import {
   type MarkdownMathToken,
 } from "../utils/mathMarkdown";
 import { appStore, recordNavigationLocation } from "../stores/appStore";
+import { DOCUMENT_FLUSH_META_KEY } from "../editor/documentMutationTracker";
+import type {
+  RecoveryMathContent,
+  RecoveryPendingMath,
+  RecoveryPendingMathEntry,
+} from "../editor/recoveryCodec";
 
 type MathAttrs = {
   tex: string;
@@ -29,10 +35,49 @@ type MathAttrs = {
   displayMode?: boolean;
 };
 
-function findInlineMathMatch(text: string, isAllowedRange: (from: number, to: number) => boolean = () => true) {
+function findInlineMathMatch(text: string) {
   return parseInlineMathText(text)
-    .find((token) => isAllowedRange(token.from, token.to) && !isWholeTextBlockMathDelimiter(text, token.from, token.to))
+    .find((token) => !isWholeTextBlockMathDelimiter(text, token.from, token.to))
     ?? null;
+}
+
+type InlineMathTextRun = {
+  text: string;
+  pmFrom: number;
+};
+
+type InlineMathReplacement = {
+  match: MarkdownMathToken;
+  from: number;
+  to: number;
+};
+
+function findInlineMathMatchInTextblock(node: any): InlineMathReplacement | null {
+  const runs: InlineMathTextRun[] = [];
+  let run: InlineMathTextRun | null = null;
+
+  node.forEach((child: any, offset: number) => {
+    if (!child.isText || child.marks.some((mark: any) => mark.type.name === "code")) {
+      if (run) runs.push(run);
+      run = null;
+      return;
+    }
+
+    run ??= { text: "", pmFrom: offset };
+    run.text += child.text;
+  });
+  if (run) runs.push(run);
+
+  for (const textRun of runs) {
+    const match = findInlineMathMatch(textRun.text);
+    if (!match?.tex.trim()) continue;
+    return {
+      match,
+      from: textRun.pmFrom + match.from,
+      to: textRun.pmFrom + match.to,
+    };
+  }
+  return null;
 }
 
 function isWholeTextBlockMathDelimiter(text: string, from: number, to: number) {
@@ -109,12 +154,11 @@ export const InlineMath = Node.create({
           const node = $head.parent;
           const pos = $head.before();
           let tr = newState.tr;
-          const text = node.textContent;
-          const codeRanges = getCodeMarkRanges(node);
-          const match = findInlineMathMatch(text, (from, to) => !rangeOverlapsCodeMark(codeRanges, from, to));
-          if (!match?.tex.trim()) return null;
-          const from = pos + 1 + match.from;
-          const to = pos + 1 + match.to;
+          const replacement = findInlineMathMatchInTextblock(node);
+          if (!replacement) return null;
+          const { match } = replacement;
+          const from = pos + 1 + replacement.from;
+          const to = pos + 1 + replacement.to;
           tr = tr.replaceWith(from, to, this.type.create({
             tex: match.tex,
             editing: true,
@@ -130,23 +174,9 @@ export const InlineMath = Node.create({
   },
 
   addNodeView() {
-    return ({ node, editor, getPos }) => createInlineMathView(node.attrs as MathAttrs, editor, getPos);
+    return ({ node, editor, getPos }) => createInlineMathView(node, editor, getPos);
   },
 });
-
-function getCodeMarkRanges(node: any) {
-  const ranges: Array<{ from: number; to: number }> = [];
-  node.forEach((child: any, offset: number) => {
-    if (!child.isText) return;
-    if (!child.marks.some((mark: any) => mark.type.name === "code")) return;
-    ranges.push({ from: offset, to: offset + child.text.length });
-  });
-  return ranges;
-}
-
-function rangeOverlapsCodeMark(ranges: Array<{ from: number; to: number }>, from: number, to: number) {
-  return ranges.some((range) => from < range.to && to > range.from);
-}
 
 export const BlockMath = Node.create({
   name: "blockMath",
@@ -210,6 +240,7 @@ export const BlockMath = Node.create({
         props: {
           handleKeyDown: (view, event) => {
             if (event.key !== "Enter") return false;
+            if (isMathCompositionKey(event)) return false;
 
             const { state } = view;
             const { $from, empty } = state.selection;
@@ -243,35 +274,325 @@ export const BlockMath = Node.create({
   },
 
   addNodeView() {
-    return ({ node, editor, getPos }) => createBlockMathView(node.attrs as MathAttrs, editor, getPos);
+    return ({ node, editor, getPos }) => createBlockMathView(node, editor, getPos);
   },
 });
 
 type NodeViewPosition = (() => number | undefined) | boolean;
 
-type PendingMathEdit = {
-  flush: () => Promise<void>;
+export type MathContentAttrs = {
+  tex: string;
+  delimiter: MathDelimiter;
+  raw: string;
+  originalTex: string;
+  displayMode: boolean;
 };
 
-const pendingMathEdits = new WeakMap<object, Set<PendingMathEdit>>();
-
-function registerPendingMathEdit(editor: object, edit: PendingMathEdit) {
-  let edits = pendingMathEdits.get(editor);
-  if (!edits) {
-    edits = new Set();
-    pendingMathEdits.set(editor, edits);
-  }
-  edits.add(edit);
-  return () => {
-    edits?.delete(edit);
-    if (edits?.size === 0) pendingMathEdits.delete(editor);
+function readMathContentAttrs(attrs: Partial<MathAttrs>): MathContentAttrs {
+  const tex = attrs.tex || "";
+  return {
+    tex,
+    delimiter: attrs.delimiter || "inline-dollar",
+    raw: attrs.raw || "",
+    originalTex: attrs.originalTex ?? tex,
+    displayMode: Boolean(attrs.displayMode),
   };
 }
 
-export async function flushPendingMathEdits(editor: object) {
-  const edits = pendingMathEdits.get(editor);
+function sameMathContentAttrs(left: MathContentAttrs, right: MathContentAttrs) {
+  return left.tex === right.tex
+    && left.delimiter === right.delimiter
+    && left.raw === right.raw
+    && left.originalTex === right.originalTex
+    && left.displayMode === right.displayMode;
+}
+
+export type MathContentUpdateDecision =
+  | "preserve-local"
+  | "ack-local"
+  | "accept-incoming"
+  | "conflict";
+
+export function resolveMathContentUpdate(input: {
+  editing: boolean;
+  local: MathContentAttrs;
+  accepted: MathContentAttrs;
+  incoming: MathContentAttrs;
+}): MathContentUpdateDecision {
+  const localChanged = !sameMathContentAttrs(input.local, input.accepted);
+  const incomingChanged = !sameMathContentAttrs(input.incoming, input.accepted);
+  if (!input.editing) return "accept-incoming";
+  if (!incomingChanged) return "preserve-local";
+  if (sameMathContentAttrs(input.incoming, input.local)) return "ack-local";
+  if (!localChanged) return "accept-incoming";
+  return "conflict";
+}
+
+export type MathBlurDecision = "defer-composition" | "commit" | "keep-editing" | "wait-source";
+
+export function resolveMathBlurDecision(input: {
+  composing: boolean;
+  blurPending: boolean;
+  sourceConnected: boolean;
+  activeInside: boolean;
+}): MathBlurDecision {
+  if (!input.blurPending) return "keep-editing";
+  if (input.composing) return "defer-composition";
+  if (!input.sourceConnected) return "wait-source";
+  if (input.activeInside) return "keep-editing";
+  return "commit";
+}
+
+function isMathCompositionKey(event: KeyboardEvent) {
+  return event.isComposing || event.key === "Process" || event.keyCode === 229;
+}
+
+export class MathEditConflictError extends Error {
+  constructor(message = "公式编辑内容与文档更新冲突") {
+    super(message);
+    this.name = "MathEditConflictError";
+  }
+}
+
+export class MathClosePromptBlockedError extends Error {
+  constructor(message = "公式输入法组合尚未结束，已保留当前窗口。") {
+    super(message);
+    this.name = "MathClosePromptBlockedError";
+  }
+}
+
+type PendingMathEdit = {
+  flush: (request?: MathFlushRequest) => Promise<void>;
+  finalizeClosePrompt: (request?: MathFlushRequest) => Promise<void>;
+  hasPending: () => boolean;
+  captureRecovery: () => RecoveryPendingMathEntry | null;
+};
+
+export type MathFlushRequest = Readonly<{
+  flushId: string;
+}>;
+
+type PendingMathEditRegistry = {
+  edits: Set<PendingMathEdit>;
+  version: number;
+  inputVersion: number;
+};
+
+const pendingMathEdits = new WeakMap<object, PendingMathEditRegistry>();
+let nextMathRecoveryEntryId = 0;
+
+function createMathRecoveryEntryId(kind: "inline" | "block") {
+  nextMathRecoveryEntryId += 1;
+  return `${kind}-math-${nextMathRecoveryEntryId}`;
+}
+
+function readNodeViewPosition(getPos: NodeViewPosition) {
+  if (typeof getPos !== "function") return null;
+  try {
+    const position = getPos();
+    return Number.isSafeInteger(position) && (position as number) >= 0
+      ? position as number
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function recoveryMathState(input: {
+  editing: boolean;
+  composing: boolean;
+  blurPending: boolean;
+  conflict: boolean;
+  local: MathContentAttrs;
+  accepted: MathContentAttrs;
+}): RecoveryPendingMathEntry["state"] | null {
+  if (input.conflict) return "conflict";
+  if (input.composing) return "composing";
+  if (input.blurPending) return "blurPending";
+  if (input.editing || !sameMathContentAttrs(input.local, input.accepted)) return "editing";
+  return null;
+}
+
+function recoveryContent(attrs: MathContentAttrs): RecoveryMathContent {
+  return {
+    tex: attrs.tex,
+    delimiter: attrs.delimiter,
+    raw: attrs.raw,
+    originalTex: attrs.originalTex,
+    displayMode: attrs.displayMode,
+  };
+}
+
+function currentMathNodeContent(node: any, kind: "inline" | "block") {
+  if (!node?.attrs) return null;
+  const attrs = kind === "block"
+    ? { ...node.attrs, delimiter: node.attrs.delimiter || "display-dollar", displayMode: true }
+    : node.attrs;
+  return readMathContentAttrs(attrs);
+}
+
+function readEditorDocument(editor: any) {
+  try {
+    return editor?.view?.state?.doc ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function captureMathRecoveryEntry(input: {
+  id: string;
+  kind: "inline" | "block";
+  editor: any;
+  getPos: NodeViewPosition;
+  accepted: MathContentAttrs;
+  local: MathContentAttrs;
+  editing: boolean;
+  composing: boolean;
+  blurPending: boolean;
+  conflict: MathEditConflictError | null;
+  destroyed: boolean;
+  lastKnownPosition: number | null;
+}): RecoveryPendingMathEntry | null {
+  const state = recoveryMathState({
+    editing: input.editing,
+    composing: input.composing,
+    blurPending: input.blurPending,
+    conflict: Boolean(input.conflict),
+    local: input.local,
+    accepted: input.accepted,
+  });
+  if (!state) return null;
+
+  const currentPosition = readNodeViewPosition(input.getPos);
+  const position = currentPosition ?? input.lastKnownPosition;
+  const doc = readEditorDocument(input.editor);
+  let currentNode = null;
+  if (currentPosition !== null && doc?.nodeAt) {
+    const documentSize = typeof doc.content?.size === "number" ? doc.content.size : -1;
+    if (currentPosition <= documentSize) {
+      try {
+        currentNode = doc.nodeAt(currentPosition);
+      } catch {
+        currentNode = null;
+      }
+    }
+  }
+  const expectedType = input.kind === "inline" ? "inlineMath" : "blockMath";
+  let binding: RecoveryPendingMathEntry["binding"];
+  if (input.destroyed || currentPosition === null || !doc?.nodeAt || !currentNode) {
+    const reason = input.destroyed
+      ? "node-view-destroyed"
+      : currentPosition === null
+        ? "node-view-position-unavailable"
+        : !doc?.nodeAt
+          ? "editor-document-unavailable"
+          : "document-node-unavailable";
+    binding = {
+      status: "orphaned",
+      position,
+      kind: input.kind,
+      reason,
+    };
+  } else {
+    const currentContent = currentMathNodeContent(currentNode, input.kind);
+    if (
+      input.conflict
+      || currentNode.type?.name !== expectedType
+      || !currentContent
+      || !sameMathContentAttrs(currentContent, input.accepted)
+    ) {
+      binding = {
+        status: "conflicted",
+        position: currentPosition,
+        kind: input.kind,
+        reason: input.conflict ? "node-view-edit-conflict" : "document-node-changed",
+      };
+    } else {
+      binding = { status: "linked", position: currentPosition, kind: input.kind };
+    }
+  }
+  return {
+    id: input.id,
+    binding,
+    accepted: recoveryContent(input.accepted),
+    local: recoveryContent(input.local),
+    state,
+  };
+}
+
+function registerPendingMathEdit(editor: object, edit: PendingMathEdit) {
+  let registry = pendingMathEdits.get(editor);
+  if (!registry) {
+    registry = { edits: new Set(), version: 0, inputVersion: 0 };
+    pendingMathEdits.set(editor, registry);
+  }
+  registry.edits.add(edit);
+  registry.version += 1;
+  let active = true;
+  const markChanged = () => {
+    if (active) registry!.version += 1;
+  };
+  const markInputChanged = () => {
+    if (!active) return;
+    registry!.version += 1;
+    registry!.inputVersion += 1;
+  };
+  const unregister = () => {
+    if (!active) return;
+    active = false;
+    registry!.edits.delete(edit);
+    registry!.version += 1;
+  };
+  return { unregister, markChanged, markInputChanged };
+}
+
+export async function flushPendingMathEdits(editor: object, request?: MathFlushRequest) {
+  const edits = pendingMathEdits.get(editor)?.edits;
   if (!edits?.size) return;
-  await Promise.all([...edits].map((edit) => edit.flush()));
+  await Promise.all([...edits].map((edit) => edit.flush(request)));
+}
+
+/**
+ * Finalize the transient formula UI before a window-close prompt is shown.
+ * This is deliberately separate from the ordinary save flush: moving focus
+ * to a native dialog must not be allowed to mutate a still-open NodeView after
+ * the close authorization has been captured.
+ */
+export async function finalizePendingMathForClosePrompt(
+  editor: object,
+  request?: MathFlushRequest,
+) {
+  const edits = pendingMathEdits.get(editor)?.edits;
+  if (!edits?.size) return;
+  for (const edit of [...edits]) await edit.finalizeClosePrompt(request);
+}
+
+export function hasPendingMathEdits(editor: object) {
+  return [...(pendingMathEdits.get(editor)?.edits ?? [])].some((edit) => edit.hasPending());
+}
+
+export function getPendingMathEditVersion(editor: object) {
+  return pendingMathEdits.get(editor)?.version ?? 0;
+}
+
+export function getPendingMathInputVersion(editor: object) {
+  return pendingMathEdits.get(editor)?.inputVersion ?? 0;
+}
+
+/**
+ * Capture pending math buffers without changing the editor or its registry.
+ * This is intentionally a data-only boundary; WYS/source selection and other
+ * local buffers are added by the future recovery local-state layer.
+ */
+export function capturePendingMathRecovery(editor: object): RecoveryPendingMath {
+  const registry = pendingMathEdits.get(editor);
+  if (!registry) return { version: 0, entries: [] };
+  const entries: RecoveryPendingMathEntry[] = [];
+  for (const edit of registry.edits) {
+    const entry = edit.captureRecovery();
+    if (entry) entries.push(entry);
+  }
+  return { version: registry.version, entries };
 }
 
 type EditorMathEvaluation = {
@@ -400,7 +721,8 @@ function positionMathToken(token: MarkdownMathToken, pos: number, nodeSize: numb
   };
 }
 
-function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosition) {
+function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) {
+  const attrs = node.attrs as MathAttrs;
   const dom = document.createElement("span");
   dom.className = "math-node math-node-inline";
   dom.contentEditable = "false";
@@ -414,14 +736,89 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
   let composing = false;
-  const compositionWaiters = new Set<() => void>();
+  let blurPending = false;
+  let closePromptFinalized = false;
+  let destroyed = false;
+  let acceptedNode = node;
+  let acceptedAttrs = readMathContentAttrs(attrs);
+  let editConflict: MathEditConflictError | null = null;
+  const recoveryEntryId = createMathRecoveryEntryId("inline");
+  let lastKnownPosition: number | null = readNodeViewPosition(getPos);
+  let markPendingEditChanged: () => void = () => {};
+  let markPendingInputChanged: () => void = () => {};
+  const compositionWaiters = new Set<{
+    resolve: () => void;
+    reject: (reason?: unknown) => void;
+  }>();
 
-  const updateAttrs = (next: Partial<MathAttrs>) => {
-    if (typeof getPos !== "function") return;
+  const localContentAttrs = (): MathContentAttrs => ({
+    tex,
+    delimiter,
+    raw,
+    originalTex,
+    displayMode,
+  });
+
+  const acceptNode = (nextNode: any) => {
+    const nextAttrs = nextNode.attrs as MathAttrs;
+    acceptedNode = nextNode;
+    acceptedAttrs = readMathContentAttrs(nextAttrs);
+    tex = acceptedAttrs.tex;
+    delimiter = acceptedAttrs.delimiter;
+    raw = acceptedAttrs.raw;
+    originalTex = acceptedAttrs.originalTex;
+    displayMode = acceptedAttrs.displayMode;
+    if (editConflict) {
+      editConflict = null;
+      markPendingEditChanged();
+    }
+    markPendingEditChanged();
+  };
+
+  const setEditConflict = (error: MathEditConflictError) => {
+    if (!editConflict) {
+      editConflict = error;
+      markPendingEditChanged();
+    }
+    return editConflict;
+  };
+
+  const waitForCompositionEnd = () => new Promise<void>((resolve, reject) => {
+    compositionWaiters.add({ resolve, reject });
+  });
+
+  const resolveCompositionWaiters = () => {
+    const waiters = [...compositionWaiters];
+    compositionWaiters.clear();
+    for (const waiter of waiters) waiter.resolve();
+  };
+
+  const rejectCompositionWaiters = (reason: unknown) => {
+    const waiters = [...compositionWaiters];
+    compositionWaiters.clear();
+    for (const waiter of waiters) waiter.reject(reason);
+  };
+
+  const updateAttrs = (next: Partial<MathAttrs>, flushRequest?: MathFlushRequest) => {
+    if (destroyed) {
+      setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+      return false;
+    }
+    if (editConflict) return false;
+    if (typeof getPos !== "function") {
+      setEditConflict(new MathEditConflictError("公式位置已失效，无法确认未提交内容已写入"));
+      return false;
+    }
     const pos = getPos();
-    if (typeof pos !== "number") return;
-    const node = editor.view.state.doc.nodeAt(pos);
-    if (!node) return;
+    if (typeof pos !== "number") {
+      setEditConflict(new MathEditConflictError("公式位置已失效，无法确认未提交内容已写入"));
+      return false;
+    }
+    const currentNode = editor.view.state.doc.nodeAt(pos);
+    if (!currentNode || currentNode.type !== acceptedNode.type || currentNode !== acceptedNode) {
+      setEditConflict(new MathEditConflictError("公式节点已被文档更新，无法确认未提交内容已写入"));
+      return false;
+    }
     const nextAttrs = {
       tex,
       delimiter,
@@ -431,29 +828,95 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       editing: false,
       ...next,
     };
-    if (Object.entries(nextAttrs).every(([key, value]) => node.attrs[key] === value)) return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
+    if (Object.entries(nextAttrs).every(([key, value]) => currentNode.attrs[key] === value)) return true;
+    const transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs);
+    if (flushRequest) transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+    editor.view.dispatch(transaction);
+    return true;
   };
 
   const exitToDocument = (side: "before" | "after") => {
+    if (editing) markPendingEditChanged();
     editing = false;
     raw = tex === originalTex ? raw : "";
-    updateAttrs({ tex, raw, editing: false });
+    if (!updateAttrs({ tex, raw, editing: false })) {
+      editing = true;
+      return;
+    }
     renderDisplay();
     setInlineSelection(editor, getPos, side);
   };
 
   const pendingEdit: PendingMathEdit = {
-    async flush() {
-      if (composing) await new Promise<void>((resolve) => { compositionWaiters.add(resolve); });
+    hasPending: () => composing || blurPending || Boolean(editConflict) || !sameMathContentAttrs(localContentAttrs(), acceptedAttrs),
+    captureRecovery: () => captureMathRecoveryEntry({
+      id: recoveryEntryId,
+      kind: "inline",
+      editor,
+      getPos,
+      accepted: acceptedAttrs,
+      local: localContentAttrs(),
+      editing,
+      composing,
+      blurPending,
+      conflict: editConflict,
+      destroyed,
+      lastKnownPosition,
+    }),
+    async flush(flushRequest) {
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
+      if (composing) await waitForCompositionEnd();
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
       if (!editing) return;
       raw = tex === originalTex ? raw : "";
-      updateAttrs({ tex, raw, editing: false });
+      const wasBlurPending = blurPending;
+      if (wasBlurPending) markPendingEditChanged();
+      blurPending = false;
+      if (!updateAttrs({ tex, raw, editing: false }, flushRequest)) {
+        if (!blurPending) markPendingEditChanged();
+        blurPending = wasBlurPending;
+        throw editConflict ?? new MathEditConflictError();
+      }
+    },
+    async finalizeClosePrompt(flushRequest) {
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
+      if (composing) throw new MathClosePromptBlockedError();
+
+      const wasEditing = editing;
+      const wasBlurPending = blurPending;
+      const source = dom.querySelector(".math-inline-source-editor");
+      const needsClose = wasEditing || wasBlurPending || Boolean(source);
+      const needsCommit = needsClose || !sameMathContentAttrs(localContentAttrs(), acceptedAttrs);
+      if (!needsCommit) return;
+
+      const previousRaw = raw;
+      const previousClosePromptFinalized = closePromptFinalized;
+      closePromptFinalized = true;
+      if (needsClose) markPendingEditChanged();
+      raw = tex === originalTex ? raw : "";
+      blurPending = false;
+      editing = false;
+      if (!updateAttrs({ tex, raw, editing: false }, flushRequest)) {
+        raw = previousRaw;
+        editing = wasEditing;
+        blurPending = wasBlurPending;
+        closePromptFinalized = previousClosePromptFinalized;
+        throw editConflict ?? new MathEditConflictError();
+      }
+      if (needsClose) renderDisplay();
     },
   };
-  const unregisterPendingEdit = registerPendingMathEdit(editor, pendingEdit);
+  const pendingRegistration = registerPendingMathEdit(editor, pendingEdit);
+  const unregisterPendingEdit = pendingRegistration.unregister;
+  markPendingEditChanged = pendingRegistration.markChanged;
+  markPendingInputChanged = pendingRegistration.markInputChanged;
 
   const renderDisplay = () => {
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     displayRendered = true;
     suggest?.destroy();
     suggest = null;
@@ -470,11 +933,47 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   };
 
   const renderPlaceholder = () => {
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     dom.className = "math-node math-node-inline math-node-pending";
     dom.textContent = tex;
   };
 
+  const commitAfterBlur = (source: HTMLElement) => {
+    if (closePromptFinalized) return;
+    const activeElement = document.activeElement;
+    const decision = resolveMathBlurDecision({
+      composing,
+      blurPending,
+      sourceConnected: source.isConnected,
+      activeInside: activeElement === source || dom.contains(activeElement),
+    });
+    if (destroyed || decision === "defer-composition" || decision === "wait-source") return;
+    if (decision === "keep-editing") {
+      if (blurPending) markPendingEditChanged();
+      blurPending = false;
+      return;
+    }
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
+    if (!editing) return;
+    markPendingEditChanged();
+    editing = false;
+    raw = tex === originalTex ? raw : "";
+    if (!updateAttrs({ tex, raw, editing: false })) {
+      markPendingEditChanged();
+      editing = true;
+      if (!blurPending) markPendingEditChanged();
+      blurPending = true;
+      return;
+    }
+    renderDisplay();
+  };
+
   const renderEditor = (initialCaret: "start" | "end" = "end") => {
+    closePromptFinalized = false;
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     dom.innerHTML = "";
     dom.className = "math-node math-node-inline math-node-inline-editing";
 
@@ -508,14 +1007,20 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     };
 
     const refresh = () => {
-      tex = source.textContent || "";
+      if (destroyed) return;
+      const nextTex = source.textContent || "";
+      if (nextTex !== tex) {
+        tex = nextTex;
+        markPendingEditChanged();
+        markPendingInputChanged();
+      }
       renderKatex(body, tex, displayMode, "公式预览", {
         delimiter,
         raw: "",
         evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, displayMode),
       });
       installEditingTools();
-      suggest?.sync();
+      if (!composing) suggest?.sync();
     };
 
     suggest = createLatexSuggestController({
@@ -523,6 +1028,10 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       anchor: source,
       getValue: () => source.textContent || "",
       setValue: (value) => {
+        if (source.textContent !== value) {
+          markPendingEditChanged();
+          markPendingInputChanged();
+        }
         source.textContent = value;
         tex = value;
       },
@@ -536,14 +1045,31 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     });
 
     source.addEventListener("input", refresh);
-    source.addEventListener("compositionstart", () => { composing = true; });
+    source.addEventListener("compositionstart", () => {
+      if (!composing) markPendingEditChanged();
+      composing = true;
+      suggest?.close();
+    });
     source.addEventListener("compositionend", () => {
+      if (destroyed) return;
+      if (composing) markPendingEditChanged();
       composing = false;
-      for (const resolve of compositionWaiters) resolve();
-      compositionWaiters.clear();
       refresh();
+      resolveCompositionWaiters();
+      if (blurPending) window.setTimeout(() => commitAfterBlur(source), 0);
     });
     source.addEventListener("keydown", (event) => {
+      if (composing || isMathCompositionKey(event)) return;
+      if (event.key === "End" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        setContentEditableCaret(source, source.textContent?.length ?? 0, event.shiftKey);
+        return;
+      }
+      if (event.key === "Home" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        setContentEditableCaret(source, 0, event.shiftKey);
+        return;
+      }
       if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && isCaretAtStart(source)) {
         event.preventDefault();
@@ -566,13 +1092,13 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
       }
     });
     source.addEventListener("blur", () => {
+      if (closePromptFinalized) return;
+      if (!blurPending) markPendingEditChanged();
+      blurPending = true;
       window.setTimeout(() => suggest?.close(), 120);
       window.setTimeout(() => {
-        if (!source.isConnected || document.activeElement === source || dom.contains(document.activeElement)) return;
-        editing = false;
-        raw = tex === originalTex ? raw : "";
-        updateAttrs({ tex, raw, editing: false });
-        renderDisplay();
+        if (destroyed) return;
+        commitAfterBlur(source);
       }, 0);
     });
 
@@ -603,6 +1129,7 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     event.preventDefault();
     const bounds = dom.getBoundingClientRect();
     const initialCaret = event.clientX <= bounds.left + bounds.width / 2 ? "start" : "end";
+    markPendingEditChanged();
     editing = true;
     renderEditor(initialCaret);
   });
@@ -621,32 +1148,70 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
     update(nextNode: any) {
       if (nextNode.type.name !== "inlineMath") return false;
       const nextEditing = Boolean(nextNode.attrs.editing);
-      tex = nextNode.attrs.tex || "";
-      delimiter = nextNode.attrs.delimiter || "inline-dollar";
-      raw = nextNode.attrs.raw || "";
-      originalTex = nextNode.attrs.originalTex ?? tex;
-      displayMode = Boolean(nextNode.attrs.displayMode);
-      if (editing && dom.querySelector(".math-inline-source-editor")) return true;
+      const incomingAttrs = readMathContentAttrs(nextNode.attrs as MathAttrs);
+      const localAttrs = localContentAttrs();
+      const decision = resolveMathContentUpdate({
+        editing: editing && Boolean(dom.querySelector(".math-inline-source-editor")),
+        local: localAttrs,
+        accepted: acceptedAttrs,
+        incoming: incomingAttrs,
+      });
+      if (decision === "preserve-local") {
+        markPendingEditChanged();
+        acceptedNode = nextNode;
+        return true;
+      }
+      if (decision === "ack-local") {
+        acceptNode(nextNode);
+        return true;
+      }
+      if (decision === "conflict") {
+        setEditConflict(new MathEditConflictError("公式编辑内容与文档更新冲突"));
+        return true;
+      }
+      if (decision === "accept-incoming") {
+        acceptNode(nextNode);
+      }
+      if (editing !== nextEditing) markPendingEditChanged();
       editing = nextEditing;
       editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
     },
     selectNode() {
       if (editing) return;
+      closePromptFinalized = false;
+      markPendingEditChanged();
       editing = true;
       renderEditor();
     },
     deselectNode() {
       if (!editing) return;
+      if (composing) {
+        if (!blurPending) markPendingEditChanged();
+        blurPending = true;
+        return;
+      }
+      markPendingEditChanged();
       editing = false;
-      updateAttrs({ editing: false });
+      if (!updateAttrs({ editing: false })) {
+        markPendingEditChanged();
+        editing = true;
+        return;
+      }
       renderDisplay();
     },
     destroy() {
+      const hadPending = pendingEdit.hasPending();
+      const position = readNodeViewPosition(getPos);
+      if (position !== null) lastKnownPosition = position;
+      destroyed = true;
       suggest?.destroy();
-      for (const resolve of compositionWaiters) resolve();
-      compositionWaiters.clear();
-      unregisterPendingEdit();
+      if (hadPending) {
+        setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+      } else {
+        unregisterPendingEdit();
+      }
+      rejectCompositionWaiters(editConflict ?? new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
       stopVisibility();
       stopRefresh();
     },
@@ -655,7 +1220,8 @@ function createInlineMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPos
   };
 }
 
-function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosition) {
+function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
+  const attrs = node.attrs as MathAttrs;
   const dom = document.createElement("section");
   dom.className = "math-node math-node-block";
   dom.contentEditable = "false";
@@ -668,14 +1234,88 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   let displayRendered = false;
   let suggest: LatexSuggestController | null = null;
   let composing = false;
-  const compositionWaiters = new Set<() => void>();
+  let blurPending = false;
+  let closePromptFinalized = false;
+  let destroyed = false;
+  let acceptedNode = node;
+  let acceptedAttrs = readMathContentAttrs({ ...attrs, delimiter: attrs.delimiter || "display-dollar", displayMode: true });
+  let editConflict: MathEditConflictError | null = null;
+  const recoveryEntryId = createMathRecoveryEntryId("block");
+  let lastKnownPosition: number | null = readNodeViewPosition(getPos);
+  let markPendingEditChanged: () => void = () => {};
+  let markPendingInputChanged: () => void = () => {};
+  const compositionWaiters = new Set<{
+    resolve: () => void;
+    reject: (reason?: unknown) => void;
+  }>();
 
-  const updateAttrs = (next: Partial<MathAttrs>) => {
-    if (typeof getPos !== "function") return;
+  const localContentAttrs = (): MathContentAttrs => ({
+    tex,
+    delimiter,
+    raw,
+    originalTex,
+    displayMode: true,
+  });
+
+  const acceptNode = (nextNode: any) => {
+    const nextAttrs = nextNode.attrs as MathAttrs;
+    acceptedNode = nextNode;
+    acceptedAttrs = readMathContentAttrs({ ...nextAttrs, delimiter: nextAttrs.delimiter || "display-dollar", displayMode: true });
+    tex = acceptedAttrs.tex;
+    delimiter = acceptedAttrs.delimiter;
+    raw = acceptedAttrs.raw;
+    originalTex = acceptedAttrs.originalTex;
+    if (editConflict) {
+      editConflict = null;
+      markPendingEditChanged();
+    }
+    markPendingEditChanged();
+  };
+
+  const setEditConflict = (error: MathEditConflictError) => {
+    if (!editConflict) {
+      editConflict = error;
+      markPendingEditChanged();
+    }
+    return editConflict;
+  };
+
+  const waitForCompositionEnd = () => new Promise<void>((resolve, reject) => {
+    compositionWaiters.add({ resolve, reject });
+  });
+
+  const resolveCompositionWaiters = () => {
+    const waiters = [...compositionWaiters];
+    compositionWaiters.clear();
+    for (const waiter of waiters) waiter.resolve();
+  };
+
+  const rejectCompositionWaiters = (reason: unknown) => {
+    const waiters = [...compositionWaiters];
+    compositionWaiters.clear();
+    for (const waiter of waiters) waiter.reject(reason);
+  };
+
+  const updateAttrs = (next: Partial<MathAttrs>, flushRequest?: MathFlushRequest) => {
+    if (destroyed) {
+      setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+      return false;
+    }
+    if (editConflict) return false;
+    if (typeof getPos !== "function") {
+      setEditConflict(new MathEditConflictError("公式位置已失效，无法确认未提交内容已写入"));
+      return false;
+    }
     const pos = getPos();
-    if (typeof pos !== "number") return;
-    const node = editor.view.state.doc.nodeAt(pos);
-    if (!node) return;
+    if (typeof pos !== "number") {
+      setEditConflict(new MathEditConflictError("公式位置已失效，无法确认未提交内容已写入"));
+      return false;
+    }
+    const currentNode = editor.view.state.doc.nodeAt(pos);
+    if (!currentNode || currentNode.type !== acceptedNode.type || currentNode !== acceptedNode) {
+      setEditConflict(new MathEditConflictError("公式节点已被文档更新，无法确认未提交内容已写入"));
+      return false;
+    }
     const nextAttrs = {
       tex,
       delimiter,
@@ -685,37 +1325,108 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       editing: false,
       ...next,
     };
-    if (Object.entries(nextAttrs).every(([key, value]) => node.attrs[key] === value)) return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
+    if (Object.entries(nextAttrs).every(([key, value]) => currentNode.attrs[key] === value)) return true;
+    const transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs);
+    if (flushRequest) transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+    editor.view.dispatch(transaction);
+    return true;
   };
 
   const exitToNextParagraph = () => {
+    if (editing) markPendingEditChanged();
     editing = false;
     raw = tex === originalTex ? raw : "";
-    updateAttrs({ tex, raw, editing: false });
+    if (!updateAttrs({ tex, raw, editing: false })) {
+      markPendingEditChanged();
+      editing = true;
+      return;
+    }
     if (tex.trim()) renderDisplay();
     setBlockSelectionAfter(editor, getPos);
   };
 
   const exitToPreviousParagraph = () => {
+    if (editing) markPendingEditChanged();
     editing = false;
     raw = tex === originalTex ? raw : "";
-    updateAttrs({ tex, raw, editing: false });
+    if (!updateAttrs({ tex, raw, editing: false })) {
+      editing = true;
+      return;
+    }
     if (tex.trim()) renderDisplay();
     setBlockSelectionBefore(editor, getPos);
   };
 
   const pendingEdit: PendingMathEdit = {
-    async flush() {
-      if (composing) await new Promise<void>((resolve) => { compositionWaiters.add(resolve); });
+    hasPending: () => composing || blurPending || Boolean(editConflict) || !sameMathContentAttrs(localContentAttrs(), acceptedAttrs),
+    captureRecovery: () => captureMathRecoveryEntry({
+      id: recoveryEntryId,
+      kind: "block",
+      editor,
+      getPos,
+      accepted: acceptedAttrs,
+      local: localContentAttrs(),
+      editing,
+      composing,
+      blurPending,
+      conflict: editConflict,
+      destroyed,
+      lastKnownPosition,
+    }),
+    async flush(flushRequest) {
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
+      if (composing) await waitForCompositionEnd();
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
       if (!editing) return;
       raw = tex === originalTex ? raw : "";
-      updateAttrs({ tex, raw, editing: false });
+      const wasBlurPending = blurPending;
+      if (wasBlurPending) markPendingEditChanged();
+      blurPending = false;
+      if (!updateAttrs({ tex, raw, editing: false }, flushRequest)) {
+        if (!blurPending) markPendingEditChanged();
+        blurPending = wasBlurPending;
+        throw editConflict ?? new MathEditConflictError();
+      }
+    },
+    async finalizeClosePrompt(flushRequest) {
+      if (destroyed) throw new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入");
+      if (editConflict) throw editConflict;
+      if (composing) throw new MathClosePromptBlockedError();
+
+      const wasEditing = editing;
+      const wasBlurPending = blurPending;
+      const source = dom.querySelector(".math-block-editor");
+      const needsClose = wasEditing || wasBlurPending || Boolean(source);
+      const needsCommit = needsClose || !sameMathContentAttrs(localContentAttrs(), acceptedAttrs);
+      if (!needsCommit) return;
+
+      const previousRaw = raw;
+      const previousClosePromptFinalized = closePromptFinalized;
+      closePromptFinalized = true;
+      if (needsClose) markPendingEditChanged();
+      raw = tex === originalTex ? raw : "";
+      blurPending = false;
+      editing = false;
+      if (!updateAttrs({ tex, raw, editing: false }, flushRequest)) {
+        raw = previousRaw;
+        editing = wasEditing;
+        blurPending = wasBlurPending;
+        closePromptFinalized = previousClosePromptFinalized;
+        throw editConflict ?? new MathEditConflictError();
+      }
+      if (needsClose) renderDisplay();
     },
   };
-  const unregisterPendingEdit = registerPendingMathEdit(editor, pendingEdit);
+  const pendingRegistration = registerPendingMathEdit(editor, pendingEdit);
+  const unregisterPendingEdit = pendingRegistration.unregister;
+  markPendingEditChanged = pendingRegistration.markChanged;
+  markPendingInputChanged = pendingRegistration.markInputChanged;
 
   const renderDisplay = () => {
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     displayRendered = true;
     suggest?.destroy();
     suggest = null;
@@ -732,11 +1443,47 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
   };
 
   const renderPlaceholder = () => {
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     dom.className = "math-node math-node-block math-node-pending";
     dom.textContent = tex;
   };
 
+  const commitAfterBlur = (textarea: HTMLTextAreaElement) => {
+    if (closePromptFinalized) return;
+    const activeElement = document.activeElement;
+    const decision = resolveMathBlurDecision({
+      composing,
+      blurPending,
+      sourceConnected: textarea.isConnected,
+      activeInside: activeElement === textarea || dom.contains(activeElement),
+    });
+    if (destroyed || decision === "defer-composition" || decision === "wait-source") return;
+    if (decision === "keep-editing") {
+      if (blurPending) markPendingEditChanged();
+      blurPending = false;
+      return;
+    }
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
+    if (!editing) return;
+    markPendingEditChanged();
+    editing = false;
+    raw = tex === originalTex ? raw : "";
+    if (!updateAttrs({ tex, raw, editing: false })) {
+      markPendingEditChanged();
+      editing = true;
+      if (!blurPending) markPendingEditChanged();
+      blurPending = true;
+      return;
+    }
+    if (tex.trim()) renderDisplay();
+  };
+
   const renderEditor = () => {
+    closePromptFinalized = false;
+    if (blurPending) markPendingEditChanged();
+    blurPending = false;
     dom.innerHTML = "";
     dom.className = "math-node math-node-block math-node-block-editing";
 
@@ -776,7 +1523,12 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     };
 
     const refresh = () => {
-      tex = textarea.value;
+      if (destroyed) return;
+      if (textarea.value !== tex) {
+        tex = textarea.value;
+        markPendingEditChanged();
+        markPendingInputChanged();
+      }
       textarea.rows = Math.max(2, tex.split(/\r?\n/).length);
       renderKatex(body, tex, true, "公式预览", {
         delimiter,
@@ -784,7 +1536,7 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
         evaluation: evaluateEditorMathAt(editor, getPos, tex, delimiter, true),
       });
       installEditingTools();
-      suggest?.sync();
+      if (!composing) suggest?.sync();
       syncOverlayPosition();
     };
 
@@ -793,6 +1545,10 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       anchor: textarea,
       getValue: () => textarea.value,
       setValue: (value) => {
+        if (textarea.value !== value) {
+          markPendingEditChanged();
+          markPendingInputChanged();
+        }
         textarea.value = value;
         tex = value;
       },
@@ -806,14 +1562,21 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     });
 
     textarea.addEventListener("input", refresh);
-    textarea.addEventListener("compositionstart", () => { composing = true; });
+    textarea.addEventListener("compositionstart", () => {
+      if (!composing) markPendingEditChanged();
+      composing = true;
+      suggest?.close();
+    });
     textarea.addEventListener("compositionend", () => {
+      if (destroyed) return;
+      if (composing) markPendingEditChanged();
       composing = false;
-      for (const resolve of compositionWaiters) resolve();
-      compositionWaiters.clear();
       refresh();
+      resolveCompositionWaiters();
+      if (blurPending) window.setTimeout(() => commitAfterBlur(textarea), 0);
     });
     textarea.addEventListener("keydown", (event) => {
+      if (composing || isMathCompositionKey(event)) return;
       if (suggest?.handleKeyDown(event)) return;
       if (event.key === "Backspace" && !tex.trim() && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
         event.preventDefault();
@@ -841,13 +1604,13 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       }
     });
     textarea.addEventListener("blur", () => {
+      if (closePromptFinalized) return;
+      if (!blurPending) markPendingEditChanged();
+      blurPending = true;
       window.setTimeout(() => suggest?.close(), 120);
       window.setTimeout(() => {
-        if (!textarea.isConnected || document.activeElement === textarea || dom.contains(document.activeElement)) return;
-        editing = false;
-        raw = tex === originalTex ? raw : "";
-        updateAttrs({ tex, raw, editing: false });
-        if (tex.trim()) renderDisplay();
+        if (destroyed) return;
+        commitAfterBlur(textarea);
       }, 0);
     });
 
@@ -878,6 +1641,8 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
       return;
     }
     event.preventDefault();
+    closePromptFinalized = false;
+    markPendingEditChanged();
     editing = true;
     renderEditor();
   });
@@ -896,31 +1661,74 @@ function createBlockMathView(attrs: MathAttrs, editor: any, getPos: NodeViewPosi
     update(nextNode: any) {
       if (nextNode.type.name !== "blockMath") return false;
       const nextEditing = Boolean(nextNode.attrs.editing) || !nextNode.attrs.tex;
-      tex = nextNode.attrs.tex || "";
-      delimiter = nextNode.attrs.delimiter || "display-dollar";
-      raw = nextNode.attrs.raw || "";
-      originalTex = nextNode.attrs.originalTex ?? tex;
-      if (editing && dom.querySelector(".math-block-editor")) return true;
+      const incomingAttrs = readMathContentAttrs({
+        ...(nextNode.attrs as MathAttrs),
+        delimiter: nextNode.attrs.delimiter || "display-dollar",
+        displayMode: true,
+      });
+      const localAttrs = localContentAttrs();
+      const decision = resolveMathContentUpdate({
+        editing: editing && Boolean(dom.querySelector(".math-block-editor")),
+        local: localAttrs,
+        accepted: acceptedAttrs,
+        incoming: incomingAttrs,
+      });
+      if (decision === "preserve-local") {
+        markPendingEditChanged();
+        acceptedNode = nextNode;
+        return true;
+      }
+      if (decision === "ack-local") {
+        acceptNode(nextNode);
+        return true;
+      }
+      if (decision === "conflict") {
+        setEditConflict(new MathEditConflictError("公式编辑内容与文档更新冲突"));
+        return true;
+      }
+      if (decision === "accept-incoming") {
+        acceptNode(nextNode);
+      }
       editing = nextEditing;
       editing ? renderEditor() : displayRendered ? renderDisplay() : renderPlaceholder();
       return true;
     },
     selectNode() {
       if (editing) return;
+      closePromptFinalized = false;
+      markPendingEditChanged();
       editing = true;
       renderEditor();
     },
     deselectNode() {
-      if (!editing || !tex.trim()) return;
+      if (!editing) return;
+      if (composing) {
+        if (!blurPending) markPendingEditChanged();
+        blurPending = true;
+        return;
+      }
+      if (!tex.trim()) return;
+      markPendingEditChanged();
       editing = false;
-      updateAttrs({ editing: false });
+      if (!updateAttrs({ editing: false })) {
+        markPendingEditChanged();
+        editing = true;
+        return;
+      }
       renderDisplay();
     },
     destroy() {
+      const hadPending = pendingEdit.hasPending();
+      const position = readNodeViewPosition(getPos);
+      if (position !== null) lastKnownPosition = position;
+      destroyed = true;
       suggest?.destroy();
-      for (const resolve of compositionWaiters) resolve();
-      compositionWaiters.clear();
-      unregisterPendingEdit();
+      if (hadPending) {
+        setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+      } else {
+        unregisterPendingEdit();
+      }
+      rejectCompositionWaiters(editConflict ?? new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
       stopVisibility();
       stopRefresh();
     },

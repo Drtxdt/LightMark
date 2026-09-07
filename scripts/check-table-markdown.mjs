@@ -26,10 +26,20 @@ try {
 
   assert.equal(
     markdownPipeRowToTableHtml("|xxx|xxx|"),
-    "<table><tbody><tr><td><p>xxx</p></td><td><p>xxx</p></td></tr><tr><td><p></p></td><td><p></p></td></tr></tbody></table>",
+    "<table><thead><tr><th><p>xxx</p></th><th><p>xxx</p></th></tr></thead><tbody><tr><td><p></p></td><td><p></p></td></tr></tbody></table>",
   );
   assert.equal(markdownPipeRowToTableHtml("normal | text"), null);
-  assert.equal(markdownPipeRowToTableHtml("| one | two | three |"), "<table><tbody><tr><td><p>one</p></td><td><p>two</p></td><td><p>three</p></td></tr><tr><td><p></p></td><td><p></p></td><td><p></p></td></tr></tbody></table>");
+  assert.equal(markdownPipeRowToTableHtml("| one | two | three |"), "<table><thead><tr><th><p>one</p></th><th><p>two</p></th><th><p>three</p></th></tr></thead><tbody><tr><td><p></p></td><td><p></p></td><td><p></p></td></tr></tbody></table>");
+  assert.equal(markdownPipeRowToTableHtml("| --- | --- |"), null, "a delimiter row is not a data-entry header");
+  assert.equal(markdownPipeRowToTableHtml("| | |"), null, "an empty row is not a table insertion");
+  assert.equal(
+    markdownPipeRowToTableHtml("  | name | `a|b` |  "),
+    "<table><thead><tr><th><p>name</p></th><th><p>`a|b`</p></th></tr></thead><tbody><tr><td><p></p></td><td><p></p></td></tr></tbody></table>",
+  );
+  assert.equal(
+    markdownPipeRowToTableHtml("| <b> & \" | value |"),
+    `<table><thead><tr><th><p>&lt;b&gt; &amp; &quot;</p></th><th><p>value</p></th></tr></thead><tbody><tr><td><p></p></td><td><p></p></td></tr></tbody></table>`,
+  );
 
   console.log("table markdown checks passed");
 } finally {

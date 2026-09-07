@@ -626,6 +626,8 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
   let items: LatexSuggestion[] = [];
   let activeIndex = 0;
   let range: { from: number; to: number } | null = null;
+  let destroyed = false;
+  let syncTimer: number | null = null;
 
   const ensurePanel = () => {
     if (panel) return panel;
@@ -638,6 +640,10 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
   };
 
   const close = () => {
+    if (syncTimer !== null) {
+      window.clearTimeout(syncTimer);
+      syncTimer = null;
+    }
     panel?.remove();
     panel = null;
     items = [];
@@ -673,6 +679,7 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
   };
 
   const sync = () => {
+    if (destroyed) return;
     const value = target.getValue();
     const caret = target.getCaret();
     const before = value.slice(0, caret);
@@ -720,6 +727,7 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
   };
 
   const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.isComposing || event.key === "Process" || event.keyCode === 229) return false;
     if (!panel || items.length === 0) return false;
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -741,16 +749,25 @@ export function createLatexSuggestController(target: LatexSuggestTarget): LatexS
       return true;
     }
     if (event.key === " " || event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      window.setTimeout(sync, 0);
+      if (syncTimer !== null) window.clearTimeout(syncTimer);
+      syncTimer = window.setTimeout(() => {
+        syncTimer = null;
+        if (!destroyed) sync();
+      }, 0);
     }
     return false;
+  };
+
+  const destroy = () => {
+    destroyed = true;
+    close();
   };
 
   return {
     sync,
     handleKeyDown,
     close,
-    destroy: close,
+    destroy,
   };
 }
 
@@ -771,10 +788,25 @@ export function getContentEditableCaret(element: HTMLElement) {
   return before.toString().length;
 }
 
-export function setContentEditableCaret(element: HTMLElement, position: number) {
-  const range = document.createRange();
+export function setContentEditableCaret(element: HTMLElement, position: number, extend = false) {
   const selection = window.getSelection();
   const target = findTextPosition(element, position);
+  if (extend && selection && selection.rangeCount > 0) {
+    const current = selection.getRangeAt(0);
+    const anchorNode = selection.anchorNode ?? current.startContainer;
+    const anchorOffset = selection.anchorNode ? selection.anchorOffset : current.startOffset;
+    if (anchorNode && element.contains(anchorNode)) {
+      if (typeof selection.extend === "function") {
+        selection.extend(target.node, target.offset);
+        return;
+      }
+      if (typeof selection.setBaseAndExtent === "function") {
+        selection.setBaseAndExtent(anchorNode, anchorOffset, target.node, target.offset);
+        return;
+      }
+    }
+  }
+  const range = document.createRange();
   range.setStart(target.node, target.offset);
   range.collapse(true);
   selection?.removeAllRanges();

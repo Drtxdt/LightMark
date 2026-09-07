@@ -472,6 +472,101 @@ pub struct LargeOutlineItem {
     pub line: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LargeCoordinateSpace {
+    Utf16CodeUnits,
+}
+
+impl Default for LargeCoordinateSpace {
+    fn default() -> Self {
+        Self::Utf16CodeUnits
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LargeCloseDisposition {
+    Saved,
+    Discard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFileFingerprint {
+    pub size_bytes: u64,
+    pub modified_millis: Option<u64>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFileError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub actual_revision: Option<u64>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub recovery_artifact: Option<String>,
+    #[serde(default)]
+    pub cleanup_warning: Option<String>,
+}
+
+impl LargeFileError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            session_id: None,
+            expected_revision: None,
+            actual_revision: None,
+            path: None,
+            recovery_artifact: None,
+            cleanup_warning: None,
+        }
+    }
+
+    pub fn with_revision(mut self, expected: u64, actual: u64) -> Self {
+        self.expected_revision = Some(expected);
+        self.actual_revision = Some(actual);
+        self
+    }
+
+    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_recovery_artifact(mut self, path: impl Into<String>) -> Self {
+        self.recovery_artifact = Some(path.into());
+        self
+    }
+
+    pub fn with_cleanup_warning(mut self, warning: impl Into<String>) -> Self {
+        self.cleanup_warning = Some(warning.into());
+        self
+    }
+}
+
+impl std::fmt::Display for LargeFileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for LargeFileError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LargeFileSession {
@@ -480,6 +575,12 @@ pub struct LargeFileSession {
     pub size_bytes: u64,
     pub total_lines: usize,
     pub outline: Vec<LargeOutlineItem>,
+    pub revision: u64,
+    pub saved_revision: u64,
+    pub pending_edit_count: usize,
+    pub base_fingerprint: LargeFileFingerprint,
+    pub disk_fingerprint: LargeFileFingerprint,
+    pub coordinate_space: LargeCoordinateSpace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,6 +591,8 @@ pub struct FileChunk {
     pub end_line: usize,
     pub total_lines: usize,
     pub text: String,
+    pub revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +610,41 @@ pub struct TextEdit {
 pub struct DirtyState {
     pub is_dirty: bool,
     pub pending_edit_count: usize,
+    pub revision: u64,
+    pub saved_revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeSaveReceipt {
+    pub session_id: String,
+    pub requested_revision: u64,
+    pub saved_revision: u64,
+    pub current_revision: u64,
+    pub saved: bool,
+    pub is_dirty: bool,
+    pub pending_edit_count: usize,
+    pub path: String,
+    pub base_fingerprint: LargeFileFingerprint,
+    pub disk_fingerprint: LargeFileFingerprint,
+    pub coordinate_space: LargeCoordinateSpace,
+    #[serde(default)]
+    pub recovery_artifact: Option<String>,
+    #[serde(default)]
+    pub cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeCloseReceipt {
+    pub session_id: String,
+    pub closed: bool,
+    pub cleanup_completed: bool,
+    #[serde(default)]
+    pub recovery_artifact: Option<String>,
+    #[serde(default)]
+    pub cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +723,8 @@ pub struct LargeFindResult {
     pub total: usize,
     pub truncated: bool,
     pub error: String,
+    pub revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
 }
 
 impl Default for AppConfig {

@@ -233,11 +233,11 @@ function cloneSettings(settings: AppSettings): AppSettings {
         <button
           v-for="section in sections"
           :key="section.id"
-          class="mb-1 block w-full rounded-md px-2.5 py-2 text-left transition-colors"
+          class="settings-section-button mb-1 block w-full rounded-md px-2.5 py-2 text-left transition-colors"
           :class="
             activeSection === section.id
-              ? 'bg-paper-50 text-ink-900 shadow-sm dark:bg-paper-950 dark:text-ink-100'
-              : 'text-ink-500 hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100'
+              ? 'settings-section-button-active shadow-sm'
+              : ''
           "
           @click="activeSection = section.id"
         >
@@ -634,6 +634,15 @@ function cloneSettings(settings: AppSettings): AppSettings {
 }
 
 .lm-settings-panel > div > main { background: var(--lm-surface); }
+
+.settings-section-button { color: var(--lm-ink-muted); }
+.settings-section-button:hover { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.settings-section-button-active { background: var(--lm-accent-soft); color: var(--lm-ink); }
+.settings-section-button:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--lm-focus);
+}
 
 .settings-close {
   display: grid;

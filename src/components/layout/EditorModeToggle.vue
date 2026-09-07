@@ -83,14 +83,12 @@ function handleKeydown(event: KeyboardEvent) {
   --toggle-width: 92px;
   --toggle-height: 30px;
   --toggle-padding: 3px;
-  --toggle-track: rgba(245, 243, 238, 0.92);
-  --toggle-border: rgba(213, 207, 196, 0.82);
-  --toggle-ink: #5f594f;
-  --toggle-muted: #8c8579;
-  --toggle-paper: linear-gradient(145deg, #ffffff 0%, #f7f3ea 76%);
-  --toggle-paper-shadow:
-    0 5px 14px rgba(74, 63, 48, 0.13),
-    inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  --toggle-track: var(--lm-surface-soft);
+  --toggle-border: var(--lm-border);
+  --toggle-ink: var(--lm-ink);
+  --toggle-muted: var(--lm-ink-muted);
+  --toggle-paper: linear-gradient(145deg, var(--lm-surface-raised) 0%, var(--lm-surface-soft) 76%);
+  --toggle-paper-shadow: var(--lm-shadow-sm);
   position: relative;
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
@@ -102,20 +100,21 @@ function handleKeydown(event: KeyboardEvent) {
   border: 1px solid var(--toggle-border);
   border-radius: 999px;
   background:
-    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.8), transparent 42%),
+    radial-gradient(circle at 24% 0%, color-mix(in srgb, var(--lm-surface) 82%, transparent), transparent 42%),
     var(--toggle-track);
   box-shadow:
-    inset 0 1px 2px rgba(74, 63, 48, 0.08),
-    0 1px 2px rgba(74, 63, 48, 0.05);
+    inset 0 1px 2px color-mix(in srgb, var(--lm-ink) 14%, transparent),
+    var(--lm-shadow-sm);
   color: var(--toggle-muted);
   isolation: isolate;
 }
 
 .editor-mode-toggle:focus-visible {
-  outline: none;
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
   box-shadow:
-    inset 0 1px 2px rgba(74, 63, 48, 0.08),
-    0 0 0 3px rgba(143, 107, 61, 0.22);
+    inset 0 1px 2px color-mix(in srgb, var(--lm-ink) 14%, transparent),
+    0 0 0 4px var(--lm-focus);
 }
 
 .editor-mode-toggle-slider {
@@ -123,7 +122,7 @@ function handleKeydown(event: KeyboardEvent) {
   inset-block: var(--toggle-padding);
   inset-inline-start: var(--toggle-padding);
   inline-size: calc((var(--toggle-width) - var(--toggle-padding) * 2) / 2);
-  border: 1px solid rgba(213, 207, 196, 0.68);
+  border: 1px solid var(--lm-border);
   border-radius: 999px;
   background: var(--toggle-paper);
   box-shadow: var(--toggle-paper-shadow);
@@ -150,7 +149,7 @@ function handleKeydown(event: KeyboardEvent) {
   width: 20px;
   height: 1px;
   border-radius: 999px;
-  background: rgba(143, 107, 61, 0.2);
+  background: color-mix(in srgb, var(--lm-accent) 24%, transparent);
 }
 
 .line-a {
@@ -168,8 +167,12 @@ function handleKeydown(event: KeyboardEvent) {
   width: 8px;
   height: 8px;
   border-radius: 0 5px 0 5px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(228, 220, 207, 0.72));
-  box-shadow: -1px 1px 2px rgba(74, 63, 48, 0.1);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--lm-surface) 92%, transparent),
+    color-mix(in srgb, var(--lm-border) 72%, transparent)
+  );
+  box-shadow: -1px 1px 2px color-mix(in srgb, var(--lm-ink) 12%, transparent);
 }
 
 .editor-mode-toggle-option {
@@ -201,41 +204,43 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 .editor-mode-toggle.source-disabled {
-  --toggle-track: rgba(245, 243, 238, 0.62);
+  --toggle-track: color-mix(in srgb, var(--lm-surface-soft) 62%, transparent);
 }
 
 :global(.dark) .editor-mode-toggle,
 .editor-mode-toggle-dark {
-  --toggle-track: rgba(38, 36, 33, 0.86);
-  --toggle-border: rgba(89, 84, 76, 0.78);
-  --toggle-ink: #f1eadf;
-  --toggle-muted: #aaa196;
-  --toggle-paper: linear-gradient(145deg, #36322d 0%, #26231f 78%);
-  --toggle-paper-shadow:
-    0 6px 14px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --toggle-track: color-mix(in srgb, var(--lm-surface-soft) 88%, var(--lm-surface));
+  --toggle-border: var(--lm-border-strong);
+  --toggle-ink: var(--lm-ink);
+  --toggle-muted: var(--lm-ink-muted);
+  --toggle-paper: linear-gradient(145deg, var(--lm-surface-raised) 0%, var(--lm-surface) 78%);
+  --toggle-paper-shadow: var(--lm-shadow-sm);
   background:
-    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.08), transparent 42%),
+    radial-gradient(circle at 24% 0%, color-mix(in srgb, var(--lm-surface) 26%, transparent), transparent 42%),
     var(--toggle-track);
   box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.32),
-    0 1px 2px rgba(0, 0, 0, 0.18);
+    inset 0 1px 2px color-mix(in srgb, var(--lm-ink) 22%, transparent),
+    var(--lm-shadow-sm);
 }
 
 :global(.dark) .editor-mode-toggle-slider,
 .editor-mode-toggle-dark .editor-mode-toggle-slider {
-  border-color: rgba(111, 103, 92, 0.7);
+  border-color: var(--lm-border-strong);
 }
 
 :global(.dark) .page-line,
 .editor-mode-toggle-dark .page-line {
-  background: rgba(201, 166, 109, 0.24);
+  background: color-mix(in srgb, var(--lm-accent) 30%, transparent);
 }
 
 :global(.dark) .page-fold,
 .editor-mode-toggle-dark .page-fold {
-  background: linear-gradient(135deg, rgba(75, 68, 59, 0.95), rgba(35, 31, 27, 0.9));
-  box-shadow: -1px 1px 2px rgba(0, 0, 0, 0.28);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--lm-surface-raised) 82%, transparent),
+    color-mix(in srgb, var(--lm-surface) 84%, var(--lm-border))
+  );
+  box-shadow: -1px 1px 2px color-mix(in srgb, var(--lm-ink) 24%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {

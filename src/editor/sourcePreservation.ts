@@ -23,7 +23,32 @@ export type SourceEnvelope = {
 export type PreservedSourceBlock = {
   source: string;
   separator: string;
+  synthetic?: "trailing-paragraph";
+  generated?: "footnotes";
 };
+
+export type PreservedSourceBlockAlignment = {
+  blocks: readonly PreservedSourceBlock[];
+  syntheticTailOmitted: boolean;
+};
+
+export function sourceBlocksForNodeCount(
+  sourceBlocks: readonly PreservedSourceBlock[],
+  nodeCount: number,
+): PreservedSourceBlockAlignment | null {
+  if (sourceBlocks.length === nodeCount) return { blocks: sourceBlocks, syntheticTailOmitted: false };
+  const syntheticTailIndex = sourceBlocks.findIndex((block) => block.synthetic === "trailing-paragraph");
+  if (
+    sourceBlocks.length === nodeCount + 1 &&
+    syntheticTailIndex === sourceBlocks.length - 1
+  ) {
+    return {
+      blocks: sourceBlocks.slice(0, syntheticTailIndex),
+      syntheticTailOmitted: true,
+    };
+  }
+  return null;
+}
 
 export function combinePreservedSourceBlocks(
   originalNodes: readonly object[],
@@ -32,6 +57,7 @@ export function combinePreservedSourceBlocks(
   serializedCurrent: readonly string[],
   prefix: string,
   lineEnding: string,
+  syntheticTailOmitted = false,
 ) {
   if (currentNodes.length !== serializedCurrent.length || originalNodes.length !== originalBlocks.length) {
     throw new SourcePatchConflictError("源码块映射与文档模型不一致。");
@@ -46,18 +72,50 @@ export function combinePreservedSourceBlocks(
     lastOld = old;
   });
 
+  // markdownTopLevelSourceBlocks may include the editor's synthetic trailing
+  // paragraph as a zero-width block. It is a node identity anchor, not a
+  // paragraph separator. Keep an edited final block adjacent to it at EOF.
+  const syntheticTailIndex =
+    originalBlocks.length > 0 &&
+    originalBlocks[originalBlocks.length - 1].synthetic === "trailing-paragraph"
+      ? originalBlocks.length - 1
+      : -1;
+  const generatedFootnoteTailIndex = originalBlocks.findIndex((block, index) =>
+    block.generated === "footnotes" &&
+    block.source === "" &&
+    block.separator === "" &&
+    (syntheticTailIndex === index + 1 || (syntheticTailOmitted && index === originalBlocks.length - 1))
+  );
+
   let result = prefix;
   let oldCursor = 0;
   let currentCursor = 0;
   const appendChangedGroup = (oldEnd: number, currentEnd: number, atEnd = false) => {
     const replacements = serializedCurrent.slice(currentCursor, currentEnd).filter(Boolean);
     if (replacements.length) {
+      if (oldCursor > 0 && oldCursor === originalBlocks.length) {
+        const trailingLineEndings = result.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? "";
+        const trailingLineEndingCount = trailingLineEndings
+          ? trailingLineEndings.match(/\r\n|\r|\n/g)?.length ?? 0
+          : 0;
+        if (trailingLineEndingCount < 2) {
+          result += lineEnding.repeat(2 - trailingLineEndingCount);
+        }
+      }
       result += replacements.join(`${lineEnding}${lineEnding}`);
       const lastReplaced = oldEnd > oldCursor ? originalBlocks[oldEnd - 1] : null;
       const preservedSeparator = lastReplaced
         ? `${lastReplaced.source.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? ""}${lastReplaced.separator}`
         : "";
-      result += preservedSeparator || (atEnd ? "" : `${lineEnding}${lineEnding}`);
+      const endsAtSyntheticTail =
+        syntheticTailIndex >= 0 &&
+        oldEnd === syntheticTailIndex &&
+        currentEnd === currentNodes.length - 1;
+      const endsAtGeneratedFootnoteTail =
+        generatedFootnoteTailIndex >= 0 &&
+        oldEnd === generatedFootnoteTailIndex &&
+        oldIndex.get(currentNodes[currentEnd]) === oldEnd;
+      result += preservedSeparator || (atEnd || endsAtSyntheticTail || endsAtGeneratedFootnoteTail ? "" : `${lineEnding}${lineEnding}`);
     }
     oldCursor = oldEnd;
     currentCursor = currentEnd;
