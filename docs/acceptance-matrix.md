@@ -8,9 +8,9 @@
 | --- | --- |
 | 基线提交 | `d0bf357` |
 | 首轮修复工作树 | 未提交 |
-| 操作系统 | Windows（待记录具体版本） |
-| CPU / 内存 | 未验证 |
-| WebView2 | 未验证 |
+| 操作系统 | Windows 11 家庭中文版，10.0.26200（Build 26200） |
+| CPU / 内存 | Intel Core i9-13900HX / 31.8 GiB 可见内存 |
+| WebView2 | 原生运行时版本未能从当前注册表视图读取；Edge CDP 行为回归已通过 |
 | 显示缩放 | 未验证 |
 | 当前可执行文件 | `src-tauri/target/release/lightmark.exe` |
 | 自动化基线 | 前端生产构建、29 项检查、29 项 Rust 测试通过 |
@@ -60,3 +60,5 @@
 | 2026-09-06 | 当前未提交构建 | `pnpm tauri build --bundles nsis` | 通过，生成 `src-tauri/target/release/bundle/nsis/LightMark_0.1.0_x64-setup.exe` |
 | 2026-09-06 | 当前未提交构建 | `pnpm tauri build --bundles msi` | 失败：本机 WiX 3.14 `light.exe` 链接阶段失败；应用本体与 NSIS 不受影响 |
 | 2026-09-06 | 当前未提交构建 | Windows 原生交互自动化 | 未验证：当前任务未提供原生应用控制面 |
+| 2026-09-07 | 当前未提交构建 | 最新 release 应用与 NSIS 安装器重建 | 通过；安装器 SHA-256 `5384187D443502B27C7EE3E82F8087BD89F60BC7804046506F70C55D9DA9E4A6` |
+| 2026-09-07 | 当前未提交构建 | Computer Use 原生控制探测 | 未验证：控制面返回空应用清单，且运行时不提供原生 `getApp`；未将 IME、缩放或 WebView2 项误标为通过 |
