@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { compileTypeScriptModuleGraph } from './transpile-module-graph.mjs';
+import { CommandManager, commands } from '@tiptap/core';
+import { Schema } from '@tiptap/pm/model';
+import { EditorState } from '@tiptap/pm/state';
+const temp = fs.mkdtempSync(path.resolve('node_modules/.lightmark-block-insert-'));
+const { insertContentAt, command } = commands;
+try {
+  const { sourceBlockInsertionCandidates } = await import(pathToFileURL(compileTypeScriptModuleGraph(path.resolve('src/editor/sourceBlockInsertionCandidates.ts'), temp)).href);
+  const image = '![x](assets/x.png)';
+  const candidates = (source, at) => sourceBlockInsertionCandidates(source, at, at, image).map(candidate => candidate.markdown);
+  assert.ok(candidates('__word__   tail', 4).includes(`__wo__\n\n${image}\n\n__rd__   tail`));
+  assert.ok(candidates('[word](x.png "keep title")   tail', 3).includes(`[wo](x.png "keep title")\n\n${image}\n\n[rd](x.png "keep title")   tail`));
+  assert.ok(candidates('## __word__   tail', 7).includes(`## __wo__\n\n${image}\n\n## __rd__   tail`));
+  assert.ok(candidates('__word__   tail', 2).includes(`${image}\n\n__word__   tail`));
+  assert.ok(candidates('__word__   tail', 6).includes(`__word__\n\n${image}\n\n   tail`));
+  assert.ok(candidates('\uFEFFbefore\r\n', 0).every(candidate => candidate.startsWith('\uFEFF')));
+  assert.ok(candidates('__word__\r\n', 4).includes(`__wo__\r\n\r\n${image}\r\n\r\n__rd__\r\n`));
+  assert.ok(sourceBlockInsertionCandidates('__word__ tail', 4, 10, image).some(candidate => candidate.markdown === `__wo__\n\n${image}\n\nail`), 'a selection leaving a mark only closes its retained prefix');
+  const schema = new Schema({ nodes: { doc: { content: 'block+' }, paragraph: { content: 'text*', group: 'block' }, text: {}, image: { group: 'block', atom: true, attrs: { src: {} } } }, marks: { bold: {} } });
+  const state = EditorState.create({ doc: schema.nodes.doc.create(null, schema.nodes.paragraph.create(null, schema.text('word', [schema.marks.bold.create()]))) });
+  let dispatched = 0, staged;
+  const editor = { state, schema, view: { dispatch() { dispatched++; } }, extensionManager: { commands: { insertContentAt, command } }, options: { parseOptions: {}, enableContentCheck: false, emitContentError: false } };
+  new CommandManager({ editor, state }).chain().insertContentAt({ from: 3, to: 3 }, [{ type: 'image', attrs: { src: 'x.png' } }], { updateSelection: false }).command(({ tr }) => { staged = tr; return true; }).run();
+  assert.equal(dispatched, 0, 'custom-state staging must never dispatch before source-model proof');
+  assert.equal(state.doc.textContent, 'word'); assert.equal(staged.doc.childCount, 3);
+  assert.equal(staged.doc.firstChild.textContent, 'wo'); assert.equal(staged.doc.lastChild.textContent, 'rd');
+  console.log('Block insertion candidates preserve original mark/link/heading wrappers, titles and BOM; final model proof remains required.');
+} finally { fs.rmSync(temp, { recursive: true, force: true }); }

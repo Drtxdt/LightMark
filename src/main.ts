@@ -24,6 +24,16 @@ async function bootstrap() {
   // async component request. Editor readiness is recorded by each editor.
   recordStartupStage("shell");
   createApp(App).mount("#app");
+  if (import.meta.env.VITE_LIGHTMARK_PERF_QA === "1") {
+    const probeMode = (import.meta.env as ImportMetaEnv & Record<string, string | undefined>).VITE_LIGHTMARK_QA_PROBE_MODE;
+    if (probeMode === "wp10-desktop-content-boundary") {
+      const { installDesktopContentBoundaryQaBridge } = await import("./desktopContentBoundaryQaBridge");
+      installDesktopContentBoundaryQaBridge();
+    } else {
+      const { installPerformanceQaBridge } = await import("./performanceQaBridge");
+      installPerformanceQaBridge();
+    }
+  }
 }
 
 void bootstrap();

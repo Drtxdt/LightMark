@@ -13,15 +13,16 @@ export interface WorkspaceIndexStatus {
 export interface WorkspaceQueryResponse<T> {
   generation: number;
   documentRevision?: number;
+  documentEpoch?: number;
   data: T;
 }
 
 export const workspaceIndexClient = {
   open: (root: string) => invoke<WorkspaceIndexStatus>("workspace_index_open", { root }),
   status: () => invoke<WorkspaceIndexStatus>("workspace_index_status"),
-  updateOpenDocument: (path: string, revision: number, markdown: string) =>
-    invoke<WorkspaceIndexStatus>("workspace_index_update_open_document", { path, revision, markdown }),
-  releaseOpenDocument: (path: string) => invoke<void>("workspace_index_release_open_document", { path }),
+  updateOpenDocument: (path: string, epoch: number, revision: number, markdown: string) =>
+    invoke<WorkspaceIndexStatus>("workspace_index_update_open_document", { path, epoch, revision, markdown }),
+  releaseOpenDocument: (path: string, epoch: number, revision: number) => invoke<void>("workspace_index_release_open_document", { path, epoch, revision }),
   tags: () => invoke<WorkspaceQueryResponse<KnowledgeTagItem[]>>("workspace_query_tags"),
   backlinks: (path: string) => invoke<WorkspaceQueryResponse<BacklinkItem[]>>("workspace_query_backlinks", { path }),
   mentions: (path: string) => invoke<WorkspaceQueryResponse<UnlinkedMentionItem[]>>("workspace_query_mentions", { path }),

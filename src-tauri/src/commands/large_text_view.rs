@@ -40,6 +40,8 @@ pub trait ImmutableBase {
     }
 
     fn line_spans(&self) -> &[BaseLine];
+    fn sparse_segments(&self) -> Option<&[super::persistent_text::BaseSegment]> { None }
+    fn delta_directory(&self) -> Option<std::path::PathBuf> { None }
     fn read_span(&self, span: ByteSpan) -> Result<Vec<u8>, String>;
     fn write_span(&self, span: ByteSpan, writer: &mut dyn Write) -> Result<(), String>;
 }

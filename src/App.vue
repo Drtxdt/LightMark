@@ -119,7 +119,7 @@ onMounted(async () => {
   );
   unbindSave = bindShortcut("ctrl+s", () => {
     saveCurrentFile().catch((error) => (appStore.statusMessage = String(error)));
-  });
+  }, { allowDuringComposition: true });
   unbindPalette = bindShortcut("ctrl+shift+p", () => {
     openCommandPalette();
   });

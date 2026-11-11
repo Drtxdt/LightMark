@@ -43,6 +43,7 @@ function focusQuery() {
 }
 
 function onQueryKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
   if (event.key === "Enter") {
     event.preventDefault();
     runFindCommand(event.shiftKey ? "previous" : "next");
@@ -136,7 +137,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 
 .find-input-wrap {
   display: flex;
-  min-width: 180px;
+  min-width: 0;
   flex: 0 1 280px;
   align-items: center;
   gap: 7px;
@@ -166,6 +167,11 @@ function onPanelKeydown(event: KeyboardEvent) {
   outline: none;
 }
 
+.find-input-wrap:focus-within {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+}
+
 .find-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -182,7 +188,7 @@ function onPanelKeydown(event: KeyboardEvent) {
 
 .find-count.error {
   min-width: 140px;
-  color: #b42318;
+  color: var(--lm-error);
 }
 
 .find-button,
@@ -220,11 +226,18 @@ function onPanelKeydown(event: KeyboardEvent) {
   color: var(--lm-ink);
 }
 
+.find-button:focus-visible,
+.find-toggle:focus-visible,
+.find-close:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+}
+
 .find-split {
   width: 1px;
   height: 16px;
   margin: 0 3px;
-  background: rgb(213 207 196 / 82%);
+  background: var(--lm-border-strong);
 }
 
 .find-close {
@@ -233,41 +246,16 @@ function onPanelKeydown(event: KeyboardEvent) {
   place-items: center;
 }
 
-:global(.dark) .find-panel {
-  border-bottom-color: var(--lm-border);
-  background: var(--lm-surface-soft);
+@container editor-pane (max-width: 959px) {
+  .find-panel { flex-wrap: wrap; }
+  .find-fields { flex-basis: 100%; }
+  .find-input-wrap { flex: 1 1 0; }
+  .find-actions { flex: 1 1 100%; flex-wrap: wrap; }
 }
-
-:global(.dark) .find-input-wrap {
-  border-color: var(--lm-border-strong);
-  background: var(--lm-surface-raised);
-}
-
-:global(.dark) .find-label,
-:global(.dark) .find-count {
-  color: var(--lm-ink-muted);
-}
-
-:global(.dark) .find-count.error {
-  color: #ffb4ab;
-}
-
-:global(.dark) .find-input {
-  color: var(--lm-ink);
-}
-
-:global(.dark) .find-button,
-:global(.dark) .find-toggle,
-:global(.dark) .find-close {
-  color: var(--lm-ink-soft);
-}
-
-:global(.dark) .find-button:hover,
-:global(.dark) .find-toggle:hover,
-:global(.dark) .find-close:hover,
-:global(.dark) .find-toggle.active {
-  border-color: var(--lm-border-strong);
-  background: var(--lm-accent-soft);
-  color: var(--lm-ink);
+@container editor-pane (max-width: 519px) {
+  .find-fields { flex-direction: column; }
+  .find-input-wrap, .find-input-wrap.replace { flex-basis: auto; }
+  .find-actions { row-gap: 6px; }
+  .find-count { flex-basis: 100%; }
 }
 </style>

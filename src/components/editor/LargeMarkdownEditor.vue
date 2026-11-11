@@ -1,686 +1,645 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
+import { EditorSelection, EditorState, Transaction } from "@codemirror/state";
+import { EditorView, keymap, lineNumbers } from "@codemirror/view";
+import { defaultKeymap, cursorCharLeft, cursorCharRight, selectCharLeft, selectCharRight, cursorLineUp, cursorLineDown, selectLineUp, selectLineDown } from "@codemirror/commands";
 import { invoke } from "@tauri-apps/api/core";
-import { appStore, applyLargeFileEdits, getPaneTab, readLargeFileChunk, updateLargeFileViewportLine } from "../../stores/appStore";
+import { appStore, applyLargeFileEdits, exportLargeFileRange, formatLargeTransactionEvidence, getPaneTab,
+  moveLargeFileHistory, readLargeFileRange, replaceLargeFileMatches, retryLargeFileEdits,
+  searchLargeFile, updateLargeFileViewportLine } from "../../stores/appStore";
+import { registerDocumentSession, type DocumentSessionAdapter, type PendingFlushOptions } from "../../editor/documentRuntime";
+import { createDocumentMutationTracker, type DocumentFlushHandle, type DocumentMutationTracker } from "../../editor/documentMutationTracker";
+import { LargeSessionStaleError } from "../../editor/largeOperationQueue";
+import { largeSessionBookmarks, largeSessionOpenedSize, releaseLargeSessionBookmarks, type LargeHistoryBookmark } from "../../editor/largeSourceBookmarks";
+import { parseSourceDocument, resetSourceLineEndings, serializeSourceDocument, sourceLineEndingsExtension, sourceLineEndingsField, sourceOffsetToRawOffset } from "../../editor/sourceLineEndings";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
-import type { CapturedEditorTarget, DirtyState, EditorPaneId, LargeFindMatch, LargeFindResult, LargeOutlineItem, TextEdit } from "../../types";
 import { renderMarkdownForEditor } from "../../utils/markdown";
 import { expandSnippet } from "../../utils/snippets";
-import {
-  clipboardPayloadFromDataTransfer,
-  prepareSmartPaste,
-  readClipboardPayload,
-  type PasteConversionResult,
-} from "../../utils/smartPaste";
+import { clipboardPayloadFromDataTransfer, prepareSmartPaste, readClipboardPayload, type PasteConversionResult } from "../../utils/smartPaste";
+import { LARGE_COPY_BYTES, LARGE_EDIT_BYTES, LARGE_PREVIEW_BYTES, LargeWindowCache,
+  advanceLargePosition, compareLargePosition, orderedLargeRange, replacementForRawWindow,
+  windowOffsetPosition, windowPositionOffset, safeLargeWindowOffset, type LargePosition } from "../../editor/largeSourceWindow";
+import { LargeSearchCoordinator } from '../../editor/largeSearchCoordinator';
+import type { LargeSourceRange } from "../../editor/largeSourceClient";
+import { cancelLargeSourceJob, largeSourceJobs, resolveLargeSourcePosition } from "../../editor/largeSourceClient";
+import type { CapturedEditorTarget, EditorPaneId, LargeFindMatch, LargeFindResult, TextEdit, TextFileWriteReceipt } from "../../types";
 
-type LineRecord = {
-  line: number;
-  text: string;
-};
-
-type MarkdownBlock = {
-  key: string;
-  startLine: number;
-  endLine: number;
-  lines: string[];
-  text: string;
-  html: string;
-};
-
-const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
-  paneId: "main",
-});
-
-const lineHeight = 28;
-const viewportBufferLines = 90;
-const reloadMarginLines = 32;
-const chunkLineCount = 420;
-const maxRenderCacheEntries = 800;
-const scroller = ref<HTMLElement | null>(null);
-const loadedLines = shallowRef<LineRecord[]>([]);
-const viewportStartLine = ref(0);
-const editingKey = ref("");
-const editingText = ref("");
+const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), { paneId: "main" });
+const host = ref<HTMLElement | null>(null);
 const loading = ref(false);
-const largeFindMatches = ref<LargeFindMatch[]>([]);
-const largeFindTruncated = ref(false);
-const loadedStartLine = ref(0);
-const loadedEndLine = ref(0);
-let activeRequestId = 0;
-let queuedStartLine: number | null = null;
-let scrollFrame = 0;
-let largeEditQueue: Promise<void> = Promise.resolve();
-const renderCache = new Map<string, string>();
-const findCommandListener = (event: Event) => {
-  void handleFindCommand(event as CustomEvent<string>);
-};
+const failed = ref("");
+const previewHtml = ref("");
+const previewReliable = ref(false);
+const jumpLine = ref(1);
+const jumpColumn = ref(1);
+const selectionLabel = ref("");
+const windowLabel = ref("");
+const tab = computed(() => getPaneTab(props.paneId));
+const largeFile = computed(() => tab.value?.documentMode === "large" ? tab.value.largeFile : null);
+const readOnly = computed(() => largeFile.value
+  ? largeSessionOpenedSize(largeFile.value.sessionId, largeFile.value.sizeBytes) > LARGE_EDIT_BYTES : false);
+const totalLines = computed(() => largeFile.value?.totalLines ?? 1);
+const backgroundJob = computed(() => largeSourceJobs.get(largeFile.value?.sessionId ?? ""));
+let view: EditorView | null = null;
+let windowRange: LargeSourceRange | null = null;
+let baseText = "";
+let baseRaw = "";
+let pendingVersion = 0;
+let submitting: Promise<void> | null = null;
+let submittedInputVersion = -1;
+let submitFlush: DocumentFlushHandle | undefined;
+let unregister: (() => void) | null = null;
+let tracker: DocumentMutationTracker | null = null;
+let replacingWindow = false;
+let requestGeneration = 0;
+let submitTimer: ReturnType<typeof setTimeout> | undefined;
+let compositionResolve: (() => void) | null = null;
+let compositionWait: Promise<void> | null = null;
+let logicalAnchor: LargePosition = { line: 0, column: 0 };
+let logicalHead: LargePosition = { line: 0, column: 0 };
+let extending = false;
+const cache = new LargeWindowCache<LargeSourceRange>();
+let ownerSession = "";
+let failedSubmission: { text: string; raw: string; edit: TextEdit } | null = null;
+let pendingGlobalPatch: { start: LargePosition; end: LargePosition; prefix: number; suffix: number } | null = null;
+let beforeInputSelection: { anchor: LargePosition; head: LargePosition } | null = null;
+let undoSelections: LargeHistoryBookmark[] = [];
+let redoSelections: LargeHistoryBookmark[] = [];
+let findMatches: LargeFindMatch[] = [];
+let findRevision = -1;
+let findFingerprint = "";
+const searchCoordinator = new LargeSearchCoordinator<LargeFindResult>();
+let navigationTail: Promise<void> = Promise.resolve();
+let queuedNavigation = 0;
 
-const largeFile = computed(() => appStore.largeFile);
-const totalLines = computed(() => largeFile.value?.totalLines ?? 0);
-const totalHeight = computed(() => Math.max(totalLines.value * lineHeight, 1));
-const spacerTop = computed(() => Math.max(firstLoadedLine.value * lineHeight, 0));
-const firstLoadedLine = computed(() => loadedLines.value[0]?.line ?? viewportStartLine.value);
-
-const blocks = computed(() => buildBlocks(loadedLines.value));
-
-watch(
-  () => largeFile.value?.sessionId,
-  () => {
-    activeRequestId += 1;
-    queuedStartLine = null;
-    loading.value = false;
-    loadedLines.value = [];
-    viewportStartLine.value = 0;
-    updateLargeFileViewportLine(props.paneId, 0);
-    loadedStartLine.value = 0;
-    loadedEndLine.value = 0;
-    editingKey.value = "";
-    renderCache.clear();
-    void loadAround(0);
-  },
-  { immediate: true },
-);
-
-onMounted(() => {
-  window.addEventListener("lightmark:jump-line", handleJumpLine as EventListener);
-  window.addEventListener("lightmark:find-command", findCommandListener);
-  window.addEventListener("lightmark:capture-editor-target", captureLargeEditorTarget as EventListener);
-  window.addEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor as EventListener);
-});
-
-onUnmounted(() => {
-  window.removeEventListener("lightmark:jump-line", handleJumpLine as EventListener);
-  window.removeEventListener("lightmark:find-command", findCommandListener);
-  window.removeEventListener("lightmark:capture-editor-target", captureLargeEditorTarget as EventListener);
-  window.removeEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor as EventListener);
-  if (scrollFrame) cancelAnimationFrame(scrollFrame);
-});
-
-function onScroll() {
-  if (scrollFrame) cancelAnimationFrame(scrollFrame);
-  scrollFrame = requestAnimationFrame(syncViewportFromScroll);
+function currentIdentity() {
+  const state = largeFile.value;
+  if (!state) throw new LargeSessionStaleError();
+  return { sessionId: state.sessionId, revision: state.revision, coordinateSpace: state.coordinateSpace };
 }
-
-function syncViewportFromScroll() {
-  scrollFrame = 0;
-  if (!scroller.value) return;
-  const visibleLine = Math.max(0, Math.floor(scroller.value.scrollTop / lineHeight));
-  updateLargeFileViewportLine(props.paneId, visibleLine);
-  const nextStart = Math.max(0, visibleLine - viewportBufferLines);
-  if (Math.abs(nextStart - viewportStartLine.value) < reloadMarginLines && isLineWindowCovered(visibleLine)) return;
-  viewportStartLine.value = nextStart;
-  if (!isLineWindowCovered(visibleLine)) void loadAround(nextStart);
+function assertIdentity(identity: ReturnType<typeof currentIdentity>) {
+  const state = largeFile.value;
+  if (!state || state.sessionId !== identity.sessionId || state.revision !== identity.revision
+    || state.coordinateSpace !== identity.coordinateSpace) throw new LargeSessionStaleError();
 }
+function isPending() { return Boolean(view && view.state.doc.toString() !== baseText); }
+function showError(error: unknown) {
+  failed.value = formatLargeTransactionEvidence(error);
+  appStore.statusMessage = `大文件输入已保留：${failed.value}`;
+}
+function recordSelection() {
+  if (!view || !windowRange) return;
+  const text = view.state.doc.toString();
+  const start = { line: windowRange.startLine, column: windowRange.startColumn };
+  const selection = view.state.selection.main;
+  if (!extending) logicalAnchor = windowOffsetPosition(text, start, selection.anchor);
+  logicalHead = windowOffsetPosition(text, start, selection.head);
+  jumpLine.value = logicalHead.line + 1;
+  jumpColumn.value = logicalHead.column + 1;
+  selectionLabel.value = `${logicalAnchor.line + 1}:${logicalAnchor.column + 1} → ${logicalHead.line + 1}:${logicalHead.column + 1}`;
+  if (ownerSession) largeSessionBookmarks(ownerSession).selection = { anchor: { ...logicalAnchor }, head: { ...logicalHead } };
+  updateLargeFileViewportLine(props.paneId, logicalHead.line);
+}
+function normalized(value: string) { return value.replace(/\r\n?|\n/g, "\n"); }
 
-async function loadAround(startLine: number) {
-  if (!largeFile.value) return;
-  const sessionId = largeFile.value.sessionId;
-  const boundedStart = Math.max(0, Math.min(startLine, Math.max(largeFile.value.totalLines - 1, 0)));
-  if (loading.value) {
-    queuedStartLine = boundedStart;
+async function submitPending(explicit = false, flush?: DocumentFlushHandle): Promise<void> {
+  if (submitTimer) clearTimeout(submitTimer);
+  if (compositionWait) await compositionWait;
+  if (submitting) {
+    if (flush) submitFlush = flush;
+    await submitting;
+    if (isPending()) return submitPending(explicit, flush);
     return;
   }
-  const requestId = ++activeRequestId;
+  if (!view || !windowRange || !isPending()) return;
+  if (failedSubmission && !explicit) throw new Error("上次提交未确认，请先重试；当前输入仍保留在源码窗口中。");
+  const identity = currentIdentity();
+  if (identity.revision !== windowRange.revision) throw new LargeSessionStaleError("窗口版本已过期，输入已保留。");
+  const submittedText = explicit && failedSubmission ? failedSubmission.text : view.state.doc.toString();
+  const submittedRaw = explicit && failedSubmission ? failedSubmission.raw : serializeSourceDocument(view.state.doc, view.state.field(sourceLineEndingsField));
+  const inputVersion = pendingVersion;
+  const edit = explicit && failedSubmission ? failedSubmission.edit : pendingGlobalPatch
+    ? { startLine: pendingGlobalPatch.start.line, startColumn: pendingGlobalPatch.start.column,
+      endLine: pendingGlobalPatch.end.line, endColumn: pendingGlobalPatch.end.column,
+      text: submittedRaw.slice(sourceOffsetToRawOffset(submittedRaw, pendingGlobalPatch.prefix),
+        sourceOffsetToRawOffset(submittedRaw, submittedText.length - pendingGlobalPatch.suffix)) }
+    : replacementForRawWindow(baseRaw, submittedRaw, { line: windowRange.startLine, column: windowRange.startColumn });
+  if (!edit) return;
+  const beforeSelection = beforeInputSelection ?? { anchor: { ...logicalAnchor }, head: { ...logicalHead } };
+  const afterSelection = { anchor: { ...logicalAnchor }, head: { ...logicalHead } };
+  const stateIdentity = toRaw(largeFile.value!);
+  submitFlush = flush;
+  submittedInputVersion = inputVersion;
+  submitting = (async () => {
+    try {
+      const receipt = explicit && failedSubmission
+        ? await retryLargeFileEdits([edit], props.paneId)
+        : await applyLargeFileEdits([edit], props.paneId);
+      if (!receipt || toRaw(largeFile.value!) !== stateIdentity || largeFile.value?.sessionId !== identity.sessionId) {
+        throw new LargeSessionStaleError("编辑回执不属于原文档，输入已保留。");
+      }
+      baseText = submittedText;
+      baseRaw = submittedRaw;
+      windowRange = { ...windowRange!, revision: receipt.revision,
+        ...(() => { const end = advanceLargePosition({ line: windowRange!.startLine, column: windowRange!.startColumn }, submittedText);
+          return { endLine: end.line, endColumn: end.column }; })() };
+      tracker?.setRevision(receipt.revision);
+      tracker?.recordDocumentChange(submitFlush ? { kind: "pending-flush", flushId: submitFlush.id } : { kind: "document" });
+      cache.clear();
+      failed.value = "";
+      failedSubmission = null;
+      pendingGlobalPatch = null;
+      undoSelections.push({ before: beforeSelection, after: afterSelection });
+      redoSelections.length = 0;
+      if (inputVersion === pendingVersion) beforeInputSelection = null;
+      if (isPending()) scheduleSubmission();
+    } catch (error) { failedSubmission = { text: submittedText, raw: submittedRaw, edit }; showError(error); throw error; }
+    finally { submitting = null; submitFlush = undefined; submittedInputVersion = -1; }
+  })();
+  return submitting;
+}
+function scheduleSubmission() {
+  if (submitTimer) clearTimeout(submitTimer);
+  if (!compositionWait && !failedSubmission) submitTimer = setTimeout(() => { void submitPending().catch(showError); }, 500);
+}
+async function flushPending(options: PendingFlushOptions = {}) {
+  if (compositionWait) await compositionWait;
+  const handle = tracker?.beginFlush(options.expectedToken);
+  try { await submitPending(false, handle); return handle?.complete(); }
+  catch (error) { handle?.fail(); throw error; }
+}
+
+async function loadWindow(position: LargePosition, extend = false, skipFlush = false) {
+  if (!view || !largeFile.value) return;
+  if (skipFlush && isPending()) throw new LargeSessionStaleError("后台结果已更新，但窗口中有新的未确认输入；已保留输入，请先导出未确认窗口。");
+  if (!skipFlush) await submitPending();
+  if (compositionWait) await compositionWait;
+  const identity = currentIdentity();
+  const generation = ++requestGeneration;
   loading.value = true;
   try {
-    const chunk = await readLargeFileChunk(boundedStart, chunkLineCount);
-    if (requestId !== activeRequestId || largeFile.value?.sessionId !== sessionId) return;
-    const lines = chunk.text.split(/\r?\n/).slice(0, chunk.endLine - chunk.startLine);
-    loadedStartLine.value = chunk.startLine;
-    loadedEndLine.value = chunk.endLine;
-    loadedLines.value = lines.map((text, index) => ({ line: chunk.startLine + index, text }));
-    pruneRenderCache();
+    const start = { line: Math.max(0, Math.min(position.line, totalLines.value)), column: Math.max(0, position.column) };
+    // Place the requested column inside a bounded horizontal segment, including ultra-long lines.
+    start.column = Math.max(0, start.column - 2048);
+    const key = `${identity.sessionId}:${identity.revision}:${start.line}:${start.column}`;
+    let response = cache.get(key) ?? await readLargeFileRange({ start }, props.paneId);
+    const requestedEnd = position.line >= response.totalLines;
+    if (requestedEnd && response.endColumn > 0) {
+      // EOF is a permitted remote sentinel, but local edits need the real
+      // last-line column. Show a bounded tail rather than an empty fake line.
+      response = await readLargeFileRange({ start: { line: response.endLine, column: Math.max(0, response.endColumn - 2048) } }, props.paneId);
+    }
+    assertIdentity(identity);
+    if (generation !== requestGeneration || !view) return;
+    cache.set(key, response);
+    baseText = normalized(response.text);
+    baseRaw = response.text;
+    windowRange = response;
+    const windowStart = { line: response.startLine, column: response.startColumn };
+    const resolvedPosition = requestedEnd ? { line: response.endLine, column: response.endColumn } : position;
+    const head = safeLargeWindowOffset(baseText, windowPositionOffset(baseText, windowStart, resolvedPosition) ?? 0);
+    const canonicalHead = windowOffsetPosition(baseText, windowStart, head);
+    if (!extend) logicalAnchor = { ...canonicalHead };
+    logicalHead = canonicalHead;
+    const anchor = safeLargeWindowOffset(baseText, windowPositionOffset(baseText, windowStart, logicalAnchor) ?? (compareLargePosition(logicalAnchor, windowStart) < 0 ? 0 : baseText.length));
+    extending = extend;
+    replacingWindow = true;
+    try { view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: baseText },
+      effects: resetSourceLineEndings.of(parseSourceDocument(response.text).lineEndings),
+      selection: EditorSelection.single(anchor, head), annotations: Transaction.addToHistory.of(false), scrollIntoView: true }); }
+    finally { replacingWindow = false; }
+    windowLabel.value = `${response.startLine + 1}:${response.startColumn + 1}–${response.endLine + 1}:${response.endColumn + 1}`;
+    selectionLabel.value = `${logicalAnchor.line + 1}:${logicalAnchor.column + 1} → ${logicalHead.line + 1}:${logicalHead.column + 1}`;
+    largeSessionBookmarks(identity.sessionId).selection = { anchor: { ...logicalAnchor }, head: { ...logicalHead } };
+    jumpLine.value = canonicalHead.line + 1; jumpColumn.value = canonicalHead.column + 1;
+    updateLargeFileViewportLine(props.paneId, canonicalHead.line);
+  } catch (error) { showError(error); throw error; }
+  finally { if (generation === requestGeneration) loading.value = false; }
+}
+async function moveWindow(direction: 1 | -1, extend = false) {
+  if (!windowRange) return;
+  const position = direction > 0
+    ? { line: windowRange.endLine, column: windowRange.endColumn }
+    : windowRange.startColumn > 0
+      ? { line: windowRange.startLine, column: Math.max(0, windowRange.startColumn - 60000) }
+      : { line: Math.max(0, windowRange.startLine - 200), column: 0 };
+  await loadWindow(position, extend);
+  view?.focus();
+}
+async function goToPosition() {
+  await submitPending();
+  const identity = currentIdentity(), inputVersion = pendingVersion;
+  const position = await resolveLargeSourcePosition(identity,
+    { line: Math.max(0, jumpLine.value - 1), column: Math.max(0, jumpColumn.value - 1) }, 'clamp');
+  assertIdentity(identity);
+  if (pendingVersion !== inputVersion || isPending()) throw new LargeSessionStaleError('跳转等待期间输入已变化，已保留当前窗口。');
+  await loadWindow(position, false, true); view?.focus();
+}
+async function undo(direction: "undo" | "redo") {
+  try {
+    await submitPending();
+    const previousRevision = largeFile.value!.revision;
+    await moveLargeFileHistory(direction, props.paneId);
+    if (previousRevision === largeFile.value!.revision) return;
+    tracker?.setRevision(largeFile.value!.revision); tracker?.recordDocumentChange();
+    cache.clear();
+    const selection = direction === "undo" ? undoSelections.pop() : redoSelections.pop();
+    if (selection) {
+      (direction === "undo" ? redoSelections : undoSelections).push(selection);
+      const bookmark = direction === "undo" ? selection.before : selection.after;
+      logicalAnchor = { ...bookmark.anchor }; logicalHead = { ...bookmark.head };
+      await loadWindow(logicalHead, true, true);
+    } else await loadWindow(logicalHead, false, true);
+  } catch (error) { showError(error); }
+}
+function keyBoundary(direction: 1 | -1, extend = false) {
+  if (!view || !windowRange) return false;
+  const head = view.state.selection.main.head;
+  const collapseGlobalSelection = !extend && compareLargePosition(logicalAnchor, logicalHead) !== 0;
+  if (!collapseGlobalSelection && !queuedNavigation && (direction > 0 && head !== view.state.doc.length || direction < 0 && head !== 0)) return false;
+  queueBoundaryNavigation(direction, extend, false); return true;
+}
+function verticalBoundary(direction: 1 | -1, extend = false) {
+  if (!view || !windowRange) return false;
+  const selection = view.state.selection.main;
+  const line = view.state.doc.lineAt(selection.head);
+  if (!queuedNavigation && (direction > 0 && line.number !== view.state.doc.lines || direction < 0 && line.number !== 1)) return false;
+  const targetLine = logicalHead.line + direction;
+  if (targetLine < 0 || targetLine >= totalLines.value) return false;
+  queueBoundaryNavigation(direction, extend, true); return true;
+}
+function queueBoundaryNavigation(direction: 1 | -1, extend: boolean, vertical: boolean) {
+  const session = ownerSession;
+  queuedNavigation++;
+  navigationTail = navigationTail.catch(() => undefined).then(async () => {
+    if (!view || !windowRange || ownerSession !== session) return;
+    if (!vertical && !extend && compareLargePosition(logicalAnchor, logicalHead) !== 0) {
+      await submitPending();
+      const range = orderedLargeRange(logicalAnchor, logicalHead);
+      await loadWindow(direction < 0 ? range.start : range.end, false, true);
+      view?.focus();
+      return;
+    }
+    const head = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(head);
+    const boundary = vertical ? direction > 0 ? line.number === view.state.doc.lines : line.number === 1
+      : direction > 0 ? head === view.state.doc.length : head === 0;
+    if (!boundary) {
+      extending = extend;
+      const command = vertical ? direction > 0 ? extend ? selectLineDown : cursorLineDown : extend ? selectLineUp : cursorLineUp
+        : direction > 0 ? extend ? selectCharRight : cursorCharRight : extend ? selectCharLeft : cursorCharLeft;
+      command(view);
+      return;
+    }
+    await submitPending();
+    const identity = currentIdentity(), inputVersion = pendingVersion;
+    const position = vertical ? { line: Math.max(0, logicalHead.line + direction), column: logicalHead.column } : { ...logicalHead };
+    const target = await resolveLargeSourcePosition(identity, position, vertical ? 'clamp' : direction > 0 ? 'next' : 'previous');
+    assertIdentity(identity);
+    if (pendingVersion !== inputVersion || isPending()) throw new LargeSessionStaleError('光标导航等待期间输入已变化，已保留当前窗口。');
+    await loadWindow(target, extend, true);
+    view?.focus();
+  }).catch(showError).finally(() => { queuedNavigation--; });
+}
+function selectAllGlobal() {
+  if (!view) return true;
+  replacingWindow = true;
+  try { view.dispatch({ selection: EditorSelection.single(0, view.state.doc.length) }); }
+  finally { replacingWindow = false; }
+  logicalAnchor = { line: 0, column: 0 }; logicalHead = { line: totalLines.value, column: 0 };
+  extending = true; selectionLabel.value = "已选择全文（跨窗口）"; return true;
+}
+async function selectedText(limit: number, selection = orderedLargeRange(logicalAnchor, logicalHead), context?: { prefix: string; reliable: boolean }) {
+  await submitPending();
+  const identity = currentIdentity();
+  const range = selection;
+  let position = range.start; let text = ""; let bytes = 0; let first = true;
+  while (compareLargePosition(position, range.end) < 0) {
+    const response = await readLargeFileRange({ start: position, end: range.end, includeContext: Boolean(context && first) }, props.paneId);
+    if (context && first) { context.prefix = response.contextPrefix ?? ""; context.reliable = response.contextReliable === true; }
+    first = false;
+    assertIdentity(identity);
+    const size = new TextEncoder().encode(response.text).byteLength;
+    if (bytes + size > limit) throw new Error(`选区超过 ${limit / 1024 / 1024}MiB，请导出选区或缩小范围。`);
+    text += response.text; bytes += size;
+    const next = { line: response.endLine, column: response.endColumn };
+    if (compareLargePosition(next, position) <= 0) break;
+    position = next;
+    if (!response.truncated) break;
+  }
+  return text;
+}
+async function exportSelection() {
+  try {
+    await submitPending();
+    const identity = currentIdentity(); const range = orderedLargeRange(logicalAnchor, logicalHead);
+    const path = await invoke<string | null>("save_markdown_file_dialog", { defaultFileName: "selection.md" });
+    if (!path) return;
+    assertIdentity(identity);
+    const receipt = await exportLargeFileRange({ start: range.start, end: range.end }, path, props.paneId);
+    appStore.statusMessage = `已导出选区 ${receipt.byteLength} 字节：${receipt.path}`;
+  } catch (error) { showError(error); }
+}
+async function exportUnconfirmedWindow() {
+  if (!view || !windowRange) return;
+  // Freeze a small, self-contained recovery artifact before opening a dialog.
+  const frozen = JSON.stringify({ schemaVersion: 1, kind: "lightmark-large-source-window", path: tab.value?.path,
+    sessionId: windowRange.sessionId, baseRevision: windowRange.revision, currentRevision: largeFile.value?.revision,
+    window: { startLine: windowRange.startLine, startColumn: windowRange.startColumn,
+      endLine: windowRange.endLine, endColumn: windowRange.endColumn },
+    base: baseRaw, input: serializeSourceDocument(view.state.doc, view.state.field(sourceLineEndingsField)),
+    anchor: logicalAnchor, head: logicalHead, pendingVersion }, null, 2);
+  try {
+    const path = await invoke<string | null>("save_markdown_file_dialog", { defaultFileName: "large-window-recovery.json" });
+    if (!path) return;
+    const expectedTargetFingerprint = await invoke("get_large_file_fingerprint", { path });
+    const receipt = await invoke<TextFileWriteReceipt>("write_text_file", { path, content: frozen, expectedTargetFingerprint });
+    if (receipt.outcome !== "committed" || receipt.diskWritten !== "yes") throw new Error("未确认恢复窗口已完整写入。");
+    appStore.statusMessage = `已导出未确认窗口恢复材料：${path}`;
+  } catch (error) { showError(error); }
+}
+async function copySelection(cut = false) {
+  try {
+    if (compareLargePosition(logicalAnchor, logicalHead) === 0) return;
+    const identity = currentIdentity(); const version = pendingVersion;
+    const range = orderedLargeRange(logicalAnchor, logicalHead);
+    const text = await selectedText(LARGE_COPY_BYTES);
+    const afterRead = currentIdentity();
+    await navigator.clipboard.writeText(text);
+    if (cut && !readOnly.value && text) {
+      assertIdentity(afterRead);
+      if (pendingVersion !== version || identity.sessionId !== afterRead.sessionId) throw new LargeSessionStaleError("等待剪贴板期间输入已变化，已保留正文。");
+      await applyLargeFileEdits([{ startLine: range.start.line, startColumn: range.start.column,
+        endLine: range.end.line, endColumn: range.end.column, text: "" }], props.paneId);
+      logicalHead = logicalAnchor = range.start;
+      cache.clear(); await loadWindow(range.start, false, true);
+    }
+  } catch (error) { showError(error); }
+}
+async function previewSelection() {
+  try {
+    const range = compareLargePosition(logicalAnchor, logicalHead) === 0 && windowRange
+      ? { start: { line: windowRange.startLine, column: windowRange.startColumn }, end: { line: windowRange.endLine, column: windowRange.endColumn } }
+      : orderedLargeRange(logicalAnchor, logicalHead);
+    const context = { prefix: "", reliable: false };
+    const text = await selectedText(LARGE_PREVIEW_BYTES, range, context);
+    previewReliable.value = context.reliable;
+    previewHtml.value = renderMarkdownForEditor(context.prefix + text);
+  } catch (error) { showError(error); }
+}
+async function handleFind(event: Event) {
+  if (appStore.splitLayout.activePaneId !== props.paneId || !largeFile.value) return;
+  if (!findReplaceStore.open || !findReplaceStore.query) { searchCoordinator.cancel(); setFindResult(0, -1); return; }
+  const command = (event as CustomEvent<string>).detail;
+  const query = findReplaceStore.query, replacement = findReplaceStore.replaceText;
+  const options = { ...findOptions() }, initialIndex = findReplaceStore.currentIndex;
+  const sessionId = largeFile.value.sessionId;
+  const fingerprint = JSON.stringify([query, options]);
+  const stillCurrent = () => appStore.splitLayout.activePaneId === props.paneId && largeFile.value?.sessionId === sessionId
+    && findReplaceStore.open && JSON.stringify([findReplaceStore.query, findOptions()]) === fingerprint;
+  try {
+    await submitPending();
+    if (!stillCurrent()) return;
+    const inputVersion = pendingVersion;
+    let index = initialIndex, searched = false;
+    if (command === 'refresh' || findRevision !== largeFile.value.revision || findFingerprint !== fingerprint) {
+      const result = await searchCoordinator.search(fingerprint, largeFile.value.revision,
+        signal => searchLargeFile(query, options, 0, 5000, props.paneId, signal));
+      if (!stillCurrent()) return;
+      if (pendingVersion !== inputVersion || isPending()) throw new LargeSessionStaleError('查找等待期间输入已变化，请重新查找；新输入已保留。');
+      findRevision = result.revision; findMatches = result.matches; findFingerprint = fingerprint;
+      index = result.matches.length ? 0 : -1; searched = true;
+      setFindResult(result.total, index, result.error);
+      if (command === 'refresh') return;
+    }
+    if (command === 'replaceAll' || command === 'replaceCurrent') {
+      if (readOnly.value) return;
+      const currentMatch = command === 'replaceCurrent' ? findMatches[Math.max(0, index)] : null;
+      // A missing single match must never become the backend's null = replace-all intent.
+      if (command === 'replaceCurrent' && !currentMatch) return;
+      await replaceLargeFileMatches(query, replacement, options, currentMatch ?? null, props.paneId);
+      if (pendingVersion !== inputVersion || isPending()) {
+        throw new LargeSessionStaleError('替换已在原版本完成，等待期间的新输入仍保留在旧窗口；请导出未确认窗口后处理冲突。');
+      }
+      cache.clear(); await loadWindow(logicalHead, false, true); findRevision = -1; findFingerprint = ''; return;
+    }
+    if (!findMatches.length) return;
+    index = searched ? command === 'previous' ? findMatches.length - 1 : 0
+      : (index + (command === 'previous' ? -1 : 1) + findMatches.length) % findMatches.length;
+    const match = findMatches[index];
+    if (match) { setFindResult(findReplaceStore.total, index); await loadWindow({ line: match.line, column: match.startColumn }); view?.focus(); }
   } catch (error) {
-    appStore.statusMessage = String(error);
-  } finally {
-    if (requestId === activeRequestId) {
-      loading.value = false;
-      const queued = queuedStartLine;
-      queuedStartLine = null;
-      if (queued !== null && !isLoadedStartNear(queued)) void loadAround(queued);
-    }
+    if (!stillCurrent() || error instanceof DOMException && error.name === 'AbortError') return;
+    showError(error); setFindResult(0, -1, formatLargeTransactionEvidence(error));
   }
 }
-
-function isLineWindowCovered(visibleLine: number) {
-  if (loadedLines.value.length === 0) return false;
-  const minLine = Math.max(0, visibleLine - reloadMarginLines);
-  const maxLine = Math.min(Math.max(totalLines.value - 1, 0), visibleLine + viewportBufferLines);
-  return minLine >= loadedStartLine.value && maxLine < loadedEndLine.value;
+function handleJump(event: Event) {
+  const detail = (event as CustomEvent<number | { line?: number; paneId?: EditorPaneId }>).detail;
+  if (typeof detail !== "number" && detail.paneId && detail.paneId !== props.paneId) return;
+  void loadWindow({ line: typeof detail === "number" ? detail : detail.line ?? 0, column: 0 }).catch(showError);
+}
+function captureLargeEditorTarget(event: Event) {
+  const detail = (event as CustomEvent<{ target: CapturedEditorTarget | null }>).detail;
+  if (!view?.hasFocus || !tab.value || !largeFile.value) return;
+  const selection = view.state.selection.main;
+  const range = orderedLargeRange(logicalAnchor, logicalHead);
+  detail.target = { tabId: tab.value.id, paneId: props.paneId, documentMode: "large", editorMode: "source",
+    anchor: selection.anchor, head: selection.head, selection: view.state.sliceDoc(selection.from, selection.to), capturedAt: Date.now(),
+    large: { sessionId: largeFile.value.sessionId, revision: largeFile.value.revision, inputVersion: pendingVersion,
+      startLine: range.start.line, startColumn: range.start.column, endLine: range.end.line, endColumn: range.end.column } };
 }
 
-function isLoadedStartNear(startLine: number) {
-  return loadedLines.value.length > 0 && Math.abs(startLine - loadedStartLine.value) < reloadMarginLines;
-}
-
-function buildBlocks(lines: LineRecord[]) {
-  const result: MarkdownBlock[] = [];
-  let current: LineRecord[] = [];
-  let inFence = false;
-  let inTable = false;
-
-  const flush = () => {
-    if (current.length === 0) return;
-    const startLine = current[0].line;
-    const endLine = current[current.length - 1].line;
-    const blockLines = current.map((line) => line.text);
-    result.push({
-      key: `${startLine}-${endLine}`,
-      startLine,
-      endLine,
-      lines: blockLines,
-      text: blockLines.join("\n"),
-      html: cachedRenderBlock(startLine, endLine, blockLines.join("\n")),
-    });
-    current = [];
-  };
-
-  for (const line of lines) {
-    const fence = line.text.trimStart().startsWith("```");
-    const tableRow = isTableRow(line.text);
-    if (!inFence && line.text.trim() === "") {
-      flush();
-      inTable = false;
-      result.push({
-        key: `blank-${line.line}`,
-        startLine: line.line,
-        endLine: line.line,
-        lines: [""],
-        text: "",
-        html: "",
-      });
-      continue;
-    }
-    if (!inFence && tableRow) {
-      current.push(line);
-      inTable = true;
-      continue;
-    }
-    if (inTable) {
-      flush();
-      inTable = false;
-    }
-    current.push(line);
-    if (fence) {
-      inFence = !inFence;
-      if (!inFence) flush();
-    } else if (!inFence && /^(#{1,6}\s|>\s|[-*+]\s|\d+\.\s)/.test(line.text.trimStart())) {
-      flush();
-    }
+function insertSnippetIntoLargeEditor(event: Event) {
+  const { target, snippetId } = (event as CustomEvent<{ target: CapturedEditorTarget; snippetId: string }>).detail;
+  const snippet = appStore.settings.snippets.items.find((item) => item.id === snippetId && item.enabled);
+  if (!view || !snippet || readOnly.value || target.tabId !== tab.value?.id || target.paneId !== props.paneId
+    || target.large?.sessionId !== largeFile.value?.sessionId || target.large?.revision !== largeFile.value?.revision
+    || target.large?.inputVersion !== pendingVersion) return;
+  if (view.state.sliceDoc(Math.min(target.anchor, target.head), Math.max(target.anchor, target.head)) !== target.selection) {
+    showError("片段插入位置已经变化，请重新选择。"); return;
   }
-  flush();
-  return result;
-}
-
-function startEditing(block: MarkdownBlock) {
-  if (block.text === "") return;
-  editingKey.value = block.key;
-  editingText.value = block.text;
-  void nextTick(() => {
-    document.querySelector<HTMLTextAreaElement>("[data-large-editor-input]")?.focus();
-  });
-}
-
-async function commitEditing(block: MarkdownBlock) {
-  if (editingKey.value !== block.key) return;
-  const nextText = editingText.value;
-  editingKey.value = "";
-  if (nextText === block.text) return;
-
-  const edit = blockEdit(block, nextText);
-  applyLocalEdit(edit);
-  updateLargeOutline(edit, block.text);
-  await queueLargeEdit(edit);
-}
-
-function queueLargeEdit(edit: TextEdit) {
-  largeEditQueue = largeEditQueue.then(() => applyLargeFileEdits([edit]));
-  return largeEditQueue;
-}
-
-function captureLargeEditorTarget(event: CustomEvent<{ target: CapturedEditorTarget | null }>) {
-  const tab = getPaneTab(props.paneId);
-  const textarea = document.querySelector<HTMLTextAreaElement>("[data-large-editor-input]");
-  const block = blocks.value.find((item) => item.key === editingKey.value);
-  if (!textarea || !block || !tab || props.paneId !== appStore.splitLayout.activePaneId || tab.documentMode !== "large" || !largeFile.value) return;
-  const from = Math.min(textarea.selectionStart, textarea.selectionEnd);
-  const to = Math.max(textarea.selectionStart, textarea.selectionEnd);
-  const start = largeOffsetPosition(editingText.value, block.startLine, from);
-  const end = largeOffsetPosition(editingText.value, block.startLine, to);
-  event.detail.target = {
-    paneId: props.paneId,
-    tabId: tab.id,
-    documentMode: "large",
-    editorMode: "wysiwyg",
-    anchor: from,
-    head: to,
-    selection: editingText.value.slice(from, to),
-    capturedAt: Date.now(),
-    large: {
-      sessionId: largeFile.value.sessionId,
-      startLine: start.line,
-      endLine: end.line,
-      startColumn: start.column,
-      endColumn: end.column,
-    },
-  };
-}
-
-function insertSnippetIntoLargeEditor(event: CustomEvent<{ snippetId: string; target: CapturedEditorTarget }>) {
-  const target = event.detail?.target;
-  const location = target?.large;
-  const tab = getPaneTab(props.paneId);
-  const snippet = appStore.settings.snippets.items.find((item) => item.id === event.detail?.snippetId && item.enabled);
-  if (!target || !location || !snippet || target.paneId !== props.paneId || target.tabId !== tab?.id || location.sessionId !== largeFile.value?.sessionId) return;
   const expansion = expandSnippet(snippet.markdown, { selection: target.selection });
-  const edit: TextEdit = {
-    startLine: location.startLine,
-    startColumn: location.startColumn,
-    endLine: location.endLine,
-    endColumn: location.endColumn,
-    text: expansion.markdown,
-  };
-  applyLocalEdit(edit);
-  void queueLargeEdit(edit).then(() => {
-    appStore.statusMessage = `已插入片段：${snippet.name}`;
-  }).catch((error) => {
-    appStore.statusMessage = String(error);
-  });
+  const from = Math.min(target.anchor, target.head); const to = Math.max(target.anchor, target.head);
+  view.dispatch({ changes: { from, to, insert: normalized(expansion.markdown) },
+    selection: { anchor: from + normalized(expansion.markdown.slice(0, expansion.cursorOffset)).length }, scrollIntoView: true });
+  view.focus();
 }
-
-function largeOffsetPosition(value: string, startLine: number, offset: number) {
-  const before = value.slice(0, Math.max(0, Math.min(offset, value.length)));
-  const lines = before.split(/\r?\n/);
-  return { line: startLine + lines.length - 1, column: lines[lines.length - 1]?.length ?? 0 };
+function insertLargePaste(result: PasteConversionResult) {
+  if (!view || readOnly.value) return;
+  if (result.kind === "image-files") { appStore.statusMessage = "大文件源码暂不支持图片文件粘贴。"; return; }
+  const selection = view.state.selection.main;
+  view.dispatch({ changes: { from: selection.from, to: selection.to, insert: normalized(result.markdown ?? "") },
+    selection: { anchor: selection.from + normalized(result.markdown ?? "").length }, scrollIntoView: true });
+  if (result.warnings.length) appStore.statusMessage = result.warnings.join(" ");
 }
-
-async function toggleTask(line: number) {
-  const record = loadedLines.value.find((item) => item.line === line);
-  if (!record) return;
-  const next = record.text.replace(/^(\s*[-*+]\s+\[)( |x|X)(\]\s*)/, (_match, prefix, checked, suffix) => {
-    return `${prefix}${checked === " " ? "x" : " "}${suffix}`;
-  });
-  if (next === record.text) return;
-  const edit: TextEdit = {
-    startLine: line,
-    startColumn: 0,
-    endLine: line,
-    endColumn: record.text.length,
-    text: next,
-  };
-  applyLocalEdit(edit);
-  await applyLargeFileEdits([edit]);
-}
-
-async function handleFindCommand(event: CustomEvent<string>) {
-  if (appStore.documentMode !== "large" || !largeFile.value) return;
-  const command = event.detail || "refresh";
-  if (command === "next" || command === "previous") {
-    await navigateLargeFind(command === "next" ? 1 : -1);
-    return;
-  }
-  if (command === "replaceCurrent") {
-    await replaceLargeFind(true);
-    return;
-  }
-  if (command === "replaceAll") {
-    await replaceLargeFind(false);
-    return;
-  }
-  await refreshLargeFind();
-}
-
-async function refreshLargeFind() {
-  if (!largeFile.value || !findReplaceStore.open || !findReplaceStore.query) {
-    largeFindMatches.value = [];
-    largeFindTruncated.value = false;
-    setFindResult(0, -1, "");
-    return;
-  }
-  findReplaceStore.busy = true;
-  try {
-    const result = await invoke<LargeFindResult>("search_large_file", {
-      sessionId: largeFile.value.sessionId,
-      query: findReplaceStore.query,
-      options: findOptions(),
-      startLine: 0,
-      limit: 5000,
-    });
-    largeFindMatches.value = result.matches;
-    largeFindTruncated.value = result.truncated;
-    const current = findReplaceStore.currentIndex < 0 ? 0 : normalizeLargeFindIndex(findReplaceStore.currentIndex, result.matches.length);
-    setFindResult(result.total, current, result.error);
-    if (result.truncated) appStore.statusMessage = "查找结果较多，仅加载前 5000 项用于跳转。";
-  } catch (error) {
-    setFindResult(0, -1, String(error));
-  } finally {
-    findReplaceStore.busy = false;
-  }
-}
-
-async function navigateLargeFind(delta: 1 | -1) {
-  if (!largeFile.value) return;
-  if (largeFindMatches.value.length === 0 || findReplaceStore.error) await refreshLargeFind();
-  if (largeFindMatches.value.length === 0 || findReplaceStore.error) return;
-  const current = normalizeLargeFindIndex(findReplaceStore.currentIndex + delta, largeFindMatches.value.length);
-  const match = largeFindMatches.value[current];
-  setFindResult(findReplaceStore.total, current, "");
-  viewportStartLine.value = Math.max(0, match.line - 20);
-  if (scroller.value) scroller.value.scrollTop = Math.max(0, match.line - 6) * lineHeight;
-  await loadAround(viewportStartLine.value);
-}
-
-async function replaceLargeFind(currentOnly: boolean) {
-  if (!largeFile.value) return;
-  if (currentOnly && largeFindMatches.value.length === 0) await refreshLargeFind();
-  const current = normalizeLargeFindIndex(findReplaceStore.currentIndex, largeFindMatches.value.length);
-  const match = currentOnly ? largeFindMatches.value[current] : null;
-  if (currentOnly && !match) return;
-  findReplaceStore.busy = true;
-  try {
-    const state = await invoke<DirtyState>("replace_large_file_matches", {
-      sessionId: largeFile.value.sessionId,
-      query: findReplaceStore.query,
-      replacement: findReplaceStore.replaceText,
-      options: findOptions(),
-      currentMatch: match,
-    });
-    appStore.isDirty = state.isDirty;
-    appStore.statusMessage = currentOnly ? "已替换当前匹配" : `已登记全部替换，待保存编辑：${state.pendingEditCount}`;
-    renderCache.clear();
-    await refreshLargeFind();
-    await loadAround(viewportStartLine.value);
-  } catch (error) {
-    setFindResult(findReplaceStore.total, findReplaceStore.currentIndex, String(error));
-  } finally {
-    findReplaceStore.busy = false;
-  }
-}
-
-function normalizeLargeFindIndex(index: number, total: number) {
-  if (total <= 0) return -1;
-  return ((index % total) + total) % total;
-}
-
-function blockFindClass(block: MarkdownBlock) {
-  if (!findReplaceStore.open || largeFindMatches.value.length === 0) return "";
-  const current = largeFindMatches.value[normalizeLargeFindIndex(findReplaceStore.currentIndex, largeFindMatches.value.length)];
-  if (current && current.line >= block.startLine && current.line <= block.endLine) return "large-doc-block-current-find";
-  return largeFindMatches.value.some((item) => item.line >= block.startLine && item.line <= block.endLine)
-    ? "large-doc-block-find"
-    : "";
-}
-
-function blockEdit(block: MarkdownBlock, text: string): TextEdit {
-  return {
-    startLine: block.startLine,
-    startColumn: 0,
-    endLine: block.endLine,
-    endColumn: block.lines[block.lines.length - 1]?.length ?? 0,
-    text,
-  };
-}
-
-function applyLocalEdit(edit: TextEdit) {
-  const oldLineCount = edit.endLine - edit.startLine + 1;
-  const rawNextLines = edit.text.split(/\r?\n/);
-  const lineDelta = rawNextLines.length - oldLineCount;
-  const nextLines = edit.text.split(/\r?\n/).map((text, index) => ({
-    line: edit.startLine + index,
-    text,
-  }));
-  loadedLines.value = [
-    ...loadedLines.value.filter((line) => line.line < edit.startLine),
-    ...nextLines,
-    ...loadedLines.value
-      .filter((line) => line.line > edit.endLine)
-      .map((line) => ({ ...line, line: line.line + lineDelta })),
-  ];
-  loadedEndLine.value = Math.max(loadedStartLine.value, loadedEndLine.value + lineDelta);
-  renderCache.clear();
-}
-
-function updateLargeOutline(edit: TextEdit, previousText: string) {
-  if (!appStore.largeFile) return;
-  const lineDelta = edit.text.split(/\r?\n/).length - previousText.split(/\r?\n/).length;
-  const replacementItems = parseOutlineItems(edit.text, edit.startLine);
-  const nextOutline = appStore.largeFile.outline
-    .filter((item) => item.line < edit.startLine || item.line > edit.endLine)
-    .map((item) => {
-      if (item.line <= edit.endLine || lineDelta === 0) return item;
-      return { ...item, line: item.line + lineDelta, id: `large-heading-${item.line + lineDelta}` };
-    });
-  nextOutline.push(...replacementItems);
-  nextOutline.sort((a, b) => a.line - b.line);
-  appStore.largeFile.outline = nextOutline;
-  appStore.largeFile.totalLines = Math.max(0, appStore.largeFile.totalLines + lineDelta);
-}
-
-function cachedRenderBlock(startLine: number, endLine: number, text: string) {
-  if (!text) return "";
-  const key = `${startLine}-${endLine}:${text}`;
-  const cached = renderCache.get(key);
-  if (cached !== undefined) return cached;
-  const html = renderMarkdownForEditor(text);
-  renderCache.set(key, html);
-  return html;
-}
-
-function pruneRenderCache() {
-  if (renderCache.size <= maxRenderCacheEntries) return;
-  const overflow = renderCache.size - maxRenderCacheEntries;
-  let removed = 0;
-  for (const key of renderCache.keys()) {
-    renderCache.delete(key);
-    removed += 1;
-    if (removed >= overflow) break;
-  }
-}
-
-function taskLine(block: MarkdownBlock) {
-  if (block.startLine !== block.endLine) return null;
-  return /^\s*[-*+]\s+\[[ xX]\]\s+/.test(block.text) ? block.startLine : null;
-}
-
-function isTableRow(text: string) {
-  const trimmed = text.trim();
-  return trimmed.includes("|") && /^:?-{3,}:?$/.test(trimmed.replace(/\|/g, "").replace(/\s+/g, "")) || /^\|.*\|$/.test(trimmed);
-}
-
-function parseOutlineItems(markdown: string, startLine: number): LargeOutlineItem[] {
-  return markdown
-    .split(/\r?\n/)
-    .map((line, index) => {
-      const match = line.trimStart().match(/^(#{1,6})\s+(.+?)\s*#*$/);
-      if (!match) return null;
-      const text = match[2].trim();
-      if (!text) return null;
-      const lineNumber = startLine + index;
-      return {
-        id: `large-heading-${lineNumber}`,
-        text,
-        level: match[1].length as LargeOutlineItem["level"],
-        line: lineNumber,
-      };
-    })
-    .filter((item): item is LargeOutlineItem => Boolean(item));
-}
-
-function handleJumpLine(event: CustomEvent<number | { line?: number; paneId?: EditorPaneId }>) {
-  const detail = event.detail;
-  if (typeof detail === "object" && detail?.paneId && detail.paneId !== props.paneId) return;
-  const requestedLine = typeof detail === "number" ? detail : detail?.line ?? 0;
-  const line = Math.max(0, Math.min(requestedLine, Math.max(totalLines.value - 1, 0)));
-  if (scroller.value) {
-    scroller.value.scrollTop = line * lineHeight;
-  }
-  updateLargeFileViewportLine(props.paneId, line);
-  viewportStartLine.value = Math.max(0, line - 20);
-  void loadAround(viewportStartLine.value);
-}
-
 function handleLargePaste(event: ClipboardEvent) {
-  const result = prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData));
-  event.preventDefault();
-  if (result.kind === "image-files") {
-    appStore.statusMessage = "大文件模式暂不支持直接粘贴图片。";
-    return;
-  }
-  insertLargePaste(result, event.currentTarget as HTMLTextAreaElement);
+  event.preventDefault(); insertLargePaste(prepareSmartPaste(clipboardPayloadFromDataTransfer(event.clipboardData)));
+}
+async function pasteLargePlainText() {
+  if (!view) return;
+  const identity = currentIdentity(); const version = pendingVersion;
+  const payload = await readClipboardPayload();
+  assertIdentity(identity);
+  if (pendingVersion !== version) { showError("等待剪贴板期间输入已变化，请重新粘贴。"); return; }
+  insertLargePaste(prepareSmartPaste(payload, { plainText: true }));
 }
 
-async function pasteLargePlainText(event: KeyboardEvent) {
-  event.preventDefault();
-  const textarea = event.currentTarget as HTMLTextAreaElement;
-  const selection = { from: textarea.selectionStart, to: textarea.selectionEnd };
-  const result = prepareSmartPaste(await readClipboardPayload(), { plainText: true });
-  insertLargePaste(result, textarea, selection);
+function registerSession() {
+  unregister?.(); unregister = null;
+  if (!tab.value || !largeFile.value) return;
+  const sessionId = largeFile.value.sessionId;
+  const bookmarks = largeSessionBookmarks(sessionId);
+  undoSelections = bookmarks.undo; redoSelections = bookmarks.redo;
+  logicalAnchor = { ...bookmarks.selection.anchor }; logicalHead = { ...bookmarks.selection.head };
+  const adapter: DocumentSessionAdapter = {
+    get tabId() { return tab.value?.id ?? ""; }, paneId: props.paneId, mode: "source",
+    get revision() { return largeFile.value?.revision ?? 0; },
+    hasPendingEdits: () => isPending() || Boolean(submitting || compositionWait),
+    pendingEditVersion: () => pendingVersion,
+    isComposing: () => Boolean(compositionWait),
+    mutationToken: () => tracker!.token(),
+    async flushPendingEdits(_reason, options) { return flushPending(options); },
+    finalizeClosePrompt: (options) => flushPending(options),
+    async captureRecoveryBundle() { return JSON.stringify({ sessionId, windowRange, baseText, text: view?.state.doc.toString(), logicalAnchor, logicalHead }); },
+    async snapshot() { throw new Error("大文件快照必须使用远端草稿，禁止构造全文字符串。"); },
+    derivedState: () => ({ revision: largeFile.value?.revision, lines: totalLines.value }),
+    async replaceMarkdown() { throw new Error("大文件不接受 JavaScript 全文替换。"); },
+    navigate: (target) => { void loadWindow({ line: target.line ?? 0, column: 0 }).catch(showError); },
+  };
+  tracker = createDocumentMutationTracker({ sessionIdentity: adapter, initialRevision: largeFile.value.revision });
+  unregister = registerDocumentSession(adapter);
 }
-
-function insertLargePaste(
-  result: PasteConversionResult,
-  textarea: HTMLTextAreaElement,
-  selection = { from: textarea.selectionStart, to: textarea.selectionEnd },
-) {
-  if (!result.markdown) return;
-  textarea.focus();
-  textarea.setSelectionRange(selection.from, selection.to);
-  const inserted = document.execCommand("insertText", false, result.markdown);
-  if (!inserted) textarea.setRangeText(result.markdown, selection.from, selection.to, "end");
-  editingText.value = textarea.value;
-  const cursor = selection.from + result.markdown.length;
-  void nextTick(() => {
-    textarea.focus();
-    textarea.setSelectionRange(cursor, cursor);
-  });
-  if (result.warnings.length > 0) appStore.statusMessage = result.warnings.join(" ");
-}
+onMounted(() => {
+  view = new EditorView({ parent: host.value!, state: EditorState.create({ doc: "", extensions: [
+    sourceLineEndingsExtension(parseSourceDocument("").lineEndings),
+    lineNumbers({ formatNumber: (line) => String(line + (windowRange?.startLine ?? 0)) }),
+    EditorState.readOnly.of(readOnly.value), EditorView.editable.of(!readOnly.value),
+    keymap.of([
+      { key: "Mod-z", run: () => { void undo("undo"); return true; } },
+      { key: "Mod-Shift-z", run: () => { void undo("redo"); return true; } },
+      { key: "Mod-y", run: () => { void undo("redo"); return true; } },
+      { key: "Mod-a", run: selectAllGlobal },
+      { key: "Mod-c", run: () => { void copySelection(); return true; } },
+      { key: "Mod-x", run: () => { void copySelection(true); return true; } },
+      { key: "Mod-Shift-v", run: () => { void pasteLargePlainText().catch(showError); return true; } },
+      { key: "ArrowRight", run: () => keyBoundary(1) }, { key: "ArrowLeft", run: () => keyBoundary(-1) },
+      { key: "Shift-ArrowRight", run: () => keyBoundary(1, true) }, { key: "Shift-ArrowLeft", run: () => keyBoundary(-1, true) },
+      { key: "ArrowDown", run: () => verticalBoundary(1) }, { key: "ArrowUp", run: () => verticalBoundary(-1) },
+      { key: "Shift-ArrowDown", run: () => verticalBoundary(1, true) }, { key: "Shift-ArrowUp", run: () => verticalBoundary(-1, true) },
+      { key: "Mod-Home", run: () => { void loadWindow({ line: 0, column: 0 }).catch(showError); return true; } },
+      { key: "Mod-End", run: () => { void loadWindow({ line: totalLines.value, column: 0 }).catch(showError); return true; } },
+      { key: "Mod-Shift-Home", run: () => { void loadWindow({ line: 0, column: 0 }, true).catch(showError); return true; } },
+      { key: "Mod-Shift-End", run: () => { void loadWindow({ line: totalLines.value, column: 0 }, true).catch(showError); return true; } },
+      { key: "Mod-Enter", run: () => { void submitPending(true).catch(showError); return true; } }, ...defaultKeymap,
+    ]),
+    EditorView.domEventHandlers({
+      paste: handleLargePaste,
+      compositionstart: () => { compositionWait = new Promise<void>((resolve) => { compositionResolve = resolve; }); },
+      compositionend: () => { compositionResolve?.(); compositionResolve = null; compositionWait = null; scheduleSubmission(); },
+      mousedown: (event) => { extending = event.shiftKey && compareLargePosition(logicalAnchor, logicalHead) !== 0; },
+      keydown: (event) => { if (!event.shiftKey && !event.metaKey && !event.ctrlKey) extending = false; },
+      wheel: (event) => {
+        if (!view || compositionWait || loading.value) return;
+        if (event.deltaY > 0 && view.scrollDOM.scrollTop + view.scrollDOM.clientHeight >= view.scrollDOM.scrollHeight - 4 && windowRange?.truncated) {
+          event.preventDefault(); void moveWindow(1).catch(showError);
+        } else if (event.deltaY < 0 && view.scrollDOM.scrollTop <= 0 && windowRange && (windowRange.startLine > 0 || windowRange.startColumn > 0)) {
+          event.preventDefault(); void moveWindow(-1).catch(showError);
+        }
+      },
+    }),
+    EditorView.updateListener.of((update) => {
+      if (replacingWindow) return;
+      if (update.docChanged) {
+        // A range response started before this keystroke must never replace it.
+        requestGeneration += 1; loading.value = false;
+        if (!beforeInputSelection || submitting && pendingVersion === submittedInputVersion) {
+          beforeInputSelection = { anchor: { ...logicalAnchor }, head: { ...logicalHead } };
+        }
+        if (!pendingGlobalPatch && windowRange) {
+          const range = orderedLargeRange(logicalAnchor, logicalHead);
+          const start = { line: windowRange.startLine, column: windowRange.startColumn };
+          const end = advanceLargePosition(start, update.startState.doc.toString());
+          if (compareLargePosition(range.start, start) < 0 || compareLargePosition(range.end, end) > 0) {
+            const local = update.startState.selection.main;
+            pendingGlobalPatch = { ...range, prefix: local.from, suffix: update.startState.doc.length - local.to };
+            if (compareLargePosition(range.start, start) < 0) {
+              windowRange = { ...windowRange, startLine: range.start.line, startColumn: range.start.column };
+            }
+            extending = false;
+          }
+        }
+        pendingVersion += 1; tracker?.recordPendingInput();
+        searchCoordinator.cancel(); findRevision = -1; findFingerprint = '';
+        if (findReplaceStore.open && appStore.splitLayout.activePaneId === props.paneId) setFindResult(0, -1);
+        if (tab.value) tab.value.isDirty = true;
+        if (appStore.activeTabId === tab.value?.id) appStore.isDirty = true;
+        scheduleSubmission();
+      }
+      if (update.docChanged || update.selectionSet) recordSelection();
+    }),
+    EditorView.theme({ "&": { height: "100%", fontSize: "14px" }, ".cm-scroller": { overflow: "auto", fontFamily: "Consolas, monospace" },
+      ".cm-content": { whiteSpace: "pre", minWidth: "100%", caretColor: "var(--lm-ink)" }, ".cm-line": { padding: "0 8px" },
+      ".cm-gutters": { backgroundColor: "var(--lm-surface-soft)", color: "var(--lm-ink-muted)", borderColor: "var(--lm-border)" } }),
+  ] }) });
+  registerSession();
+  ownerSession = largeFile.value?.sessionId ?? "";
+  void loadWindow(logicalHead, true, true).catch(showError);
+  window.addEventListener("lightmark:jump-line", handleJump);
+  window.addEventListener("lightmark:find-command", handleFind);
+  window.addEventListener("lightmark:capture-editor-target", captureLargeEditorTarget);
+  window.addEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor);
+});
+watch(() => JSON.stringify([findReplaceStore.open, findReplaceStore.query, findOptions(), appStore.splitLayout.activePaneId, largeFile.value?.sessionId]), () => {
+  searchCoordinator.cancel(); findRevision = -1; findFingerprint = '';
+});
+watch(() => largeFile.value?.sessionId, (next) => {
+  if (!view || next === ownerSession) return;
+  ownerSession = next ?? ""; requestGeneration += 1; cache.clear(); failed.value = ""; baseText = "";
+  baseRaw = ""; failedSubmission = null; pendingGlobalPatch = null; beforeInputSelection = null;
+  logicalAnchor = logicalHead = { line: 0, column: 0 }; registerSession();
+  void loadWindow(logicalHead, false, true).catch(showError);
+});
+onUnmounted(() => {
+  searchCoordinator.cancel();
+  if (submitTimer) clearTimeout(submitTimer);
+  requestGeneration += 1;
+  if (!appStore.tabs.some(item => item.largeFile?.sessionId === ownerSession)) releaseLargeSessionBookmarks(ownerSession);
+  unregister?.(); view?.destroy(); view = null; cache.clear();
+  window.removeEventListener("lightmark:jump-line", handleJump);
+  window.removeEventListener("lightmark:find-command", handleFind);
+  window.removeEventListener("lightmark:capture-editor-target", captureLargeEditorTarget);
+  window.removeEventListener("lightmark:insert-snippet", insertSnippetIntoLargeEditor);
+});
 </script>
 
 <template>
-  <section class="flex h-full flex-col bg-paper-50 dark:bg-paper-950">
-    <div class="flex h-10 items-center gap-3 border-b border-paper-200 px-4 text-xs text-ink-500 dark:border-paper-800 dark:text-ink-300">
-      <span>Large Document Mode</span>
-      <span>{{ totalLines }} 行</span>
-      <span v-if="loading">加载中...</span>
+  <section class="large-source-editor">
+    <div class="large-source-bar">
+      <strong>大文件源码</strong><span>{{ totalLines.toLocaleString() }} 行</span>
+      <span v-if="readOnly">超过 500MiB · 只读</span><span v-if="loading">读取中…</span>
+      <span v-if="backgroundJob">{{ backgroundJob.kind === 'search' ? '查找' : '替换' }} {{ Math.round(backgroundJob.progress * 100) }}% <button @click="cancelLargeSourceJob(backgroundJob.sessionId).catch(showError)">取消</button></span>
+      <button @click="moveWindow(-1).catch(showError)">上一窗口</button><button @click="moveWindow(1).catch(showError)">下一窗口</button>
+      <label>行 <input v-model.number="jumpLine" type="number" min="1" :max="totalLines" @keydown.enter="goToPosition().catch(showError)"></label>
+      <label>列 <input v-model.number="jumpColumn" type="number" min="1" @keydown.enter="goToPosition().catch(showError)"></label>
+      <button @click="goToPosition().catch(showError)">跳转</button>
+      <button @click="previewSelection">预览选区</button><button @click="exportSelection">导出选区</button>
     </div>
-    <div ref="scroller" class="large-doc-scroll min-h-0 flex-1 overflow-auto" @scroll="onScroll">
-      <div class="relative mx-auto max-w-4xl px-8 py-6" :style="{ height: `${totalHeight}px` }">
-        <div class="absolute left-8 right-8" :style="{ transform: `translateY(${spacerTop}px)` }">
-          <article
-            v-for="block in blocks"
-            :key="block.key"
-            class="large-doc-block group"
-            :class="blockFindClass(block)"
-            :data-line-start="block.startLine"
-            @dblclick="startEditing(block)"
-          >
-              <textarea
-              v-if="editingKey === block.key"
-              v-model="editingText"
-              data-large-editor-input
-              class="large-doc-input"
-                spellcheck="false"
-                @paste="handleLargePaste"
-                @keydown.ctrl.shift.v="pasteLargePlainText"
-                @blur="commitEditing(block)"
-              @keydown.ctrl.enter.prevent="commitEditing(block)"
-            />
-            <div v-else class="large-doc-render prose prose-stone max-w-none dark:prose-invert" @click="taskLine(block) !== null && toggleTask(taskLine(block)!)" v-html="block.html || '&nbsp;'" />
-          </article>
-        </div>
-      </div>
+    <div v-if="failed" role="alert" class="large-source-error">{{ failed }} <button @click="submitPending(true).catch(showError)">重试提交</button><button @click="exportUnconfirmedWindow">导出未确认窗口</button><button @click="exportSelection">导出选区</button></div>
+    <div class="large-source-content"><div ref="host" class="large-source-host" data-large-source-editor />
+      <aside v-if="previewHtml" class="large-source-preview"><button @click="previewHtml = ''">关闭预览</button><p v-if="!previewReliable">片段之前的语法上下文无法可靠验证，请缩小范围或从章节起点预览。</p><article v-html="previewHtml" /></aside>
     </div>
+    <div class="large-source-status">窗口 {{ windowLabel }} · 选区 {{ selectionLabel }} · 默认不折行 · Shift＋窗口边界方向键扩展选区 · 预览上限 1MiB / 复制上限 16MiB</div>
+    <input class="large-source-track" type="range" min="0" :max="Math.max(0, totalLines - 1)" :value="jumpLine - 1" aria-label="跳转到文档逻辑行" @change="loadWindow({ line: Number(($event.target as HTMLInputElement).value), column: 0 }).catch(showError)">
   </section>
 </template>
-
 <style scoped>
-.large-doc-scroll {
-  scrollbar-gutter: stable;
-  overflow-anchor: none;
-}
-
-.large-doc-block {
-  min-height: 28px;
-  border-radius: 6px;
-  padding: 2px 8px;
-  contain: layout paint;
-}
-
-.large-doc-block:hover {
-  background: rgba(214, 211, 205, 0.24);
-}
-
-.large-doc-block-find {
-  background: rgba(80, 120, 180, 0.09);
-}
-
-.large-doc-block-current-find {
-  background: rgba(70, 116, 190, 0.17);
-  box-shadow: inset 3px 0 0 rgba(70, 116, 190, 0.72);
-}
-
-.large-doc-render :deep(*) {
-  margin-top: 0.35em;
-  margin-bottom: 0.35em;
-}
-
-.large-doc-render {
-  min-height: 24px;
-  overflow-wrap: anywhere;
-  word-break: normal;
-}
-
-.large-doc-render :deep(pre) {
-  overflow-x: hidden;
-  border-radius: 6px;
-  padding: 12px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.large-doc-render :deep(pre code) {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.large-doc-render :deep(table) {
-  display: table;
-  width: 100%;
-  max-width: 100%;
-  table-layout: auto;
-  overflow-x: hidden;
-}
-
-.large-doc-render :deep(th),
-.large-doc-render :deep(td) {
-  max-width: min(52rem, 100%);
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.large-doc-render :deep(input[type="checkbox"]) {
-  margin-right: 0.5rem;
-}
-
-.large-doc-input {
-  min-height: 7rem;
-  width: 100%;
-  resize: vertical;
-  border-radius: 6px;
-  border: 1px solid rgb(168 162 158);
-  background: rgb(255 255 255);
-  padding: 0.75rem;
-  font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  color: rgb(41 37 36);
-  outline: none;
-}
-
-:global(.dark) .large-doc-input {
-  border-color: rgb(68 64 60);
-  background: rgb(28 25 23);
-  color: rgb(245 245 244);
-}
+.large-source-editor { display:flex; flex-direction:column; height:100%; min-height:0; color:var(--lm-ink); background:var(--lm-surface); }
+.large-source-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #94a3b844; font-size:12px; }
+.large-source-bar label { display:flex; align-items:center; gap:4px; }.large-source-bar input { width:72px; background:transparent; border:1px solid #94a3b866; border-radius:4px; }
+button { padding:3px 6px; border:1px solid #94a3b855; border-radius:4px; }button:hover { background:#64748b22; }
+.large-source-content { display:flex; flex:1; min-height:0; min-width:0; }.large-source-host { flex:1; min-width:0; overflow:hidden; }
+.large-source-preview { width:40%; overflow:auto; padding:16px; border-left:1px solid #94a3b855; }.large-source-preview :deep(pre) { overflow:auto; }
+.large-source-error { padding:8px 12px; color:#991b1b; background:#fee2e2; font-size:12px; }
+.large-source-status { padding:4px 10px; font-size:11px; color:var(--lm-ink-muted); }.large-source-track { width:calc(100% - 24px); height:12px; margin:0 12px 4px; }
+:global(.dark) .large-source-error { color:#fecaca; background:#450a0a; }
 </style>

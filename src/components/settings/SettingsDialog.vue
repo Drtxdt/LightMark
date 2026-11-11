@@ -23,6 +23,23 @@ type AfterExportAction = "none" | "openFile" | "revealFolder";
 const activeSection = ref<SettingsSection>("general");
 const localSettings = ref<AppSettings>(cloneSettings(appStore.settings));
 const saveState = ref("");
+const bodyFontChoices = [
+  { label: "清晰无衬线 · 日常写作", value: '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif' },
+  { label: "宋体衬线 · 长文阅读", value: '"Noto Serif SC", "Source Han Serif SC", "SimSun", serif' },
+  { label: "系统字体 · 跟随设备", value: 'system-ui, sans-serif' },
+];
+const codeFontChoices = [
+  { label: "等宽代码 · 推荐", value: '"JetBrains Mono", "Cascadia Code", Consolas, monospace' },
+  { label: "系统等宽", value: 'ui-monospace, monospace' },
+];
+const bodyFontChoice = computed({
+  get: () => bodyFontChoices.some((item) => item.value === localSettings.value.appearance.fontFamily) ? localSettings.value.appearance.fontFamily : "custom",
+  set: (value: string) => { if (value !== "custom") { localSettings.value.appearance.fontFamily = value; void persist(); } },
+});
+const codeFontChoice = computed({
+  get: () => codeFontChoices.some((item) => item.value === localSettings.value.appearance.codeFontFamily) ? localSettings.value.appearance.codeFontFamily : "custom",
+  set: (value: string) => { if (value !== "custom") { localSettings.value.appearance.codeFontFamily = value; void persist(); } },
+});
 const pandocStatus = ref<PandocStatus | null>(null);
 const snippetDraft = ref<SnippetDefinition | null>(null);
 const snippetError = ref("");
@@ -449,8 +466,10 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 <input v-model.number="localSettings.appearance.editorWidth" class="settings-number" type="number" min="560" max="1200" @change="persist" />
               </label>
               <label class="settings-row">
-                <span><b>显示侧栏</b><small>隐藏文件/大纲侧栏，保留主编辑区。</small></span>
-                <input v-model="localSettings.appearance.showSidebar" type="checkbox" @change="persist" />
+                <span><b>侧栏</b><small>自动：单文件收起，工作区展开。手动选择会保存。</small></span>
+                <select v-model="localSettings.appearance.sidebarPreference" class="select" @change="localSettings.appearance.showSidebar = localSettings.appearance.sidebarPreference !== 'hidden'; persist()">
+                  <option value="auto">自动</option><option value="shown">始终显示</option><option value="hidden">始终隐藏</option>
+                </select>
               </label>
               <label class="settings-row">
                 <span><b>显示大纲入口</b><small>控制侧栏中的大纲页入口；文件与反链页不受影响。</small></span>
@@ -460,8 +479,8 @@ function cloneSettings(settings: AppSettings): AppSettings {
             <div class="settings-group">
               <h4>字体与排版</h4>
               <label class="settings-row">
-                <span><b>正文字体</b><small>CSS font-family 值。</small></span>
-                <input v-model="localSettings.appearance.fontFamily" class="settings-input" @change="persist" />
+                <span><b>正文字体</b><small>用于正文与预览；中文字体按设备可用情况回退。</small></span>
+                <select v-model="bodyFontChoice" class="settings-input"><option v-for="font in bodyFontChoices" :key="font.value" :value="font.value">{{ font.label }}</option><option value="custom">自定义字体（高级）</option></select>
               </label>
               <label class="settings-row">
                 <span><b>字号</b><small>12 到 24 px。</small></span>
@@ -476,9 +495,17 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 <input v-model.number="localSettings.appearance.paragraphSpacing" class="settings-number" type="number" min="0" max="2" step="0.1" @change="persist" />
               </label>
               <label class="settings-row">
-                <span><b>代码字体</b><small>源代码模式、代码块和内联代码使用。</small></span>
-                <input v-model="localSettings.appearance.codeFontFamily" class="settings-input" @change="persist" />
+                <span><b>代码字体</b><small>源码、代码块和行内代码使用等宽字体。</small></span>
+                <select v-model="codeFontChoice" class="settings-input"><option v-for="font in codeFontChoices" :key="font.value" :value="font.value">{{ font.label }}</option><option value="custom">自定义字体（高级）</option></select>
               </label>
+              <section class="font-sample" aria-label="字体预览" :style="{ fontFamily: localSettings.appearance.fontFamily, fontSize: `${localSettings.appearance.fontSize}px`, lineHeight: localSettings.appearance.lineHeight }">
+                <p>在清晨的光里，写下一段清晰的文字。中文标点、English words 与数字 0123456789 应当自然相处。</p>
+                <code :style="{ fontFamily: localSettings.appearance.codeFontFamily }">const 文字 = "LightMark"; // 0123456789</code>
+              </section>
+              <details class="font-advanced"><summary>高级：自定义 CSS 字体列表</summary>
+                <label class="settings-row"><span><b>正文 font-family</b></span><input v-model="localSettings.appearance.fontFamily" class="settings-input" @change="persist" /></label>
+                <label class="settings-row"><span><b>代码 font-family</b></span><input v-model="localSettings.appearance.codeFontFamily" class="settings-input" @change="persist" /></label>
+              </details>
             </div>
           </div>
 
@@ -623,6 +650,12 @@ function cloneSettings(settings: AppSettings): AppSettings {
 </template>
 
 <style scoped>
+.font-sample { border: 1px solid var(--lm-border); border-radius: 8px; padding: 18px; margin-top: 12px; background: var(--lm-surface); color: var(--lm-ink); overflow-wrap: anywhere; }
+.font-sample p { margin: 0 0 12px; }
+.font-sample code { font-size: 0.85em; white-space: pre-wrap; }
+.font-advanced { margin-top: 16px; color: var(--lm-ink-soft); font-size: 13px; }
+.font-advanced summary { cursor: pointer; padding: 6px 0; }
+
 .lm-settings-panel > aside {
   border-color: var(--lm-border);
   background: var(--lm-sidebar);

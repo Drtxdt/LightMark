@@ -198,6 +198,11 @@ function handleKeydown(event: KeyboardEvent) {
   font-weight: 600;
 }
 
+.editor-mode-toggle-option:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: -2px;
+}
+
 .editor-mode-toggle-option:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -207,7 +212,6 @@ function handleKeydown(event: KeyboardEvent) {
   --toggle-track: color-mix(in srgb, var(--lm-surface-soft) 62%, transparent);
 }
 
-:global(.dark) .editor-mode-toggle,
 .editor-mode-toggle-dark {
   --toggle-track: color-mix(in srgb, var(--lm-surface-soft) 88%, var(--lm-surface));
   --toggle-border: var(--lm-border-strong);
@@ -223,17 +227,14 @@ function handleKeydown(event: KeyboardEvent) {
     var(--lm-shadow-sm);
 }
 
-:global(.dark) .editor-mode-toggle-slider,
 .editor-mode-toggle-dark .editor-mode-toggle-slider {
   border-color: var(--lm-border-strong);
 }
 
-:global(.dark) .page-line,
 .editor-mode-toggle-dark .page-line {
   background: color-mix(in srgb, var(--lm-accent) 30%, transparent);
 }
 
-:global(.dark) .page-fold,
 .editor-mode-toggle-dark .page-fold {
   background: linear-gradient(
     135deg,

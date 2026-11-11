@@ -69,13 +69,16 @@ try {
   assert.match(wysiwyg, /event\.shiftKey && event\.key\.toLowerCase\(\) === "v"/);
   assert.match(wysiwyg, /handleWysiwygPlainPasteCapture/);
   assert.match(wysiwyg, /new Slice\(Fragment\.fromArray\(paragraphs\)/);
-  assert.match(wysiwyg, /plainTextToLiteralMarkdown\(node\.textContent/);
-  assert.match(wysiwyg, /function plainPasteRanges/);
+  const codec = fs.readFileSync(path.join(root, "src/editor/wysiwygCodec.ts"), "utf8");
+  assert.match(codec, /plainTextToLiteralMarkdown\(node\.textContent/);
+  assert.match(wysiwyg, /from "\.\.\/\.\.\/editor\/inlineMarkdownConversion"/);
   assert.match(sourceEditor, /key:\s*"Mod-Shift-v"/);
   assert.match(sourceEditor, /handleSourcePlainPasteCapture/);
   assert.match(sourceEditor, /insertSmartPasteIntoSource/);
-  assert.match(largeEditor, /@paste="handleLargePaste"/);
-  assert.match(largeEditor, /@keydown\.ctrl\.shift\.v="pasteLargePlainText"/);
+  assert.match(largeEditor, /paste:\s*handleLargePaste/);
+  assert.match(largeEditor, /key:\s*"Mod-Shift-v"/);
+  assert.match(largeEditor, /readClipboardPayload\(\)/);
+  assert.match(largeEditor, /pendingVersion !== version/);
   console.log("Smart paste checks passed.");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });

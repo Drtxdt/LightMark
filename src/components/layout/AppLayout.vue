@@ -6,6 +6,7 @@ import Toolbar from "./Toolbar.vue";
 import DocumentTabs from "./DocumentTabs.vue";
 import ExternalFileNotice from "./ExternalFileNotice.vue";
 import StatusBar from "./StatusBar.vue";
+import SaveFailureNotice from "./SaveFailureNotice.vue";
 import ExportStatusStrip from "./ExportStatusStrip.vue";
 import EditorShell from "../editor/EditorShell.vue";
 import FindReplacePanel from "../find/FindReplacePanel.vue";
@@ -13,8 +14,14 @@ import { closeFindPanel, findReplaceStore } from "../../stores/findReplaceStore"
 import type { EditorPaneId } from "../../types";
 
 const sidebarWidth = ref(280);
+const sidebarVisible = computed(() => {
+  const preference = appStore.settings.appearance.sidebarPreference;
+  return !appStore.distractionFreeMode && (preference === "auto"
+    ? Boolean(appStore.currentWorkspace)
+    : preference ? preference === "shown" : appStore.settings.appearance.showSidebar);
+});
 const gridColumns = computed(() => {
-  return appStore.settings.appearance.showSidebar && !appStore.distractionFreeMode
+  return sidebarVisible.value
     ? `${sidebarWidth.value}px 4px minmax(0, 1fr)`
     : "minmax(0, 1fr)";
 });
@@ -32,7 +39,9 @@ function isActivePane(paneId: EditorPaneId) {
 }
 
 function activatePane(paneId: EditorPaneId) {
-  void setActivePane(paneId);
+  void setActivePane(paneId).catch((error) => {
+    appStore.statusMessage = error instanceof Error ? error.message : String(error);
+  });
 }
 
 function startResize(event: PointerEvent) {
@@ -84,10 +93,11 @@ function startSplitResize(event: PointerEvent) {
 <template>
   <div class="lm-app-frame flex h-screen flex-col text-ink-900 dark:text-ink-100">
     <Toolbar v-if="!appStore.distractionFreeMode" />
+    <SaveFailureNotice />
     <div class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: gridColumns }">
-      <Sidebar v-if="appStore.settings.appearance.showSidebar && !appStore.distractionFreeMode" />
+      <Sidebar v-if="sidebarVisible" />
       <div
-        v-if="appStore.settings.appearance.showSidebar && !appStore.distractionFreeMode"
+        v-if="sidebarVisible"
         class="lm-resize-handle cursor-col-resize"
         @pointerdown="startResize"
       />
@@ -100,7 +110,7 @@ function startSplitResize(event: PointerEvent) {
           <EditorShell class="min-h-0 flex-1" pane-id="main" />
         </template>
         <div v-else class="grid min-h-0 flex-1" :style="{ gridTemplateColumns: splitColumns }">
-          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('main') }" @pointerdown.capture="activatePane('main')">
+          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('main') }" @pointerdown.capture="activatePane('main')" @focusin.capture="activatePane('main')">
             <DocumentTabs v-if="!appStore.distractionFreeMode" pane-id="main" />
             <ExternalFileNotice v-if="!appStore.distractionFreeMode && isActivePane('main')" />
             <FindReplacePanel v-if="!appStore.distractionFreeMode && isActivePane('main') && findReplaceStore.open" />
@@ -110,7 +120,7 @@ function startSplitResize(event: PointerEvent) {
             class="lm-resize-handle cursor-col-resize"
             @pointerdown="startSplitResize"
           />
-          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('secondary') }" @pointerdown.capture="activatePane('secondary')">
+          <section class="lm-editor-pane flex min-h-0 min-w-0 flex-col" :class="{ active: isActivePane('secondary') }" @pointerdown.capture="activatePane('secondary')" @focusin.capture="activatePane('secondary')">
             <DocumentTabs v-if="!appStore.distractionFreeMode" pane-id="secondary" />
             <ExternalFileNotice v-if="!appStore.distractionFreeMode && isActivePane('secondary')" />
             <FindReplacePanel v-if="!appStore.distractionFreeMode && isActivePane('secondary') && findReplaceStore.open" />
@@ -130,10 +140,10 @@ function startSplitResize(event: PointerEvent) {
 
 <style scoped>
 .lm-app-frame { background: var(--lm-canvas); }
-.lm-workspace { background: var(--lm-surface); box-shadow: -8px 0 28px rgb(65 46 28 / 4%); }
+.lm-workspace { container-type: inline-size; container-name: editor-pane; background: var(--lm-surface); box-shadow: -8px 0 28px rgb(65 46 28 / 4%); }
 .lm-resize-handle { border-inline: 1px solid var(--lm-border); background: var(--lm-sidebar); transition: background var(--lm-transition); }
 .lm-resize-handle:hover { background: var(--lm-accent-soft); }
-.lm-editor-pane { position: relative; border-right: 1px solid var(--lm-border); }
+.lm-editor-pane { container-type: inline-size; container-name: editor-pane; position: relative; border-right: 1px solid var(--lm-border); }
 .lm-editor-pane.active::after { position: absolute; inset: 0; border: 1px solid color-mix(in srgb, var(--lm-accent) 32%, transparent); pointer-events: none; content: ""; }
 .lm-distraction-hint { position: fixed; z-index: 45; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 8px 14px; border: 1px solid var(--lm-border); border-radius: 999px; background: color-mix(in srgb, var(--lm-surface) 92%, transparent); color: var(--lm-muted); box-shadow: var(--lm-shadow); font-size: 12px; pointer-events: none; }
 .lm-distraction-hint-enter-active, .lm-distraction-hint-leave-active { transition: opacity 160ms ease, transform 160ms ease; }

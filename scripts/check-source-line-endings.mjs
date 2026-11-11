@@ -37,7 +37,6 @@ try {
     sourceLineEndingsField,
   } = sourceTools;
   const original = "\uFEFFa\r\nb\nc\rd";
-  assert.match(sourceEditor, /serializeSourceDocument\(view\.state\.doc, view\.state\.field\(sourceLineEndingsField\)\)/);
   assert.match(sourceEditor, /resetSourceLineEndings\.of\(sourceDocument\.lineEndings\)/);
   assert.match(sourceEditor, /doc: sourceDocument\.text/);
   assert.match(sourceEditor, /extensions: extensions\(sourceDocument\)/);

@@ -166,6 +166,26 @@ try {
     "first\n\nsecond\n\nnew block",
   );
 
+  {
+    const before = [{}, {}], after = [{}, {}];
+    const pieces = [{ source: 'first\r\n', separator: '\n' }, { source: '[^qa]: pending footnote\n', separator: '' }];
+    const exact = sourceTools.combinePreservedSourceBlocks(before, pieces, after, ['first', '[^qa]: pending footnote'], '', '\n', false, source => source);
+    assert.equal(exact, 'first\r\n\n[^qa]: pending footnote\n', 'exact pieces already own their terminal EOL and mixed separators');
+    const changed = sourceTools.combinePreservedSourceBlocks(before, pieces, after, ['updated', '[^qa]: pending footnote'], '', '\n', false, (source, node) => node === before[1] ? source : null);
+    assert.equal(changed.endsWith('[^qa]: pending footnote\n'), true, 'compatibility fallback cannot duplicate an exact tail newline');
+  }
+  {
+    const before = {}, edited = {}, trailing = { type: { name: 'paragraph' }, content: { size: 0 } };
+    const source = '~~~text\noriginal\n~~~';
+    let patches = 0;
+    const actual = sourceTools.combinePreservedSourceBlocks([before], [{ source, separator: '\r\n' }], [edited, trailing], ['```plaintext\nupdated\n```', ''], '', '\n', true,
+      (raw, old, next) => { assert.equal(old, before); assert.equal(next, edited); patches++; return raw.replace('original', 'updated'); });
+    assert.equal(actual, '~~~text\nupdated\n~~~\r\n');
+    assert.equal(patches, 1, 'a generated empty tail cannot bypass the real block patch');
+    const meaningful = { type: { name: 'paragraph' }, content: { size: 7 } };
+    const withText = sourceTools.combinePreservedSourceBlocks([before], [{ source, separator: '' }], [edited, meaningful], ['```plaintext\nupdated\n```', 'new text'], '', '\n', true, () => null);
+    assert.ok(withText.endsWith('new text'), 'a real appended paragraph is retained');
+  }
   const snapshotSource = fs.readFileSync(path.resolve("src/editor/wysiwygSnapshot.ts"), "utf8");
   const wysiwygSource = fs.readFileSync(path.resolve("src/components/editor/WysiwygEditor.vue"), "utf8");
   assert.match(snapshotSource, /if \(!this\.source\.dirty\(\)\)/);

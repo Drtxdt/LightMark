@@ -59,6 +59,88 @@ try {
 
   assert.equal(failures.length, 0, `LM012 source-span fixtures failed:\n\n${failures.join("\n\n")}`);
 
+  const frontmatterFootnoteSource = [
+    "---",
+    "title: Audit",
+    "---",
+    "",
+    "# Heading",
+    "",
+    "Body[^qa]",
+    "",
+    "[^qa]: foot",
+    "",
+  ].join("\n");
+  assert.doesNotThrow(
+    () => markdown.markdownTopLevelSourceBlocks(frontmatterFootnoteSource),
+    "frontmatter plus an explicit footnote definition keeps mapped ranges valid",
+  );
+
+  const prefixAndFootnoteFixtures = [
+    {
+      name: "BOM CRLF frontmatter TOC mermaid and two multiline EOF footnotes",
+      source: [
+        "\uFEFF---",
+        "title: Audit",
+        "---",
+        "",
+        "[TOC]",
+        "",
+        "```mermaid",
+        "graph TD",
+        " A-->B",
+        "```",
+        "",
+        "Body[^a] and [^b].",
+        "",
+        "[^a]: first",
+        "    continuation",
+        "",
+        "[^b]: second",
+      ].join("\r\n"),
+    },
+    {
+      name: "LF frontmatter and two footnotes with terminal newline",
+      source: [
+        "---",
+        "title: Audit",
+        "---",
+        "",
+        "Body[^a] and [^b].",
+        "",
+        "[^a]: first",
+        "",
+        "[^b]: second",
+        "",
+      ].join("\n"),
+    },
+  ];
+  for (const fixture of prefixAndFootnoteFixtures) {
+    const mapped = markdown.markdownTopLevelSourceBlocks(fixture.source);
+    const reconstructed = mapped.prefix + mapped.blocks.map((block) => `${block.source}${block.separator}`).join("");
+    assert.equal(reconstructed, fixture.source, `${fixture.name}: source blocks retain every separator and EOF byte`);
+  }
+
+  const tocReplacementSource = "before\n\n[TOC]\n\nafter\n";
+  const tocReplacementMapped = markdown.markdownTopLevelSourceBlocks(tocReplacementSource);
+  const tocIndex = tocReplacementMapped.blocks.findIndex((block) => block.source.includes("[TOC]"));
+  assert.ok(tocIndex >= 0, "TOC source block is addressable for a local replacement");
+  const tocOriginalNodes = tocReplacementMapped.blocks.map(() => ({}));
+  const tocCurrentNodes = tocOriginalNodes.slice();
+  tocCurrentNodes[tocIndex] = {};
+  assert.equal(
+    preservation.combinePreservedSourceBlocks(
+      tocOriginalNodes,
+      tocReplacementMapped.blocks,
+      tocCurrentNodes,
+      tocReplacementMapped.blocks.map((block, index) => index === tocIndex ? "pending toc" : block.source),
+      tocReplacementMapped.prefix,
+      "\n",
+    ),
+    "before\n\npending toc\n\nafter\n",
+    "replacing a TOC NodeView preserves both surrounding blank lines",
+  );
+
   const lineEndingOf = (source) => source.match(/\r\n|\r|\n/)?.[0] ?? "\n";
   const replaceBlock = (source, blockIndex, replacement) => {
     const mapped = markdown.markdownTopLevelSourceBlocks(source);

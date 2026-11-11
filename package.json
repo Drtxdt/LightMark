@@ -37,6 +37,7 @@
     "check:wysiwyg-derived": "node scripts/check-wysiwyg-derived.mjs",
     "check:wysiwyg-find": "node scripts/check-wysiwyg-find.mjs",
     "check:source-outline": "node scripts/check-source-outline-incremental.mjs",
+    "check:source-composition": "node scripts/check-source-composition.mjs",
     "check:document-runtime": "node scripts/check-document-runtime.mjs",
     "check:source-preservation": "node scripts/check-source-preservation.mjs",
     "check:save-transaction": "node scripts/check-save-transaction.mjs",

@@ -7,10 +7,9 @@ import {
   closeAllTabs,
   closeOtherTabs,
   closeTab,
-  createUntitledTab,
+  createUntitledTabAfterFlush,
   moveTab,
   reopenLastClosedTab,
-  setActivePane,
 } from "../../stores/appStore";
 import type { DocumentTab, EditorPaneId } from "../../types";
 import { paneTabId, paneTabIds } from "../../utils/splitLayout";
@@ -59,7 +58,11 @@ async function onClose(event: MouseEvent, tabId: string) {
 }
 
 async function activatePaneTab(tabId: string) {
-  await activateTabInPane(props.paneId, tabId);
+  try {
+    await activateTabInPane(props.paneId, tabId);
+  } catch (error) {
+    appStore.statusMessage = error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function onAuxClick(event: MouseEvent, tabId: string) {
@@ -109,8 +112,11 @@ async function runMenuAction(action: () => Promise<unknown> | unknown) {
 }
 
 async function createTab() {
-  await setActivePane(props.paneId);
-  createUntitledTab("", false, props.paneId);
+  try {
+    await createUntitledTabAfterFlush(props.paneId);
+  } catch (error) {
+    appStore.statusMessage = error instanceof Error ? error.message : String(error);
+  }
 }
 </script>
 
@@ -219,7 +225,9 @@ async function createTab() {
 }
 
 .document-tab:focus-visible {
-  box-shadow: 0 0 0 2px rgb(134 128 116 / 28%);
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--lm-focus);
 }
 
 .tab-close {
@@ -237,7 +245,11 @@ async function createTab() {
   transition: all var(--lm-transition);
 }
 .new-tab-button:hover { background: var(--lm-accent-soft); color: var(--lm-accent); }
-.new-tab-button:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--lm-focus); }
+.new-tab-button:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--lm-focus);
+}
 
 .tab-menu { border: 1px solid var(--lm-border-strong); border-radius: var(--lm-radius-md); background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-md); }
 
@@ -257,7 +269,12 @@ async function createTab() {
   opacity: 0.45;
 }
 
-:global(.dark) .tab-menu-item:hover:not(:disabled) {
+.tab-menu-item:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+}
+
+.tab-menu-item:hover:not(:disabled) {
   background: var(--lm-accent-soft);
 }
 </style>

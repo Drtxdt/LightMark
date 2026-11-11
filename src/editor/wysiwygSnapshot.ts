@@ -6,6 +6,7 @@ type SnapshotSource = {
   dirty: () => boolean;
   previousMarkdown: () => string;
   blocks: () => readonly object[];
+  preservedBlockMarkdown?: (block: object) => string | undefined;
   serializeBlock: (block: object) => string;
   convertBlock: (html: string) => string;
   combineBlocks: (blocks: readonly string[], previousMarkdown: string, sourceBlocks: readonly object[]) => string;
@@ -42,6 +43,7 @@ export type WysiwygSnapshotDiagnostics = {
 export class WysiwygSnapshotCache {
   private cached: MarkdownSnapshot | null = null;
   private pending: PendingSnapshot | null = null;
+  private checkpointEpoch = 0;
   private readonly markdownByBlock = new WeakMap<object, string>();
   private incrementalCompatible: boolean | null = null;
   private oracleChecks = 0;
@@ -72,10 +74,20 @@ export class WysiwygSnapshotCache {
     // blocks while invalidating only the assembled document snapshot.
     this.cached = null;
     this.pending = null;
+    this.checkpointEpoch++;
+  }
+
+  /** Publish only an exact, version-fenced local source transaction receipt. */
+  prime(markdown: string, revision: number, tabId = this.source.tabId()) {
+    if (revision !== this.source.revision() || tabId !== this.source.tabId()) throw new Error('精确源码提交目标已过期，未更新快照缓存。');
+    this.checkpointEpoch++;
+    this.pending = null;
+    this.cached = { tabId, revision, markdown, dirty: this.source.dirty() };
   }
 
   async snapshot(reason: SnapshotReason, options: SnapshotOptions = {}) {
     const revision = this.source.revision();
+    const checkpointEpoch = this.checkpointEpoch;
     if (this.cached?.revision === revision && this.cached.tabId === this.source.tabId()) {
       return { ...this.cached, dirty: this.source.dirty() };
     }
@@ -90,6 +102,7 @@ export class WysiwygSnapshotCache {
     this.pending = pending;
     try {
       const snapshot = await run;
+      if (checkpointEpoch !== this.checkpointEpoch) throw new Error('序列化期间精确源码检查点已更新，请重新取得快照。');
       if (this.source.revision() === revision) this.cached = snapshot;
       return { ...snapshot };
     } finally {
@@ -119,7 +132,11 @@ export class WysiwygSnapshotCache {
     for (const block of blocks) {
       throwIfAborted(options.signal);
       const blockStarted = now();
-      let markdown = this.markdownByBlock.get(block);
+      // The exact baseline already owns immutable, unchanged block bytes.
+      // Consult it before compatibility HTML caches, which may predate a
+      // source-format checkpoint using the same model node identity.
+      const preserved = this.source.preservedBlockMarkdown?.(block);
+      let markdown = preserved ?? this.markdownByBlock.get(block);
       if (markdown == null) {
         markdown = this.source.convertBlock(this.source.serializeBlock(block));
         this.markdownByBlock.set(block, markdown);

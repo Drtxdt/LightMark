@@ -10,6 +10,7 @@ const ARTIFACT_CHECKS = new Set(["check-bundle-budget.mjs"]);
 
 export const EXPLICIT_QA_GATES = Object.freeze([
   "qa/check-html-security-regression.mjs",
+  "qa/check-native-math-probes.mjs",
 ]);
 
 export const CATEGORY_DESCRIPTIONS = Object.freeze({
@@ -17,9 +18,11 @@ export const CATEGORY_DESCRIPTIONS = Object.freeze({
   "state-logic": "状态或逻辑夹具门禁；按脚本自身范围运行",
   artifact: "已生成产物门禁；需要对应构建产物",
   "security-gate": "正式内容安全回归门禁；验证生产 renderer 的隔离能力边界",
+  "test-harness": "探针执行门禁；在隔离 mock/module 环境实际运行生成的 evaluate 代码",
 });
 
 export function classifyCheck(fileName) {
+  if (fileName === "qa/check-native-math-probes.mjs") return "test-harness";
   if (EXPLICIT_QA_GATES.includes(fileName)) return "security-gate";
   if (SOURCE_CHECKS.has(fileName)) return "source";
   if (ARTIFACT_CHECKS.has(fileName)) return "artifact";

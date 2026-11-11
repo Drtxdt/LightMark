@@ -39,13 +39,17 @@ export async function runDocumentExport(target: ExportTarget) {
   if (appStore.documentMode === "large") throw new Error("大文件模式暂不支持全量导出。");
   if (appStore.exportStatus.status === "running") throw new Error("已有导出任务正在进行。");
 
+  const tabId = appStore.activeTabId;
+  const currentPath = appStore.currentFilePath;
+  const settings: ExportSettings = { ...appStore.settings.export, htmlTheme: appStore.settings.export.htmlTheme === "current" ? appStore.activeTheme : appStore.settings.export.htmlTheme };
+  const mathNumbering = appStore.settings.markdown.mathNumbering;
   startExportStatus(target.id, target.label);
   try {
-    if (appStore.activeTabId) await flushDocumentSnapshot(appStore.activeTabId, "export");
+    const markdown = tabId ? await flushDocumentSnapshot(tabId, "export") : appStore.currentContent;
     const preflight = analyzeMathExportCompatibility(
-      appStore.currentContent,
+      markdown,
       target.id,
-      appStore.settings.markdown.mathNumbering,
+      mathNumbering,
     );
     const blocking = preflight.issues.filter((issue) => issue.blocking);
     if (blocking.length > 0) {
@@ -73,10 +77,10 @@ export async function runDocumentExport(target: ExportTarget) {
     }
     const result = await exportCurrentDocument({
       target: target.id,
-      currentPath: appStore.currentFilePath,
-      markdown: appStore.currentContent,
-      settings: appStore.settings.export,
-      mathNumbering: appStore.settings.markdown.mathNumbering,
+      currentPath,
+      markdown,
+      settings,
+      mathNumbering,
     });
     completeExportStatus(result.path);
     appStore.statusMessage = `已导出：${result.path}`;
@@ -161,6 +165,8 @@ async function renderExportBody(
   theme: "light" | "dark",
   mathNumbering: MathNumberingMode = "none",
 ) {
+  const { prepareMarkdownLanguages } = await import("./markdownHighlighting");
+  await prepareMarkdownLanguages(markdown);
   const withMermaid = await renderMermaidForExport(
     renderMarkdown(markdown, { mathNumbering }),
     theme,

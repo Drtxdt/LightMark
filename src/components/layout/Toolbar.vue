@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { currentFileName } from "../../stores/appStore";
 import {
   appStore,
@@ -36,6 +36,44 @@ type EditorCommand =
   | "alert";
 
 const exportMenuOpen = ref(false);
+const exportTrigger = ref<HTMLButtonElement | null>(null);
+const exportPanel = ref<HTMLElement | null>(null);
+const overflowOpen = ref(false);
+const overflowTrigger = ref<HTMLButtonElement | null>(null);
+const overflowPanel = ref<HTMLElement | null>(null);
+const formatState = ref<Record<string, boolean | number | string>>({});
+const headingLevel = computed(() => formatState.value.tabId === appStore.activeTabId ? Number(formatState.value.headingLevel || 0) : 0);
+const overflowCommands: Array<{ command: EditorCommand; label: string; value?: string | number }> = [
+  { command: "bold", label: "加粗" }, { command: "italic", label: "斜体" }, { command: "code", label: "行内代码" },
+  { command: "link", label: "链接" }, { command: "blockquote", label: "引用" },
+  { command: "bulletList", label: "无序列表" }, { command: "orderedList", label: "有序列表" },
+  { command: "taskList", label: "任务清单" }, { command: "image", label: "图片" },
+  { command: "table", label: "表格" }, { command: "alert", label: "GitHub 警示框", value: "note" },
+];
+function isFormatActive(command: string) { return formatState.value.tabId === appStore.activeTabId && Boolean(formatState.value[command]); }
+function receiveFormatState(event: Event) { formatState.value = (event as CustomEvent).detail || {}; }
+function closeOverflow() { overflowOpen.value = false; void nextTick(() => overflowTrigger.value?.focus()); }
+async function toggleOverflow() {
+  overflowOpen.value = !overflowOpen.value;
+  if (overflowOpen.value) { await nextTick(); overflowPanel.value?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus(); }
+}
+function handleOverflowKeys(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  if (event.key === "Escape") { event.preventDefault(); closeOverflow(); return; }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const buttons = Array.from(overflowPanel.value?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") || []);
+  if (!buttons.length) return;
+  event.preventDefault();
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (current + (event.key === "ArrowUp" ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[index]?.focus();
+}
+function handleOutsidePointer(event: PointerEvent) {
+  if (exportMenuOpen.value && !exportPanel.value?.contains(event.target as Node) && !exportTrigger.value?.contains(event.target as Node)) exportMenuOpen.value = false;
+  if (overflowOpen.value && !overflowPanel.value?.contains(event.target as Node) && !overflowTrigger.value?.contains(event.target as Node)) overflowOpen.value = false;
+}
+onMounted(() => { window.addEventListener("lightmark:editor-format-state", receiveFormatState); window.addEventListener("pointerdown", handleOutsidePointer); });
+onBeforeUnmount(() => { window.removeEventListener("lightmark:editor-format-state", receiveFormatState); window.removeEventListener("pointerdown", handleOutsidePointer); });
 const primaryExportTargets = exportTargets.filter((target) => ["pdf", "html", "docx", "png"].includes(target.id));
 const secondaryExportTargets = exportTargets.filter((target) => !primaryExportTargets.includes(target));
 const exportCompatibility = ref(new Map<string, { status: string }>());
@@ -57,13 +95,30 @@ async function runExport(target: (typeof exportTargets)[number]) {
 async function toggleExportMenu() {
   exportMenuOpen.value = !exportMenuOpen.value;
   if (!exportMenuOpen.value) return;
-  if (appStore.activeTabId) await flushDocumentSnapshot(appStore.activeTabId, "export");
+  const tabId = appStore.activeTabId;
+  const numbering = appStore.settings.markdown.mathNumbering;
+  const markdown = tabId ? await flushDocumentSnapshot(tabId, "export") : appStore.currentContent;
+  if (tabId !== appStore.activeTabId || !exportMenuOpen.value) { exportMenuOpen.value = false; return; }
   const { analyzeMathExportCompatibility } = await import("../../utils/mathExportCompatibility");
   exportCompatibility.value = new Map(exportTargets.map((target) => [target.id, analyzeMathExportCompatibility(
-    appStore.currentContent,
+    markdown,
     target.id,
-    appStore.settings.markdown.mathNumbering,
+    numbering,
   )]));
+  await nextTick();
+  exportPanel.value?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+}
+
+function handleExportKeys(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  if (event.key === "Escape") { event.preventDefault(); exportMenuOpen.value = false; exportTrigger.value?.focus(); return; }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const buttons = Array.from(exportPanel.value?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") || []);
+  if (!buttons.length) return;
+  event.preventDefault();
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (current + (event.key === "ArrowUp" ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[index]?.focus();
 }
 
 function mathExportStatusLabel(status: string) {
@@ -111,40 +166,42 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
       </button>
     </div>
 
+    <span v-if="appStore.documentMode === 'large'" class="large-source-capability" title="专用分块源码编辑；默认不折行；选区预览最多 1MiB。">大文件 · 源码</span>
     <EditorModeToggle
+      v-else
       :class="{ 'editor-mode-toggle-dark': appStore.activeTheme === 'dark' }"
       :model-value="appStore.editorMode"
-      :source-disabled="appStore.documentMode === 'large'"
       @update:model-value="toggleEditorMode"
     />
 
     <div class="lm-toolbar-group editor-tools" aria-label="编辑">
-      <button class="lm-toolbar-button" title="加粗" aria-label="加粗" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('bold')">
+      <button class="lm-toolbar-button" title="加粗" aria-label="加粗" :aria-pressed="isFormatActive('bold')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('bold')">
         <UiIcon name="bold" />
       </button>
-      <button class="lm-toolbar-button" title="斜体" aria-label="斜体" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('italic')">
+      <button class="lm-toolbar-button" title="斜体" aria-label="斜体" :aria-pressed="isFormatActive('italic')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('italic')">
         <UiIcon name="italic" />
       </button>
-      <button class="lm-toolbar-button" title="行内代码" aria-label="行内代码" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('code')">
+      <button class="lm-toolbar-button" title="行内代码" aria-label="行内代码" :aria-pressed="isFormatActive('code')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('code')">
         <UiIcon name="code" />
       </button>
-      <button class="lm-toolbar-button" title="链接" aria-label="链接" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('link')">
+      <button class="lm-toolbar-button" title="链接" aria-label="链接" :aria-pressed="isFormatActive('link')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('link')">
         <UiIcon name="link" />
       </button>
       <span class="lm-toolbar-split"></span>
-      <button class="lm-toolbar-button" title="标题" aria-label="标题" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('heading', 2)">
-        <UiIcon name="heading" />
-      </button>
-      <button class="lm-toolbar-button toolbar-priority-medium" title="引用" aria-label="引用" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('blockquote')">
+      <select class="toolbar-heading-select" aria-label="段落样式" :value="headingLevel" :disabled="!canRunWysiwygCommand()" @change="runEditorCommand('heading', Number(($event.target as HTMLSelectElement).value))">
+        <option :value="0">正文</option>
+        <option v-for="level in 6" :key="level" :value="level">H{{ level }}</option>
+      </select>
+      <button class="lm-toolbar-button toolbar-priority-medium" title="引用" aria-label="引用" :aria-pressed="isFormatActive('blockquote')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('blockquote')">
         <UiIcon name="quote" />
       </button>
-      <button class="lm-toolbar-button toolbar-priority-medium" title="无序列表" aria-label="无序列表" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('bulletList')">
+      <button class="lm-toolbar-button toolbar-priority-medium" title="无序列表" aria-label="无序列表" :aria-pressed="isFormatActive('bulletList')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('bulletList')">
         <UiIcon name="list" />
       </button>
-      <button class="lm-toolbar-button toolbar-priority-medium" title="有序列表" aria-label="有序列表" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('orderedList')">
+      <button class="lm-toolbar-button toolbar-priority-medium" title="有序列表" aria-label="有序列表" :aria-pressed="isFormatActive('orderedList')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('orderedList')">
         <UiIcon name="list-ordered" />
       </button>
-      <button class="lm-toolbar-button toolbar-priority-medium" title="任务清单" aria-label="任务清单" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('taskList')">
+      <button class="lm-toolbar-button toolbar-priority-medium" title="任务清单" aria-label="任务清单" :aria-pressed="isFormatActive('taskList')" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('taskList')">
         <UiIcon name="list-checks" />
       </button>
       <span class="lm-toolbar-split toolbar-priority-low"></span>
@@ -157,6 +214,15 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
       <button class="lm-toolbar-button toolbar-priority-low" title="插入表格" aria-label="插入表格" :disabled="!canRunWysiwygCommand()" @click="runEditorCommand('table')">
         <UiIcon name="table" />
       </button>
+    </div>
+
+    <div class="toolbar-overflow-wrap">
+      <button ref="overflowTrigger" class="lm-toolbar-button" aria-label="更多编辑操作" title="更多编辑操作" aria-haspopup="menu" :aria-expanded="overflowOpen" @click="toggleOverflow">•••</button>
+      <div v-if="overflowOpen" ref="overflowPanel" class="lm-export-menu toolbar-overflow-menu" role="menu" @keydown="handleOverflowKeys">
+        <button v-for="item in overflowCommands" :key="item.command" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand(item.command, item.value)">{{ item.label }}<span v-if="isFormatActive(item.command)" aria-label="已启用">✓</span></button>
+        <button v-for="level in 7" :key="`h${level}`" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand('heading', level - 1)">{{ level === 1 ? '正文' : `H${level - 1}` }}<span v-if="headingLevel === level - 1">✓</span></button>
+        <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(formatCurrentMarkdown)">格式化 Markdown</button>
+      </div>
     </div>
 
     <div class="lm-toolbar-title" :title="currentFileName">
@@ -177,18 +243,22 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
       <div class="lm-export-menu-wrap">
         <button
           class="lm-toolbar-button"
+          ref="exportTrigger"
           title="导出"
           aria-label="导出"
+          aria-haspopup="menu"
+          :aria-expanded="exportMenuOpen"
           :disabled="appStore.exportStatus.status === 'running'"
-          @click="void toggleExportMenu()"
+          @click="run(toggleExportMenu)"
         >
           <UiIcon name="file-output" />
         </button>
-        <div v-if="exportMenuOpen" class="lm-export-menu" @mouseleave="exportMenuOpen = false">
+        <div v-if="exportMenuOpen" ref="exportPanel" class="lm-export-menu" role="menu" @keydown="handleExportKeys">
           <button
             v-for="target in primaryExportTargets"
             :key="target.id"
             class="lm-export-menu-item"
+            role="menuitem"
             :disabled="appStore.exportStatus.status === 'running'"
             @click="run(() => runExport(target))"
           >
@@ -205,6 +275,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
             v-for="target in secondaryExportTargets"
             :key="target.id"
             class="lm-export-menu-item"
+            role="menuitem"
             :disabled="appStore.exportStatus.status === 'running'"
             @click="run(() => runExport(target))"
           >
@@ -224,7 +295,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
       <span class="toolbar-theme-wrap">
         <ThemeToggle
           :model-value="appStore.activeTheme"
-          size="md"
+          :size="77"
           @update:model-value="toggleTheme"
         />
       </span>
@@ -233,15 +304,21 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 </template>
 
 <style scoped>
+.large-source-capability { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--lm-border); border-radius: 7px; background: var(--lm-surface-soft); color: var(--lm-ink); font-size: 12px; }
+.toolbar-heading-select { width: 64px; height: 30px; border: 1px solid var(--lm-border); border-radius: 7px; background: var(--lm-surface); color: var(--lm-ink); font-size: 12px; }
+.lm-toolbar-button[aria-pressed="true"] { background: var(--lm-accent-soft); color: var(--lm-accent); }
+.toolbar-overflow-wrap { position: relative; display: none; flex: 0 0 auto; }
+.toolbar-overflow-menu { left: 0; right: auto; width: 220px; }
+@media (max-width: 1180px) { .toolbar-overflow-wrap { display: inline-grid; } }
+
 .lm-toolbar {
   display: flex;
   height: 46px;
   min-width: 0;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid rgb(231 225 215 / 86%);
-  background:
-    linear-gradient(180deg, rgb(253 252 249 / 96%), rgb(247 244 238 / 92%));
+  border-bottom: 1px solid var(--lm-border);
+  background: color-mix(in srgb, var(--lm-surface-soft) 94%, transparent);
   padding: 0 10px;
 }
 
@@ -250,16 +327,16 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   height: 32px;
   align-items: center;
   gap: 2px;
-  border: 1px solid rgb(219 213 202 / 72%);
+  border: 1px solid var(--lm-border);
   border-radius: 9px;
-  background: rgb(255 255 255 / 52%);
+  background: color-mix(in srgb, var(--lm-surface-raised) 52%, transparent);
   padding: 2px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 62%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--lm-surface-raised) 62%, transparent);
 }
 
 .editor-tools {
   max-width: 45vw;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .lm-toolbar-button {
@@ -271,7 +348,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #625b51;
+  color: var(--lm-ink-soft);
   cursor: pointer;
   outline: none;
   transition:
@@ -282,12 +359,12 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 
 .lm-toolbar-button:hover:not(:disabled),
 .lm-toolbar-button:focus-visible:not(:disabled) {
-  background: rgb(120 113 108 / 12%);
-  color: #2f2b25;
+  background: var(--lm-accent-soft);
+  color: var(--lm-ink);
 }
 
 .lm-toolbar-button.primary {
-  color: #4d3922;
+  color: var(--lm-accent);
 }
 
 .lm-toolbar-button:disabled {
@@ -303,7 +380,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   width: 1px;
   height: 16px;
   margin: 0 3px;
-  background: rgb(213 207 196 / 82%);
+  background: var(--lm-border);
 }
 
 .lm-toolbar-title {
@@ -314,7 +391,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   align-items: center;
   justify-content: center;
   gap: 7px;
-  color: #756f66;
+  color: var(--lm-ink-muted);
   font-size: 13px;
   line-height: 1;
 }
@@ -324,7 +401,8 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   height: 6px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: #b07a3c;
+  background: var(--lm-accent);
+  box-shadow: 0 0 0 3px var(--lm-accent-soft);
   opacity: 0;
 }
 
@@ -351,9 +429,9 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   width: 260px;
   max-height: min(68vh, 440px);
   overflow: auto;
-  border: 1px solid rgb(219 213 202 / 88%);
+  border: 1px solid var(--lm-border-strong);
   border-radius: 10px;
-  background: rgb(255 254 251 / 98%);
+  background: var(--lm-surface-raised);
   padding: 6px;
   box-shadow: 0 14px 36px rgb(49 45 40 / 16%);
 }
@@ -367,7 +445,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   border-radius: 7px;
   background: transparent;
   padding: 8px 9px;
-  color: #403b34;
+  color: var(--lm-ink);
   cursor: pointer;
   font-size: 13px;
   text-align: left;
@@ -375,8 +453,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 
 .lm-export-menu-item:hover,
 .lm-export-menu-item:focus-visible {
-  background: rgb(120 113 108 / 11%);
-  outline: none;
+  background: var(--lm-accent-soft);
 }
 
 .lm-export-menu-item:disabled {
@@ -385,7 +462,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 }
 
 .lm-export-menu-item small {
-  color: #8a8276;
+  color: var(--lm-ink-muted);
   font: 12px/1 "JetBrains Mono", ui-monospace, monospace;
 }
 .lm-export-menu-meta {
@@ -404,13 +481,13 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   font-style: normal;
   line-height: 1;
 }
-.lm-export-menu-meta em.is-degraded { background: var(--lm-accent-soft); color: var(--lm-accent-strong); }
-.lm-export-menu-meta em.is-blocked { background: color-mix(in srgb, var(--lm-danger) 13%, transparent); color: var(--lm-danger); }
+.lm-export-menu-meta em.is-degraded { background: var(--lm-accent-soft); color: var(--lm-accent); }
+.lm-export-menu-meta em.is-blocked { background: color-mix(in srgb, var(--lm-error) 13%, transparent); color: var(--lm-error); }
 
 .lm-export-menu-separator {
   height: 1px;
   margin: 5px 3px;
-  background: rgb(219 213 202 / 78%);
+  background: var(--lm-border);
 }
 
 /* Paper desk chrome */
@@ -447,7 +524,12 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 }
 
 .lm-toolbar-button:active:not(:disabled) { transform: translateY(1px); }
-.lm-toolbar-button:focus-visible:not(:disabled) { background: var(--lm-accent-soft); box-shadow: 0 0 0 2px var(--lm-focus); }
+.lm-toolbar-button:focus-visible:not(:disabled) {
+  background: var(--lm-accent-soft);
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--lm-focus);
+}
 .lm-toolbar-button.primary { background: var(--lm-accent-soft); color: var(--lm-accent); }
 .lm-toolbar-split { height: 18px; background: var(--lm-border); }
 .lm-toolbar-title { color: var(--lm-ink-muted); font-family: Georgia, "Noto Serif SC", serif; letter-spacing: 0.01em; }
@@ -455,15 +537,15 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 .toolbar-theme-wrap { margin-left: 7px; padding-left: 9px; border-left: 1px solid var(--lm-border); }
 .lm-export-menu { border-color: var(--lm-border-strong); border-radius: var(--lm-radius-md); background: var(--lm-surface-raised); box-shadow: var(--lm-shadow-md); }
 .lm-export-menu-item { border-radius: var(--lm-radius-sm); color: var(--lm-ink); }
-.lm-export-menu-item:hover, .lm-export-menu-item:focus-visible { background: var(--lm-accent-soft); }
+.lm-export-menu-item:hover, .lm-export-menu-item:focus-visible {
+  background: var(--lm-accent-soft);
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+}
 
-:global(.dark) .lm-toolbar,
 .lm-toolbar-dark { border-bottom-color: var(--lm-border); background: color-mix(in srgb, var(--lm-surface-soft) 96%, transparent); }
-:global(.dark) .lm-toolbar-group,
 .lm-toolbar-dark .lm-toolbar-group { border-color: transparent; background: transparent; box-shadow: none; }
-:global(.dark) .lm-toolbar-button,
 .lm-toolbar-dark .lm-toolbar-button { color: var(--lm-ink-soft); }
-:global(.dark) .lm-toolbar-button:hover:not(:disabled),
 .lm-toolbar-dark .lm-toolbar-button:hover:not(:disabled) { background: var(--lm-accent-soft); color: var(--lm-ink); }
 
 @media (max-width: 1180px) {
@@ -487,6 +569,8 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
   .view-tools .lm-toolbar-button:first-child { display: none; }
   .toolbar-theme-wrap { margin-left: 3px; padding-left: 6px; }
 }
+
+.lm-toolbar-dark .lm-toolbar-button[aria-pressed="true"] { color: var(--lm-accent); background: var(--lm-accent-soft); }
 
 @media (prefers-reduced-motion: reduce) {
   .lm-toolbar-button { transition-duration: 0ms; }

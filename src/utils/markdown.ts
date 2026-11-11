@@ -1,6 +1,6 @@
 import MarkdownIt from "markdown-it";
 import type Token from "markdown-it/lib/token.mjs";
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/core";
 import {
   escapeAttribute,
   escapeHtml,
@@ -40,8 +40,8 @@ const md = new MarkdownIt({
   linkify: true,
   typographer: true,
   highlight(code, language) {
-    const lang = language && hljs.getLanguage(language) ? language : "plaintext";
-    const value = hljs.highlight(code, { language: lang }).value;
+    const lang = language && /^[\w+-]+$/.test(language) ? language : "plaintext";
+    const value = hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang }).value : escapeHtml(code);
     return `<pre><code class="hljs language-${lang}">${value}</code></pre>`;
   },
 });
@@ -81,12 +81,18 @@ export function renderMarkdown(
 
 export function renderMarkdownForEditor(markdown: string) {
   const internalRenderContext = createInternalRenderContext();
-  const prepared = markSpecialBlocksForEditor(markdown, undefined, internalRenderContext);
+  const codeHtml: string[] = [];
+  const codePrefix = `@@LIGHTMARK_CODE_${internalRenderContext.token}_`;
+  const prepared = markSpecialBlocksForEditor(markdown, undefined, internalRenderContext, html => {
+    const token = `${codePrefix}${codeHtml.length}@@`;
+    codeHtml.push(markInternalHtml(html, internalRenderContext));
+    return token;
+  });
   const tableReady = renderMarkdownTables(
     prepared,
     (source) => editorMd.renderInline(source, { internalRenderContext }),
   );
-  return stripInternalHtmlCapabilities(editorMd.render(tableReady, { internalRenderContext }), internalRenderContext);
+  return stripInternalHtmlCapabilities(restorePlaceholders(editorMd.render(tableReady, { internalRenderContext }), codeHtml, undefined, codePrefix), internalRenderContext);
 }
 
 export interface MarkdownSourceBlock {
@@ -138,17 +144,22 @@ export function markdownTopLevelSourceBlocks(markdown: string): { prefix: string
   const observer = createSourceMapObserver(markdown);
   const prepared = markSpecialBlocksForEditor(markdown, observer);
   observer.assertValue(prepared);
-  const tokens = editorMd.parse(prepared, {});
-  const preparedLineStarts = markdownLineStarts(prepared);
+  // The editor's table scanner ends a table before a non-row (including an
+  // adjacent HTML comment). MarkdownIt's default table tokenizer can consume
+  // that line as another row, so derive source boundaries from the same HTML.
+  const tableReady = renderMarkdownTables(prepared, source => editorMd.renderInline(source), replacements => observer.replaceMany(replacements));
+  observer.assertValue(tableReady);
+  const tokens = editorMd.parse(tableReady, {});
+  const preparedLineStarts = markdownLineStarts(tableReady);
   const preparedTopLevelTokens = tokens
     .filter((token) => token.level === 0 && token.map && token.nesting !== -1)
   const preparedRanges = preparedTopLevelTokens
     .map((token) => ({ fromLine: token.map![0], toLine: token.map![1] }))
     .filter((range, index, items) => index === 0 || range.fromLine !== items[index - 1].fromLine || range.toLine !== items[index - 1].toLine);
   const sourceRanges: PreparedSourceRange[] = preparedRanges.map((range) => {
-    const preparedFrom = preparedLineStarts[range.fromLine] ?? prepared.length;
-    const preparedTo = preparedLineStarts[range.toLine] ?? prepared.length;
-    return mapPreparedRange(observer, preparedFrom, preparedContentEnd(prepared, preparedTo));
+    const preparedFrom = preparedLineStarts[range.fromLine] ?? tableReady.length;
+    const preparedTo = preparedLineStarts[range.toLine] ?? tableReady.length;
+    return mapPreparedRange(observer, preparedFrom, preparedContentEnd(tableReady, preparedTo));
   });
   const lastPreparedToken = preparedTopLevelTokens.at(-1);
   if (!lastPreparedToken || lastPreparedToken.type !== "paragraph_open") {
@@ -586,6 +597,7 @@ function markSpecialBlocksForEditor(
   markdown: string,
   observer?: SourceMapObserver,
   internalRenderContext?: InternalRenderContext,
+  stashRenderedCode?: (html: string) => string,
 ) {
   const placeholders: string[] = [];
   const placeholderPrefix = `@@LIGHTMARK_PLACEHOLDER_${internalRenderContext?.token ?? createInternalRenderContext().token}_`;
@@ -596,30 +608,29 @@ function markSpecialBlocksForEditor(
   };
   const stashUntrusted = (html: string) => stash(html, false);
 
-  const enhancedImagePattern = /<figure\b([^>]*\bdata-lightmark-image(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*)>\s*<img\b([^>]*)>\s*(?:<figcaption>([\s\S]*?)<\/figcaption>\s*)?<\/figure>/gi;
-  let next = observer
-    ? replaceWithSourceObserver(markdown, enhancedImagePattern, (source) => protectEnhancedImagesForEditor(source, stashUntrusted), observer)
-    : protectEnhancedImagesForEditor(markdown, stashUntrusted);
-  next = replaceWithSourceObserver(next, LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
+  let next = replaceWithSourceObserver(markdown, LEADING_FRONT_MATTER_PATTERN, (_match, yaml) => {
     return `${stash(`<section data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"></section>`)}\n`;
   }, observer);
-
-  next = replaceWithSourceObserver(next, /(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => {
-    return `${prefix}\n${stash(buildTocHtml(markdown).replace("class=\"toc-node\" ", ""))}\n`;
+  next = replaceMarkdownCodeBlocks(next, (raw, token) => {
+    if (token.type === 'fence' && token.info.trim().split(/\s+/)[0] === 'mermaid') {
+      return stash(`<div data-type="mermaid" data-code="${escapeHtml(token.content.trim())}"></div>`);
+    }
+    return stashUntrusted(raw);
   }, observer);
-
-  next = replaceWithSourceObserver(next, /(^|\n)```mermaid\s*\n([\s\S]*?)\n```\s*(?=\n|$)/g, (_match, prefix, code) => {
-    return `${prefix}\n${stash(`<div data-type="mermaid" data-code="${escapeHtml(code.trim())}"></div>`)}\n`;
-  }, observer);
-
-  next = convertFootnotes(next, stash, true, observer);
-  next = replaceWithSourceObserver(next, /```[\s\S]*?```/g, (code) => stashUntrusted(code), observer);
   next = replaceInlineCodeSpans(next, (source, code) => {
     const delimiterLength = source.match(/^`+/)?.[0].length ?? 1;
-    return stash(
+    return stashRenderedCode ? stashRenderedCode(
       `<code data-code-raw="${escapeAttribute(source)}" data-code-original="${escapeAttribute(code)}" data-code-delimiter-length="${delimiterLength}">${escapeHtml(code)}</code>`,
-    );
+    ) : stashUntrusted(source);
   }, observer);
+  const enhancedImagePattern = /<figure\b([^>]*\bdata-lightmark-image(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*)>\s*<img\b([^>]*)>\s*(?:<figcaption>([\s\S]*?)<\/figcaption>\s*)?<\/figure>/gi;
+  next = observer
+    ? replaceWithSourceObserver(next, enhancedImagePattern, source => protectEnhancedImagesForEditor(source, stashUntrusted), observer)
+    : protectEnhancedImagesForEditor(next, stashUntrusted);
+  next = replaceWithSourceObserver(next, /(^|(?<=\n))\[TOC\][^\S\r\n]*(?=\r?\n|$)/gi, () => {
+    return `${stash(buildTocHtml(markdown).replace("class=\"toc-node\" ", ""))}\n`;
+  }, observer);
+  next = convertFootnotes(next, stash, true, observer);
   next = protectHtmlBlocks(next, stash, observer);
   next = protectInlineHtml(next, stash, observer);
   next = protectRawHtml(next, stash, observer);
@@ -695,13 +706,21 @@ function enhanceMarkdownForRender(
     const html = `<section class="front-matter-node" data-type="front-matter" data-yaml="${escapeAttribute(yaml.trim())}"><div class="front-matter-fence">---</div><pre>${escapeHtml(yaml.trim())}</pre><div class="front-matter-fence">---</div></section>`;
     return `${markGeneratedHtml(html, undefined, internalRenderContext)}\n\n`;
   });
+  const codeSources: string[] = [];
+  const codePrefix = `@@LIGHTMARK_LITERAL_FENCE_${createInternalRenderContext().token}_`;
+  next = replaceMarkdownCodeBlocks(next, source => {
+    const token = `${codePrefix}${codeSources.length}@@`; codeSources.push(source); return token;
+  });
+  next = replaceInlineCodeSpans(next, source => {
+    const token = `${codePrefix}${codeSources.length}@@`; codeSources.push(source); return token;
+  });
   next = next.replace(/(^|\n)\[TOC\]\s*(?=\n|$)/gi, (_match, prefix) => `${prefix}${markGeneratedHtml(buildTocHtml(markdown), undefined, internalRenderContext)}\n`);
   next = convertFootnotes(next, undefined, false, undefined, internalRenderContext);
   next = renderLatexMathForMarkdown(next, stash, mathNumbering);
   next = renderRawHtmlForPreview(next, stash);
   next = convertTaskItems(next, undefined, undefined, internalRenderContext);
   next = convertDefinitionLists(next);
-  return next;
+  return restorePlaceholders(next, codeSources, undefined, codePrefix);
 }
 
 function installLightMarkMarkdown(instance: MarkdownIt) {
@@ -852,7 +871,13 @@ function convertFootnotes(
   const lines = markdown.split(/\r?\n/);
   const lineStarts = markdownLineStarts(markdown);
   const definitionOrder = new Map<string, number>();
-  const definitionBlocks: Array<{ token: string; entries: Array<[string, string]>; rawSpan: SourceMapSpan }> = [];
+  const definitionBlocks: Array<{
+    token: string;
+    entries: Array<[string, string]>;
+    preparedFrom: number;
+    preparedTo: number;
+    rawSpan: SourceMapSpan;
+  }> = [];
   const bodyLines: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const definition = parseFootnoteDefinitionAt(lines, index);
@@ -866,8 +891,14 @@ function convertFootnotes(
     const token = `@@LIGHTMARK_FOOTNOTE_SECTION_${definitionBlocks.length}@@`;
     const from = lineStarts[index] ?? markdown.length;
     const contentEnd = lineStarts[definition.nextIndex] ?? markdown.length;
-    const lineEnd = contentEnd + lines[definition.nextIndex].length;
-    definitionBlocks.push({ token, entries: [[definition.id, definition.text]], rawSpan: { from, to: lineEnd } });
+    const lineEnd = Math.min(markdown.length, contentEnd + (lines[definition.nextIndex]?.length ?? 0));
+    definitionBlocks.push({
+      token,
+      entries: [[definition.id, definition.text]],
+      preparedFrom: from,
+      preparedTo: lineEnd,
+      rawSpan: observer ? observer.rawSpan(from, lineEnd) : { from, to: lineEnd },
+    });
     bodyLines.push(token);
     index = definition.nextIndex;
   }
@@ -878,8 +909,8 @@ function convertFootnotes(
   if (observer) {
     observer.assertValue(markdown);
     observer.replaceMany(definitionBlocks.map((block) => ({
-      from: block.rawSpan.from,
-      to: block.rawSpan.to,
+      from: block.preparedFrom,
+      to: block.preparedTo,
       replacement: block.token,
       rawSpan: block.rawSpan,
     })));
@@ -1023,49 +1054,86 @@ function protectCodeForFootnoteRefs(markdown: string, observer?: SourceMapObserv
     codePlaceholders.push(code);
     return token;
   };
-  const withoutFences = replaceWithSourceObserver(markdown, /```[\s\S]*?```/g, (code) => stashCode(code), observer);
+  const withoutFences = replaceMarkdownCodeBlocks(markdown, code => stashCode(code), observer);
   const protectedMarkdown = replaceInlineCodeSpans(withoutFences, (source) => stashCode(source), observer);
   const map = `\n@@LIGHTMARK_FOOTNOTE_CODE_MAP_${codePlaceholders.map((item) => encodeURIComponent(item)).join("|")}@@`;
   if (observer) observer.insert(protectedMarkdown.length, map);
   return `${protectedMarkdown}${map}`;
 }
 
-function replaceInlineCodeSpans(markdown: string, replacement: (source: string, code: string) => string, observer?: SourceMapObserver) {
-  const lines = markdown.split("\n");
-  const lineStarts = markdownLineStarts(markdown);
-  const replacements: Array<{ from: number; to: number; value: string }> = [];
-  const outputLines = lines.map((line, lineIndex) => {
-    const lineStart = lineStarts[lineIndex] ?? 0;
-    let output = "";
-    let cursor = 0;
-    for (let index = 0; index < line.length;) {
-      if (line[index] !== "`") {
-        index += 1;
-        continue;
-      }
-      let length = 1;
-      while (line[index + length] === "`") length += 1;
-      const delimiter = "`".repeat(length);
-      const close = line.indexOf(delimiter, index + length);
-      if (close < 0) {
-        index += length;
-        continue;
-      }
-      output += line.slice(cursor, index);
-      const source = line.slice(index, close + length);
-      const value = replacement(source, line.slice(index + length, close));
-      output += value;
-      replacements.push({ from: lineStart + index, to: lineStart + close + length, value });
-      cursor = close + length;
-      index = cursor;
-    }
-    return `${output}${line.slice(cursor)}`;
-  });
-  if (observer) {
-    observer.assertValue(markdown);
-    observer.replaceMany(replacements.map((item) => ({ from: item.from, to: item.to, replacement: item.value })));
+function replaceMarkdownCodeBlocks(markdown: string, replacement: (source: string, token: Token) => string, observer?: SourceMapObserver) {
+  if (!/[`~]|^ {4}/m.test(markdown)) return markdown;
+  const starts = markdownLineStarts(markdown);
+  const footnotes = footnoteSourceLineRanges(markdown);
+  const replacements: Array<{ from: number; to: number; replacement: string }> = [];
+  for (const token of editorMd.parse(markdown, {})) {
+    if ((token.type !== 'fence' && token.type !== 'code_block') || !token.map) continue;
+    if (footnotes.some(range => token.map![0] >= range.from && token.map![0] <= range.to)) continue;
+    const from = starts[token.map[0]] ?? 0;
+    let to = starts[token.map[1]] ?? markdown.length;
+    if (markdown.slice(to - 2, to) === '\r\n') to -= 2;
+    else if (/[\r\n]/.test(markdown[to - 1] ?? '')) to--;
+    replacements.push({ from, to, replacement: replacement(markdown.slice(from, to), token) });
   }
-  return outputLines.join("\n");
+  if (!replacements.length) return markdown;
+  observer?.assertValue(markdown);
+  observer?.replaceMany(replacements);
+  let result = markdown;
+  for (const item of replacements.reverse()) result = result.slice(0, item.from) + item.replacement + result.slice(item.to);
+  return result;
+}
+
+function replaceInlineCodeSpans(markdown: string, replacement: (source: string, code: string) => string, observer?: SourceMapObserver) {
+  if (!markdown.includes('`')) return markdown;
+  const starts = markdownLineStarts(markdown);
+  const footnotes = footnoteSourceLineRanges(markdown);
+  const replacements: Array<{ from: number; to: number; replacement: string }> = [];
+  for (const token of editorMd.parse(markdown, {})) {
+    if (token.type !== 'inline' || !token.map) continue;
+    if (footnotes.some(range => token.map![0] >= range.from && token.map![0] <= range.to)) continue;
+    const codes = token.children?.filter(child => child.type === 'code_inline') ?? [];
+    if (!codes.length) continue;
+    const from = starts[token.map[0]] ?? 0, end = starts[token.map[1]] ?? markdown.length;
+    let codeIndex = 0;
+    for (let index = from; index < end && codeIndex < codes.length;) {
+      if (markdown[index] !== '`') { index++; continue; }
+      let slashes = 0;
+      for (let i = index - 1; i >= from && markdown[i] === '\\'; i--) slashes++;
+      let length = 1;
+      while (markdown[index + length] === '`') length++;
+      if (slashes % 2) { index += length; continue; }
+      let close = index + length, found = false;
+      while (close < end) {
+        if (markdown[close] !== '`') { close++; continue; }
+        let run = 1;
+        while (markdown[close + run] === '`') run++;
+        if (run === length) { found = true; break; }
+        close += run;
+      }
+      if (!found) { index += length; continue; }
+      const to = close + length;
+      replacements.push({ from: index, to, replacement: replacement(markdown.slice(index, to), codes[codeIndex++].content) });
+      index = to;
+    }
+  }
+  observer?.assertValue(markdown);
+  observer?.replaceMany(replacements);
+  let result = markdown;
+  for (const item of replacements.reverse()) result = result.slice(0, item.from) + item.replacement + result.slice(item.to);
+  return result;
+}
+
+function footnoteSourceLineRanges(markdown: string) {
+  const ranges: Array<{ from: number; to: number }> = [];
+  if (!markdown.includes('[^')) return ranges;
+  const lines = markdown.split(/\r\n|\r|\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const definition = parseFootnoteDefinitionAt(lines, index);
+    if (!definition) continue;
+    ranges.push({ from: index, to: definition.nextIndex });
+    index = definition.nextIndex;
+  }
+  return ranges;
 }
 
 function restoreCodeForFootnoteRefs(markdown: string, observer?: SourceMapObserver) {

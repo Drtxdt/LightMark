@@ -2,24 +2,44 @@ import { invoke } from "@tauri-apps/api/core";
 import { reactive, toRaw } from "vue";
 import {
   appStore,
-  createUntitledTab,
+  captureLargeFileDraftSnapshot,
+  preparePaneActivation,
+  paneActivationFenceStillCurrent,
+  createRecoveredLargeTab,
+  createUntitledTabAfterFlush,
+  type PaneActivationBoundary,
   flushDocumentSnapshotWithReceipt,
+  getPaneTab,
   setContent,
   switchMode,
+  largePaneForTab,
 } from "./appStore";
 import {
   documentMutationTokensEqual,
   type DocumentFlushReceipt,
   type DocumentMutationToken,
 } from "../editor/documentMutationTracker";
-import { documentSessionForTab, type DocumentSessionAdapter } from "../editor/documentRuntime";
+import {
+  documentSessionForTab,
+  flushDocumentSessionPendingEdits,
+  type DocumentSessionAdapter,
+  type DocumentSessionFlushResult,
+} from "../editor/documentRuntime";
 import {
   mutationEpoch,
   SaveTransactionQueue,
   type WindowCloseDraftReceipt,
 } from "./saveTransaction";
 import { showDialog } from "./dialogStore";
-import type { DocumentTab, DraftRecord, FileSnapshot } from "../types";
+import type {
+  DocumentTab,
+  DraftListReceipt,
+  DraftRecord,
+  FileSnapshot,
+  LargeDraftDeleteReceipt,
+  LargeDraftOpenReceipt,
+  TextFileWriteReceipt,
+} from "../types";
 
 type DraftStatus = "idle" | "saved" | "failed" | "recoverable" | "restored";
 
@@ -33,6 +53,22 @@ export const draftStore = reactive({
 let autosaveTimer = 0;
 const draftTransactionQueue = new SaveTransactionQueue();
 const untitledDraftIds = new WeakMap<DocumentTab, string>();
+// Native draft commands are individually locked, but a large-draft cleanup
+// spans manifest deletion, owned-snapshot deletion, and possible manifest
+// restoration. Serialize every operation for the same draft id in this
+// process so a stale compensation write cannot overwrite a newer record.
+const draftRecordLocks = new Map<string, Promise<void>>();
+
+function withDraftRecordLock<T>(id: string, task: () => Promise<T> | T) {
+  const previous = draftRecordLocks.get(id) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  const completion = next.then(() => undefined, () => undefined);
+  draftRecordLocks.set(id, completion);
+  void completion.then(() => {
+    if (draftRecordLocks.get(id) === completion) draftRecordLocks.delete(id);
+  });
+  return next;
+}
 
 type DraftContext = {
   tab: DocumentTab;
@@ -47,6 +83,7 @@ type DraftContext = {
 
 type DraftVersion = DraftContext & {
   flushReceipt?: DocumentFlushReceipt;
+  largeFlush?: DocumentSessionFlushResult;
 };
 
 export type WindowCloseDraftPolicy = "preserve" | "delete";
@@ -92,6 +129,15 @@ export type DraftCleanupReceipt = DraftContext & {
   dirty: boolean;
 };
 
+type DraftRestoreFence = DraftContext & {
+  kind: DocumentTab["kind"];
+  documentMode: DocumentTab["documentMode"];
+  content: string;
+  dirty: boolean;
+  pending: boolean;
+  largeFile: DocumentTab["largeFile"];
+};
+
 export function startDraftAutosave() {
   stopDraftAutosave();
   window.addEventListener("blur", flushCurrentDraft);
@@ -112,24 +158,52 @@ export function stopDraftAutosave() {
 
 export async function recoverStartupDrafts() {
   const expectedTab = activeDraftTab();
-  const drafts = await listDrafts().catch(() => []);
+  const listing = await readDraftListing();
+  if (!listing) return;
+  const issueMessage = formatDraftIssues(listing.issues);
+  const drafts = listing.records;
   const untitled = drafts.find((draft) => draft.kind === "untitled" && draft.content);
-  if (!untitled) return;
+  const large = drafts.find((draft) => draft.kind === "large" && draft.largeSnapshot);
+  if (!untitled && !large) {
+    if (issueMessage) {
+      draftStore.status = "failed";
+      draftStore.message = issueMessage;
+    }
+    return;
+  }
   draftStore.status = "recoverable";
-  draftStore.message = "发现未命名草稿";
-  await promptRecoverDraft(untitled, "发现未保存的未命名草稿，是否恢复？", expectedTab);
+  draftStore.message = `发现未命名草稿${issueMessage ? `；${issueMessage}` : ""}`;
+  await promptRecoverDraft(
+    untitled ?? large!,
+    untitled ? "发现未保存的未命名草稿，是否恢复？" : "发现未保存的大文件草稿，是否恢复为新文档？",
+    untitled ? expectedTab : null,
+  );
 }
 
 export async function checkDraftForOpenedFile(path: string) {
   const expectedTab = activeDraftTab();
-  const drafts = await listDrafts().catch(() => []);
+  const listing = await readDraftListing();
+  if (!listing) return;
+  const issueMessage = formatDraftIssues(listing.issues);
+  const drafts = listing.records;
   const draft = drafts.find((item) => item.path === path && (item.kind === "file" || item.kind === "large"));
-  if (!draft) return;
-  const snapshot = await getFileSnapshot(path).catch((): FileSnapshot => missingSnapshot());
+  if (!draft) {
+    if (issueMessage) {
+      draftStore.status = "failed";
+      draftStore.message = issueMessage;
+    }
+    return;
+  }
+  const snapshot = await getFileSnapshot(path).catch((error) => {
+    draftStore.status = "failed";
+    draftStore.message = `文件状态读取失败：${formatDraftError(error)}`;
+    return null;
+  });
+  if (!snapshot) return;
   const draftIsNewer = !snapshot.exists || !snapshot.mtime || draft.updatedAt > snapshot.mtime;
   if (!draftIsNewer) return;
   draftStore.status = "recoverable";
-  draftStore.message = "发现可恢复草稿";
+  draftStore.message = `发现可恢复草稿${issueMessage ? `；${issueMessage}` : ""}`;
   await promptRecoverDraft(draft, "发现这个文件有比磁盘更新的 LightMark 草稿，是否恢复？", expectedTab, path);
 }
 
@@ -234,10 +308,21 @@ export function clearCapturedDraft(context: DraftCleanupContext | null, options:
       : isDraftCleanupCurrent(context);
     if (!current) return false;
     try {
-      await deleteDraft(context.id);
+      if (context.tab.documentMode === "large") {
+        const listing = await listDrafts();
+        const record = listing.records.find((item) => item.id === context.id && item.kind === "large");
+        if (listing.issues.length > 0) draftStore.message = formatDraftIssues(listing.issues);
+        if (record?.largeSnapshot) {
+          await deleteLargeDraftRecord(context.id, record);
+        } else {
+          await deleteDraft(context.id);
+        }
+      } else {
+        await deleteDraft(context.id);
+      }
     } catch (error) {
       draftStore.status = "failed";
-      draftStore.message = `草稿清理失败：${error}`;
+      draftStore.message = `草稿清理失败：${formatDraftError(error)}`;
       return false;
     }
     const stillCurrent = options.receipt
@@ -258,8 +343,12 @@ export function clearCapturedDraft(context: DraftCleanupContext | null, options:
   });
 }
 
-export async function discardDraft(id: string) {
-  await deleteDraft(id);
+export async function discardDraft(id: string, record?: DraftRecord) {
+  if (record?.kind === "large" && record.largeSnapshot) {
+    await deleteLargeDraftRecord(id, record);
+  } else {
+    await deleteDraft(id);
+  }
   if (id === draftStore.activeDraftId) draftStore.activeDraftId = "";
   const active = activeDraftTab();
   if (active && !active.path && untitledDraftIds.get(active) === id) untitledDraftIds.delete(active);
@@ -281,16 +370,34 @@ async function flushDraftForContext(
   const beforeContent = context.tab.content;
   const beforeDirty = context.tab.isDirty;
   let flushReceipt: DocumentFlushReceipt | undefined;
+  let largeFlush: DocumentSessionFlushResult | undefined;
   try {
     if (!isCurrentDraftContext(context)) return { saved: false, reason: "草稿对应的标签页或编辑器会话已变化。" };
-    if (context.tab.documentMode !== "large") {
+    if (context.tab.documentMode === "large") {
+      largeFlush = (await flushDocumentSessionPendingEdits(context.tabId, "draft")) ?? undefined;
+      if (!isCurrentDraftContext(context)) {
+        return { saved: false, reason: "大文件草稿 flush 期间编辑器会话已被替换。" };
+      }
+    } else {
       const flushed = await flushDocumentSnapshotWithReceipt(context.tabId, "draft");
       flushReceipt = flushed.flushReceipt;
       if (!isCurrentDraftContext(context)) {
         return { saved: false, reason: "草稿快照期间编辑器会话已被替换。" };
       }
     }
-    const version = captureDraftVersion(context, flushReceipt);
+    const version = captureDraftVersion(context, flushReceipt, largeFlush);
+    const authorizedLargeFlush = Boolean(
+      largeFlush
+      && context.tab.documentMode === "large"
+      && largeFlush.session === context.session
+      && context.revision === largeFlush.beforeRevision
+      && version.revision === largeFlush.afterRevision
+      && version.session === context.session
+      && version.pendingVersion === context.pendingVersion
+      && largeFlush.afterRevision >= largeFlush.beforeRevision
+      && mutationTokensMatch(largeFlush.beforeToken, context.mutationToken)
+      && mutationTokensMatch(largeFlush.afterToken, version.mutationToken),
+    );
     const record = await buildDraftRecord(context);
     const authorizedFlush = Boolean(
       flushReceipt
@@ -303,22 +410,22 @@ async function flushDraftForContext(
     if (options.requirePromptVersion === true
       && (version.session !== context.session
         || (beforePending && context.pendingVersion === null)
-        || (!authorizedFlush && version.pendingVersion !== context.pendingVersion)
-        || (context.mutationToken != null && !authorizedFlush
+        || (!authorizedFlush && !authorizedLargeFlush && version.pendingVersion !== context.pendingVersion)
+        || (context.mutationToken != null && !authorizedFlush && !authorizedLargeFlush
           && (version.mutationToken == null
             || !documentMutationTokensEqual(version.mutationToken, context.mutationToken)))
-        || (beforePending && !flushReceipt)
-        || (!authorizedFlush && version.epoch !== context.epoch)
-        || (!authorizedFlush && version.revision !== context.revision)
-        || (!authorizedFlush && version.tab.content !== beforeContent)
-        || (!authorizedFlush && version.tab.isDirty !== beforeDirty))) {
+        || (beforePending && !flushReceipt && !authorizedLargeFlush)
+        || (!authorizedFlush && !authorizedLargeFlush && version.epoch !== context.epoch)
+        || (!authorizedFlush && !authorizedLargeFlush && version.revision !== context.revision)
+        || (!authorizedFlush && !authorizedLargeFlush && version.tab.content !== beforeContent)
+        || (!authorizedFlush && !authorizedLargeFlush && version.tab.isDirty !== beforeDirty))) {
       return { saved: false, reason: "退出提示期间文档版本发生了变化。" };
     }
     if (!isDraftVersionCurrent(version)) {
       return { saved: false, reason: "草稿版本在生成期间发生变化。" };
     }
     if (record) {
-      await invoke("write_draft", { record });
+      const writeReceipt = await persistDraftRecord(record);
       if (!isDraftVersionCurrent(version)) {
         return { saved: false, reason: "草稿写入期间文档发生了变化。" };
       }
@@ -329,7 +436,13 @@ async function flushDraftForContext(
         draftStore.activeDraftId = record.id;
         draftStore.status = "saved";
         draftStore.lastSavedAt = record.updatedAt;
-        draftStore.message = `草稿已保存 ${formatTime(record.updatedAt)}`;
+        const receiptNotice = [
+          writeReceipt.cleanupWarning ? `清理提示：${writeReceipt.cleanupWarning}` : "",
+          writeReceipt.recoveryArtifact ? `恢复材料：${writeReceipt.recoveryArtifact}` : "",
+        ].filter(Boolean).join("；");
+        draftStore.message = receiptNotice
+          ? `草稿已保存 ${formatTime(record.updatedAt)}；${receiptNotice}`
+          : `草稿已保存 ${formatTime(record.updatedAt)}`;
       }
     }
     return {
@@ -350,6 +463,15 @@ async function flushDraftForContext(
         afterPending: version.session?.hasPendingEdits?.() === true,
         afterMutationToken: version.mutationToken,
         flushReceipt: version.flushReceipt,
+        largeFlush: version.largeFlush
+          ? {
+              session: version.largeFlush.session,
+              beforeRevision: version.largeFlush.beforeRevision,
+              afterRevision: version.largeFlush.afterRevision,
+              beforeToken: version.largeFlush.beforeToken,
+              afterToken: version.largeFlush.afterToken,
+            }
+          : undefined,
         content: version.tab.content,
         dirty: version.tab.isDirty,
         draftId: record?.id ?? "",
@@ -358,24 +480,27 @@ async function flushDraftForContext(
   } catch (error) {
     if (isCurrentActiveDraftContext(context)) {
       draftStore.status = "failed";
-      draftStore.message = `草稿保存失败：${error}`;
+      draftStore.message = `草稿保存失败：${formatDraftError(error)}`;
     }
-    return { saved: false, reason: String(error) };
+    return { saved: false, reason: formatDraftError(error) };
   }
 }
 
 async function buildDraftRecord(context: DraftContext): Promise<DraftRecord | null> {
   const updatedAt = Date.now();
-  if (context.tab.documentMode === "large" && context.tab.largeFile && context.path) {
-    if (context.tab.largeFile.pendingEdits.length === 0) return null;
-    const snapshot = await getFileSnapshot(context.path).catch((): FileSnapshot => missingSnapshot());
+  if (context.tab.documentMode === "large" && context.tab.largeFile) {
+    const largeFile = context.tab.largeFile;
+    const id = largeFile.recoveryDraftId || (context.path ? draftIdForPath(context.path) : draftIdForTab(context.tab));
+    const capture = await captureLargeDraftSnapshot(context, id);
+    const originPath = capture.snapshot.originPath || context.path;
     return {
-      id: draftIdForPath(context.path),
+      id,
       kind: "large",
-      path: context.path,
-      pendingEdits: [...context.tab.largeFile.pendingEdits],
-      fileMtime: snapshot.mtime,
-      fileSize: snapshot.size,
+      schemaVersion: capture.snapshot.schemaVersion,
+      path: originPath || undefined,
+      largeSnapshot: capture.snapshot,
+      fileMtime: capture.snapshot.originFingerprint.modifiedMillis ?? undefined,
+      fileSize: capture.snapshot.originFingerprint.sizeBytes,
       updatedAt,
       editorMode: context.tab.editorMode,
     };
@@ -393,7 +518,10 @@ async function buildDraftRecord(context: DraftContext): Promise<DraftRecord | nu
       editorMode: context.tab.editorMode,
     };
   }
-  if (!context.tab.content.trim()) return null;
+  // A whitespace-only untitled document still contains user bytes and must
+  // be recoverable.  Only a truly empty untitled buffer has no payload to
+  // persist.
+  if (context.tab.content.length === 0) return null;
   const id = draftIdForTab(context.tab);
   return {
     id,
@@ -418,22 +546,42 @@ function captureDraftContext(tab: DocumentTab): DraftContext {
     path: tab.path,
     session,
     epoch: mutationEpoch(tab),
-    revision: session?.revision ?? null,
+    revision: session?.revision ?? (tab.documentMode === "large" ? tab.largeFile?.revision ?? null : null),
     pendingVersion: pendingEditVersion(session),
     mutationToken: session?.mutationToken?.() ?? null,
   };
 }
 
-function captureDraftVersion(context: DraftContext, flushReceipt?: DocumentFlushReceipt): DraftVersion {
+function captureDraftRestoreFence(tab: DocumentTab): DraftRestoreFence {
+  tab = toRaw(tab) as DocumentTab;
+  const context = captureDraftContext(tab);
+  return {
+    ...context,
+    kind: tab.kind,
+    documentMode: tab.documentMode,
+    content: tab.content,
+    dirty: tab.isDirty,
+    pending: context.session?.hasPendingEdits?.() === true,
+    largeFile: tab.largeFile,
+  };
+}
+
+function captureDraftVersion(
+  context: DraftContext,
+  flushReceipt?: DocumentFlushReceipt,
+  largeFlush?: DocumentSessionFlushResult,
+): DraftVersion {
   const session = documentSessionForTab(context.tabId);
   return {
     ...context,
     epoch: mutationEpoch(context.tab),
-    revision: session?.revision ?? null,
+    revision: session?.revision
+      ?? (context.tab.documentMode === "large" ? context.tab.largeFile?.revision ?? null : null),
     pendingVersion: pendingEditVersion(session),
     session,
     mutationToken: session?.mutationToken?.() ?? null,
     flushReceipt,
+    largeFlush,
   };
 }
 
@@ -442,6 +590,27 @@ function isCurrentDraftContext(context: DraftContext) {
     && context.tab.id === context.tabId
     && context.tab.path === context.path
     && documentSessionForTab(context.tabId) === context.session;
+}
+
+function isDraftRestoreFenceCurrent(fence: DraftRestoreFence) {
+  const tab = toRaw(fence.tab) as DocumentTab;
+  const session = documentSessionForTab(fence.tabId);
+  return isCurrentDraftContext(fence)
+    && appStore.activeTabId === fence.tabId
+    && tab.kind === fence.kind
+    && tab.documentMode === fence.documentMode
+    && tab.content === fence.content
+    && tab.isDirty === fence.dirty
+    && mutationEpoch(tab) === fence.epoch
+    && (session?.revision
+      ?? (tab.documentMode === "large" ? tab.largeFile?.revision ?? null : null)) === fence.revision
+    && pendingEditVersion(session) === fence.pendingVersion
+    && (session?.hasPendingEdits?.() === true) === fence.pending
+    && toRaw(tab.largeFile) === toRaw(fence.largeFile)
+    && ((fence.mutationToken == null && session?.mutationToken?.() == null)
+      || (fence.mutationToken != null
+        && session?.mutationToken?.() != null
+        && documentMutationTokensEqual(fence.mutationToken, session.mutationToken())));
 }
 
 function isCurrentActiveDraftContext(context: DraftContext) {
@@ -453,7 +622,8 @@ function isDraftVersionCurrent(version: DraftVersion) {
   const mutationToken = session?.mutationToken?.() ?? null;
   return isCurrentDraftContext(version)
     && mutationEpoch(version.tab) === version.epoch
-    && (session?.revision ?? null) === version.revision
+    && (session?.revision
+      ?? (version.tab.documentMode === "large" ? version.tab.largeFile?.revision ?? null : null)) === version.revision
     && pendingEditVersion(session) === version.pendingVersion
     && (!version.mutationToken
       || (mutationToken != null && documentMutationTokensEqual(version.mutationToken, mutationToken)))
@@ -461,6 +631,11 @@ function isDraftVersionCurrent(version: DraftVersion) {
       || (version.flushReceipt.sessionIdentity === version.session
         && mutationToken != null
         && documentMutationTokensEqual(version.flushReceipt.after, mutationToken)))
+    && (!version.largeFlush
+      || (version.largeFlush.session === session
+        && session?.revision === version.largeFlush.afterRevision
+        && (version.largeFlush.afterToken == null
+          || (mutationToken != null && documentMutationTokensEqual(version.largeFlush.afterToken, mutationToken)))))
     && session?.hasPendingEdits?.() !== true;
 }
 
@@ -483,7 +658,8 @@ function isWindowCloseDraftExpectedVersionCurrent(expected: WindowCloseDraftExpe
       || (expected.mutationToken != null
         && session?.mutationToken?.() != null
         && documentMutationTokensEqual(expected.mutationToken, session.mutationToken())))
-    && (session?.revision ?? null) === expected.revision
+    && (session?.revision
+      ?? (tab.documentMode === "large" ? tab.largeFile?.revision ?? null : null)) === expected.revision
     && pendingEditVersion(session) === expected.pendingVersion
     && (session?.hasPendingEdits?.() === true) === expected.pending;
 }
@@ -495,7 +671,8 @@ function isDraftCleanupCurrent(context: DraftCleanupContext) {
     && context.tab.path === context.path
     && session === context.session
     && mutationEpoch(context.tab) === context.epoch
-    && (session?.revision ?? null) === context.revision
+    && (session?.revision
+      ?? (context.tab.documentMode === "large" ? context.tab.largeFile?.revision ?? null : null)) === context.revision
     && pendingEditVersion(session) === context.pendingVersion
     && ((context.mutationToken == null && session?.mutationToken?.() == null)
       || (context.mutationToken != null
@@ -512,7 +689,8 @@ function isDraftCleanupReceiptCurrent(receipt: DraftCleanupReceipt) {
     && receipt.tab.isDirty === receipt.dirty
     && mutationEpoch(receipt.tab) === receipt.epoch
     && session === receipt.session
-    && (session?.revision ?? null) === receipt.revision
+    && (session?.revision
+      ?? (receipt.tab.documentMode === "large" ? receipt.tab.largeFile?.revision ?? null : null)) === receipt.revision
     && pendingEditVersion(session) === receipt.pendingVersion
     && ((receipt.mutationToken == null && session?.mutationToken?.() == null)
       || (receipt.mutationToken != null
@@ -539,7 +717,13 @@ function pendingEditVersion(session: DocumentSessionAdapter | null) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function mutationTokensMatch(left: DocumentMutationToken | null, right: DocumentMutationToken | null) {
+  if (left == null || right == null) return left == null && right == null;
+  return documentMutationTokensEqual(left, right);
+}
+
 async function promptRecoverDraft(record: DraftRecord, message: string, expectedTab: DocumentTab | null = null, expectedPath?: string) {
+  const restoreFence = expectedTab ? captureDraftRestoreFence(expectedTab) : null;
   const result = await showDialog({
     title: "发现可恢复草稿",
     message,
@@ -552,42 +736,96 @@ async function promptRecoverDraft(record: DraftRecord, message: string, expected
     ],
   });
   if (result === "restore") {
-    await restoreDraft(record, expectedTab, expectedPath);
+    await restoreDraft(record, expectedTab, expectedPath, restoreFence);
     return;
   }
   if (result === "discard") {
-    await discardDraft(record.id);
+    await discardDraft(record.id, record);
   }
 }
 
-async function restoreDraft(record: DraftRecord, expectedTab: DocumentTab | null = null, expectedPath?: string) {
-  if (expectedTab && (!appStore.tabs.includes(expectedTab)
+async function restoreDraft(
+  record: DraftRecord,
+  expectedTab: DocumentTab | null = null,
+  expectedPath?: string,
+  restoreFence: DraftRestoreFence | null = null,
+) {
+  if (expectedTab && (!restoreFence
+    || !isDraftRestoreFenceCurrent(restoreFence)
     || appStore.activeTabId !== expectedTab.id
     || (expectedPath !== undefined && expectedTab.path !== expectedPath))) {
     draftStore.message = "当前标签页已变化，草稿仍保留待处理。";
     return;
   }
-  if (record.kind === "large" && appStore.largeFile && record.pendingEdits?.length) {
-    const state = await invoke<{ isDirty: boolean; pendingEditCount: number }>("apply_file_edits", {
-      sessionId: appStore.largeFile.sessionId,
-      edits: record.pendingEdits,
+  if (record.kind === "large") {
+    if (!record.largeSnapshot) {
+      draftStore.status = "recoverable";
+      draftStore.message = "旧版大文件草稿只包含坐标编辑，已保留待人工处理。";
+      return;
+    }
+    const activationFence = await prepareRecoveryActivationFence();
+    if (!activationFence) return;
+    const opened = await invoke<LargeDraftOpenReceipt>("open_large_file_draft", {
+      snapshotId: record.largeSnapshot.snapshotId,
     });
-    appStore.largeFile.pendingEdits = [...record.pendingEdits];
-    appStore.isDirty = state.isDirty;
+    if (opened.targetPath !== null || opened.session.path !== "") {
+      throw new Error("大文件恢复必须打开为无目标的新文档。");
+    }
+    if (!isRecoveryActivationFenceCurrent(activationFence)) {
+      draftStore.message = "恢复期间当前标签页或编辑器会话发生了变化，草稿仍保留待处理。";
+      return;
+    }
+    createRecoveredLargeTab(opened, activationFence.paneId);
   } else {
     if (record.kind === "untitled") {
-      const tab = createUntitledTab(record.content || "", true);
+      let tab: DocumentTab | null;
+      try {
+        tab = await createUntitledTabAfterFlush(
+          appStore.splitLayout.activePaneId,
+          record.content || "",
+          true,
+        );
+      } catch (error) {
+        draftStore.status = "failed";
+        draftStore.message = `恢复草稿前的输入 flush 失败，草稿仍保留：${formatDraftError(error)}`;
+        return;
+      }
+      if (!tab) {
+        draftStore.message = "当前标签页或编辑器会话已变化，未覆盖当前输入；草稿仍保留待处理。";
+        return;
+      }
       untitledDraftIds.set(tab, record.id);
     } else {
       setContent(record.content || "", true);
     }
   }
-  if (record.editorMode === "wysiwyg" || record.editorMode === "source") {
+  if (record.kind !== "large" && (record.editorMode === "wysiwyg" || record.editorMode === "source")) {
     await switchMode(record.editorMode);
   }
   draftStore.activeDraftId = record.id;
   draftStore.status = "restored";
   draftStore.message = "已恢复草稿";
+}
+
+type RecoveryActivationFence = {
+  paneId: "main" | "secondary";
+  boundary: PaneActivationBoundary;
+};
+
+/** Flush the active view before opening a recovered large document into it. */
+async function prepareRecoveryActivationFence(): Promise<RecoveryActivationFence | null> {
+  const paneId = appStore.splitLayout.activePaneId;
+  const boundary = await preparePaneActivation(paneId, "tabSwitch");
+  if (!boundary) {
+    draftStore.message = "恢复期间当前标签页或编辑器会话发生了变化，草稿仍保留待处理。";
+    return null;
+  }
+  return { paneId, boundary };
+}
+
+function isRecoveryActivationFenceCurrent(fence: RecoveryActivationFence) {
+  return appStore.splitLayout.activePaneId === fence.paneId
+    && paneActivationFenceStillCurrent(fence.boundary.fence, fence.boundary.flushed);
 }
 
 function draftIdForPath(path: string) {
@@ -612,11 +850,114 @@ function formatTime(value: number) {
 }
 
 function listDrafts() {
-  return invoke<DraftRecord[]>("list_drafts");
+  return invoke<DraftListReceipt>("list_drafts");
+}
+
+async function readDraftListing(): Promise<DraftListReceipt | null> {
+  try {
+    return await listDrafts();
+  } catch (error) {
+    draftStore.status = "failed";
+    draftStore.message = `草稿列表读取失败：${formatDraftError(error)}`;
+    return null;
+  }
+}
+
+function deleteDraftNative(draftId: string) {
+  return invoke("delete_draft", { draftId });
 }
 
 function deleteDraft(draftId: string) {
-  return invoke("delete_draft", { draftId });
+  return withDraftRecordLock(draftId, () => deleteDraftNative(draftId));
+}
+
+async function captureLargeDraftSnapshot(context: DraftContext, draftId: string) {
+  const largeFile = context.tab.largeFile;
+  if (!largeFile) throw new Error("大文件草稿缺少会话。");
+  const receipt = await captureLargeFileDraftSnapshot(
+    draftId,
+    context.session?.paneId ?? largePaneForTab(context.tab),
+  );
+  if (receipt.sessionId !== largeFile.sessionId
+    || receipt.requestedRevision !== largeFile.revision
+    || receipt.currentRevision !== receipt.requestedRevision
+    || receipt.snapshot.coordinateSpace !== largeFile.coordinateSpace
+    || receipt.snapshot.draftId !== draftId) {
+    throw new Error("大文件草稿回执与当前会话版本不一致。");
+  }
+  return receipt;
+}
+
+async function persistDraftRecordNative(record: DraftRecord) {
+  const receipt = await invoke<TextFileWriteReceipt>("write_draft", { record });
+  if (receipt.outcome !== "committed" || receipt.diskWritten !== "yes") {
+    throw new Error(formatDraftWriteReceiptError(receipt));
+  }
+  return receipt;
+}
+
+async function persistDraftRecord(record: DraftRecord) {
+  return withDraftRecordLock(record.id, () => persistDraftRecordNative(record));
+}
+
+/**
+ * Remove a large draft manifest and its owned snapshot as one recoverable
+ * operation.  The manifest goes first so a rejected payload delete can never
+ * leave a visible record pointing at a missing snapshot.  If the payload
+ * delete fails, restore the manifest; only a second native write failure can
+ * leave an orphan payload, which is reported to the user for cleanup.
+ */
+async function deleteLargeDraftRecord(id: string, record: DraftRecord) {
+  return withDraftRecordLock(id, async () => {
+    // A record supplied by an older listing must never delete or compensate
+    // over a newer record with the same path-derived id.
+    const listing = await listDrafts();
+    const current = listing.records.find((candidate) => candidate.id === id);
+    if (!current) return;
+    if (draftRecordVersionKey(current) !== draftRecordVersionKey(record)) {
+      throw new Error("草稿版本已更新，未清理旧的恢复记录。");
+    }
+    await deleteDraftNative(id);
+    try {
+      const deleted = await deleteLargeDraftSnapshot(record.largeSnapshot);
+      if (!deleted.deleted) throw new Error("大文件草稿快照未确认删除。");
+      if (deleted.cleanupWarning) draftStore.message = `草稿快照已删除，但清理提示：${deleted.cleanupWarning}`;
+    } catch (error) {
+      try {
+        await persistDraftRecordNative(record);
+        draftStore.message = `大文件草稿快照清理失败，已恢复草稿记录：${formatDraftError(error)}`;
+      } catch (restoreError) {
+        draftStore.message = `大文件草稿清理失败，恢复记录也失败：${formatDraftError(error)}；${formatDraftError(restoreError)}`;
+      }
+      // Preserve the recovery result for callers that surface the thrown error
+      // through their own generic catch. Otherwise clearCapturedDraft would
+      // replace the useful manifest/restore diagnosis with only the native
+      // payload error, making a still recoverable draft look lost.
+      throw new Error(draftStore.message || formatDraftError(error));
+    }
+  });
+}
+
+function draftRecordVersionKey(record: DraftRecord) {
+  const snapshot = record.largeSnapshot;
+  return JSON.stringify({
+    id: record.id,
+    kind: record.kind,
+    path: record.path ?? "",
+    updatedAt: record.updatedAt,
+    content: record.content ?? "",
+    snapshotId: snapshot?.snapshotId ?? "",
+    snapshotSha256: snapshot?.sha256 ?? "",
+    capturedRevision: snapshot?.capturedRevision ?? null,
+  });
+}
+
+function deleteLargeDraftSnapshot(snapshot: DraftRecord["largeSnapshot"]) {
+  if (!snapshot) throw new Error("大文件草稿缺少快照引用。");
+  return invoke<LargeDraftDeleteReceipt>("delete_large_file_draft", {
+    snapshotId: snapshot.snapshotId,
+    expectedSha256: snapshot.sha256,
+  });
 }
 
 function getFileSnapshot(path: string) {
@@ -625,4 +966,36 @@ function getFileSnapshot(path: string) {
 
 function missingSnapshot(): FileSnapshot {
   return { exists: false, mtime: undefined, size: undefined };
+}
+
+function formatDraftIssues(issues: DraftListReceipt["issues"]) {
+  if (issues.length === 0) return "";
+  return `草稿读取问题：${issues.map((issue) => `${issue.code}（${issue.path}）：${issue.message}`).join("；")}`;
+}
+
+function formatDraftWriteReceiptError(receipt: TextFileWriteReceipt) {
+  const details = [
+    `outcome=${receipt.outcome}`,
+    `diskWritten=${receipt.diskWritten}`,
+    receipt.recoveryArtifact ? `recoveryArtifact=${receipt.recoveryArtifact}` : "",
+    receipt.cleanupWarning ? `cleanupWarning=${receipt.cleanupWarning}` : "",
+  ].filter(Boolean).join(", ");
+  return `草稿写入未确认：${details}`;
+}
+
+function formatDraftError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const message = typeof record.message === "string" ? record.message : "草稿事务失败";
+    const details = [
+      typeof record.code === "string" ? `code=${record.code}` : "",
+      typeof record.outcome === "string" ? `outcome=${record.outcome}` : "",
+      typeof record.diskWritten === "string" ? `diskWritten=${record.diskWritten}` : "",
+      typeof record.recoveryArtifact === "string" ? `recoveryArtifact=${record.recoveryArtifact}` : "",
+      typeof record.cleanupWarning === "string" ? `cleanupWarning=${record.cleanupWarning}` : "",
+    ].filter(Boolean).join(", ");
+    return details ? `${message}（${details}）` : message;
+  }
+  return String(error);
 }

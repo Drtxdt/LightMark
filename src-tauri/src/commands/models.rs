@@ -390,6 +390,8 @@ pub struct AppearanceSettings {
     pub code_font_family: String,
     #[serde(default = "default_true")]
     pub show_sidebar: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_preference: Option<String>,
     #[serde(default = "default_true")]
     pub show_outline: bool,
 }
@@ -463,7 +465,7 @@ pub struct FileInfo {
     pub encoding: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LargeOutlineItem {
     pub id: String,
@@ -516,6 +518,18 @@ pub struct LargeFileError {
     pub recovery_artifact: Option<String>,
     #[serde(default)]
     pub cleanup_warning: Option<String>,
+    /// The transaction classifier result, when a replacement reached the OS
+    /// boundary. Preparation and validation failures leave this absent.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// `yes`, `no`, or `unknown`; this is intentionally separate from the
+    /// error code because an OS failure does not prove that no bytes landed.
+    #[serde(default)]
+    pub disk_written: Option<String>,
+    #[serde(default)]
+    pub target_fingerprint: Option<LargeFileFingerprint>,
+    #[serde(default)]
+    pub output_fingerprint: Option<LargeFileFingerprint>,
 }
 
 impl LargeFileError {
@@ -529,6 +543,10 @@ impl LargeFileError {
             path: None,
             recovery_artifact: None,
             cleanup_warning: None,
+            outcome: None,
+            disk_written: None,
+            target_fingerprint: None,
+            output_fingerprint: None,
         }
     }
 
@@ -557,6 +575,20 @@ impl LargeFileError {
         self.cleanup_warning = Some(warning.into());
         self
     }
+
+    pub fn with_transaction_evidence(
+        mut self,
+        outcome: impl Into<String>,
+        disk_written: impl Into<String>,
+        target_fingerprint: Option<LargeFileFingerprint>,
+        output_fingerprint: Option<LargeFileFingerprint>,
+    ) -> Self {
+        self.outcome = Some(outcome.into());
+        self.disk_written = Some(disk_written.into());
+        self.target_fingerprint = target_fingerprint;
+        self.output_fingerprint = output_fingerprint;
+        self
+    }
 }
 
 impl std::fmt::Display for LargeFileError {
@@ -567,7 +599,7 @@ impl std::fmt::Display for LargeFileError {
 
 impl std::error::Error for LargeFileError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LargeFileSession {
     pub session_id: String,
@@ -579,8 +611,14 @@ pub struct LargeFileSession {
     pub saved_revision: u64,
     pub pending_edit_count: usize,
     pub base_fingerprint: LargeFileFingerprint,
-    pub disk_fingerprint: LargeFileFingerprint,
+    pub disk_fingerprint: Option<LargeFileFingerprint>,
     pub coordinate_space: LargeCoordinateSpace,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub origin_path: Option<String>,
+    #[serde(default)]
+    pub recovery_draft_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,6 +631,54 @@ pub struct FileChunk {
     pub text: String,
     pub revision: u64,
     pub coordinate_space: LargeCoordinateSpace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRange {
+    pub session_id: String,
+    pub revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub total_lines: usize,
+    pub text: String,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_reliable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeOperationReceipt {
+    pub session_id: String,
+    pub operation_id: String,
+    #[serde(flatten)]
+    pub state: DirtyState,
+    pub total_lines: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeRangeExportReceipt {
+    pub session_id: String,
+    pub revision: u64,
+    pub path: String,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeResolvedPosition {
+    pub session_id: String,
+    pub revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,6 +715,35 @@ pub struct LargeSaveReceipt {
     pub base_fingerprint: LargeFileFingerprint,
     pub disk_fingerprint: LargeFileFingerprint,
     pub coordinate_space: LargeCoordinateSpace,
+    pub outcome: String,
+    pub disk_written: String,
+    #[serde(default)]
+    pub target_fingerprint: Option<LargeFileFingerprint>,
+    #[serde(default)]
+    pub output_fingerprint: Option<LargeFileFingerprint>,
+    #[serde(default)]
+    pub recovery_artifact: Option<String>,
+    #[serde(default)]
+    pub cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFileSnapshot {
+    pub content: String,
+    pub fingerprint: LargeFileFingerprint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFileWriteReceipt {
+    pub path: String,
+    pub outcome: String,
+    pub disk_written: String,
+    #[serde(default)]
+    pub target_fingerprint: Option<LargeFileFingerprint>,
+    #[serde(default)]
+    pub output_fingerprint: Option<LargeFileFingerprint>,
     #[serde(default)]
     pub recovery_artifact: Option<String>,
     #[serde(default)]
@@ -647,17 +762,64 @@ pub struct LargeCloseReceipt {
     pub cleanup_warning: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeDraftSnapshotRef {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub draft_id: String,
+    pub origin_path: String,
+    pub origin_fingerprint: LargeFileFingerprint,
+    pub captured_revision: u64,
+    pub coordinate_space: LargeCoordinateSpace,
+    pub byte_length: u64,
+    pub total_lines: usize,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeDraftCaptureReceipt {
+    pub session_id: String,
+    pub requested_revision: u64,
+    pub current_revision: u64,
+    pub snapshot: LargeDraftSnapshotRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeDraftOpenReceipt {
+    pub snapshot: LargeDraftSnapshotRef,
+    pub session: LargeFileSession,
+    pub origin_path: String,
+    pub target_path: Option<String>,
+    pub recovery_draft_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeDraftDeleteReceipt {
+    pub snapshot_id: String,
+    pub deleted: bool,
+    #[serde(default)]
+    pub cleanup_warning: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftRecord {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub pending_edits: Option<Vec<TextEdit>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_snapshot: Option<LargeDraftSnapshotRef>,
     #[serde(default)]
     pub file_mtime: Option<u64>,
     #[serde(default)]
@@ -665,6 +827,21 @@ pub struct DraftRecord {
     pub updated_at: u64,
     #[serde(default)]
     pub editor_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftListIssue {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftListReceipt {
+    pub records: Vec<DraftRecord>,
+    pub issues: Vec<DraftListIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -710,6 +887,8 @@ pub struct LargeFindOptions {
 #[serde(rename_all = "camelCase")]
 pub struct LargeFindMatch {
     pub line: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
     pub start_column: usize,
     pub end_column: usize,
     pub text: String,
@@ -834,6 +1013,7 @@ impl Default for AppearanceSettings {
             paragraph_spacing: default_paragraph_spacing(),
             code_font_family: default_code_font_family(),
             show_sidebar: true,
+            sidebar_preference: Some("auto".to_string()),
             show_outline: true,
         }
     }
@@ -926,7 +1106,7 @@ fn default_pasted_image_naming() -> String {
 }
 
 fn default_editor_width() -> u16 {
-    860
+    720
 }
 
 fn default_font_family() -> String {
@@ -934,11 +1114,11 @@ fn default_font_family() -> String {
 }
 
 fn default_font_size() -> u8 {
-    16
+    17
 }
 
 fn default_line_height() -> f32 {
-    1.6
+    1.75
 }
 
 fn default_paragraph_spacing() -> f32 {
@@ -971,4 +1151,38 @@ fn default_custom_pandoc_extension() -> String {
 
 fn default_html_theme() -> String {
     "current".to_string()
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::AppearanceSettings;
+
+    #[test]
+    fn new_appearance_defaults_and_sidebar_preference_roundtrip() {
+        let appearance = AppearanceSettings::default();
+        assert_eq!(appearance.editor_width, 720);
+        assert_eq!(appearance.font_size, 17);
+        assert_eq!(appearance.line_height, 1.75);
+        assert_eq!(appearance.sidebar_preference.as_deref(), Some("auto"));
+        for preference in ["auto", "shown", "hidden"] {
+            let mut current = appearance.clone();
+            current.sidebar_preference = Some(preference.to_string());
+            let json = serde_json::to_string(&current).unwrap();
+            let reopened: AppearanceSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(reopened.sidebar_preference.as_deref(), Some(preference));
+        }
+    }
+
+    #[test]
+    fn legacy_explicit_appearance_and_sidebar_choice_are_preserved() {
+        let old: AppearanceSettings = serde_json::from_value(serde_json::json!({
+            "editorWidth": 860, "fontSize": 16, "lineHeight": 1.6, "showSidebar": false
+        })).unwrap();
+        assert_eq!(old.editor_width, 860);
+        assert_eq!(old.font_size, 16);
+        assert_eq!(old.line_height, 1.6);
+        assert!(!old.show_sidebar);
+        assert!(old.sidebar_preference.is_none());
+        assert!(serde_json::to_value(old).unwrap().get("sidebarPreference").is_none());
+    }
 }

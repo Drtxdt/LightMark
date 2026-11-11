@@ -98,9 +98,9 @@ async function rebindDeletedTab() {
 }
 
 .external-file-notice.danger {
-  border-bottom-color: rgb(244 156 156 / 60%);
-  background: rgb(255 239 239);
-  color: rgb(127 29 29);
+  border-bottom-color: color-mix(in srgb, var(--lm-error) 60%, transparent);
+  background: color-mix(in srgb, var(--lm-error-soft) 72%, var(--lm-surface));
+  color: var(--lm-error);
 }
 
 .notice-button {
@@ -116,7 +116,12 @@ async function rebindDeletedTab() {
 .notice-button.primary {
   border-color: var(--lm-accent);
   background: var(--lm-accent);
-  color: white;
+  color: var(--lm-on-accent);
+}
+
+.notice-button:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
 }
 
 .notice-button.subtle {
@@ -124,26 +129,4 @@ async function rebindDeletedTab() {
   background: transparent;
 }
 
-:global(.dark) .external-file-notice {
-  border-bottom-color: color-mix(in srgb, var(--lm-accent) 35%, transparent);
-  background: color-mix(in srgb, var(--lm-accent-soft) 76%, var(--lm-surface));
-  color: var(--lm-accent);
-}
-
-:global(.dark) .external-file-notice.danger {
-  border-bottom-color: rgb(153 27 27 / 55%);
-  background: rgb(55 23 23);
-  color: rgb(252 165 165);
-}
-
-:global(.dark) .notice-button {
-  border-color: var(--lm-border-strong);
-  background: var(--lm-surface-raised);
-}
-
-:global(.dark) .notice-button.primary {
-  border-color: var(--lm-accent);
-  background: var(--lm-accent);
-  color: var(--lm-surface);
-}
 </style>

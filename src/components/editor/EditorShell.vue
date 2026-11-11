@@ -95,10 +95,6 @@ watch(
   opacity: 0;
 }
 
-:global(.dark) .editor-page-shell {
-  --lm-editor-page-bg: var(--lm-surface);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .editor-page-flip-to-source-enter-active,
   .editor-page-flip-to-source-leave-active,

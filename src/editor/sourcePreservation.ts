@@ -50,6 +50,56 @@ export function sourceBlocksForNodeCount(
   return null;
 }
 
+/** Empty PM paragraphs own blank-line gaps, which Markdown block tokens omit. */
+export function sourceBlocksForNodes(sourceBlocks: readonly PreservedSourceBlock[], nodes: readonly { type: { name: string }; content: { size: number } }[], prefix: string) {
+  const blocks: PreservedSourceBlock[] = [];
+  const empty: number[] = [];
+  let cursor = 0;
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index], source = sourceBlocks[cursor];
+    // A BOM can produce a real whitespace-only paragraph token. It already
+    // owns source bytes, so consume that anchor instead of inventing an empty
+    // paragraph and leaving the token unmatched.
+    const ownsWhitespaceSource = source && !source.synthetic && !source.generated && /^[ \t]*$/.test(source.source);
+    if (node.type.name === 'paragraph' && node.content.size === 0
+      && !ownsWhitespaceSource
+      && !(index === nodes.length - 1 && source?.synthetic === 'trailing-paragraph')) {
+      empty.push(index);
+      blocks.push({ source: '', separator: '' });
+    } else {
+      if (!source) return null;
+      blocks.push({ ...source });
+      cursor++;
+    }
+  }
+  const syntheticTailOmitted = cursor === sourceBlocks.length - 1 && sourceBlocks[cursor].synthetic === 'trailing-paragraph';
+  if (cursor !== sourceBlocks.length && !syntheticTailOmitted) return null;
+  for (let offset = 0; offset < empty.length;) {
+    const start = empty[offset];
+    let end = offset + 1;
+    while (end < empty.length && empty[end] === empty[end - 1] + 1) end++;
+    const gap = start === 0 ? prefix : blocks[start - 1].separator;
+    // Hidden definitions or other source bytes never become whitespace anchors.
+    if (/^\uFEFF?[ \t\r\n]*$/.test(gap)) {
+      const endings = [...gap.matchAll(/\r\n|\r|\n/g)];
+      const count = Math.min(end - offset, Math.max(0, Math.floor((endings.length - (start ? 1 : 0)) / 2)));
+      if (count) {
+        const first = endings.length - count * 2;
+        const cut = endings[first].index!;
+        if (start === 0) prefix = gap.slice(0, cut);
+        else blocks[start - 1].separator = gap.slice(0, cut);
+        for (let index = 0; index < count; index++) {
+          const from = endings[first + index * 2].index!;
+          const to = index === count - 1 ? gap.length : endings[first + index * 2 + 2].index!;
+          blocks[empty[offset + index]].separator = gap.slice(from, to);
+        }
+      }
+    }
+    offset = end;
+  }
+  return { blocks, syntheticTailOmitted, prefix };
+}
+
 export function combinePreservedSourceBlocks(
   originalNodes: readonly object[],
   originalBlocks: readonly PreservedSourceBlock[],
@@ -58,9 +108,21 @@ export function combinePreservedSourceBlocks(
   prefix: string,
   lineEnding: string,
   syntheticTailOmitted = false,
+  preserveChangedBlock?: (source: string, before: object, after: object) => string | null,
 ) {
   if (currentNodes.length !== serializedCurrent.length || originalNodes.length !== originalBlocks.length) {
     throw new SourcePatchConflictError("源码块映射与文档模型不一致。");
+  }
+  // Tiptap can append its editable trailing paragraph on the first input.
+  // The parser already proved that this zero-width source tail was omitted
+  // from the original model. It must not turn a one-block edit into a 1 -> 2
+  // replacement and bypass the exact local patch for that real block.
+  const tail = currentNodes.at(-1) as { type?: { name?: string }; content?: { size?: number } } | undefined;
+  if (syntheticTailOmitted && currentNodes.length === originalNodes.length + 1
+    && tail?.type?.name === 'paragraph' && tail.content?.size === 0
+    && !originalNodes.includes(tail)) {
+    currentNodes = currentNodes.slice(0, -1);
+    serializedCurrent = serializedCurrent.slice(0, -1);
   }
   const oldIndex = new Map(originalNodes.map((node, index) => [node, index]));
   const matches: Array<{ old: number; current: number }> = [];
@@ -91,10 +153,37 @@ export function combinePreservedSourceBlocks(
   let oldCursor = 0;
   let currentCursor = 0;
   const appendChangedGroup = (oldEnd: number, currentEnd: number, atEnd = false) => {
-    const replacements = serializedCurrent.slice(currentCursor, currentEnd).filter(Boolean);
+    const exactReplacements = preserveChangedBlock && oldEnd - oldCursor === currentEnd - currentCursor
+      ? currentNodes.slice(currentCursor, currentEnd).map((node, index) => preserveChangedBlock(originalBlocks[oldCursor + index].source, originalNodes[oldCursor + index], node))
+      : null;
+    if (exactReplacements?.length && exactReplacements.every((piece): piece is string => piece !== null)) {
+      // Exact patches already own every byte of their original block,
+      // including its terminal EOL. Only the separate separator follows it.
+      exactReplacements.forEach((piece, index) => { result += piece + originalBlocks[oldCursor + index].separator; });
+      oldCursor = oldEnd;
+      currentCursor = currentEnd;
+      return;
+    }
+    const replacements = serializedCurrent.slice(currentCursor, currentEnd).map((serialized, index) => {
+      if (oldEnd - oldCursor !== currentEnd - currentCursor || !preserveChangedBlock) return serialized;
+      // Compatibility replacements have their source envelope appended below.
+      return exactReplacements?.[index]?.replace(/[\r\n]+$/, '') ?? serialized;
+    }).filter((serialized, index) => Boolean(serialized)
+      || (currentNodes[currentCursor + index] as { type?: { name?: string }; content?: { size?: number } })?.type?.name === 'paragraph'
+        && (currentNodes[currentCursor + index] as { content?: { size?: number } }).content?.size === 0);
     if (replacements.length) {
+      const firstReplacement = currentNodes[currentCursor] as { type?: { name?: string } } | undefined;
+      const firstOriginal = originalNodes[oldCursor] as { type?: { name?: string } } | undefined;
+      // A heading can follow an HTML atom with one EOL. A replacement
+      // paragraph needs a blank line there, otherwise reparsing merges its
+      // text into the preceding HTML block and loses the source/model map.
+      if (oldCursor > 0 && firstReplacement?.type?.name === 'paragraph'
+        && firstOriginal?.type?.name !== 'paragraph') {
+        const endings = result.match(/[\r\n]+$/)?.[0].match(/\r\n|\r|\n/g)?.length ?? 0;
+        if (endings < 2) result += lineEnding.repeat(2 - endings);
+      }
       if (oldCursor > 0 && oldCursor === originalBlocks.length) {
-        const trailingLineEndings = result.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? "";
+        const trailingLineEndings = result.match(/[\r\n]+$/)?.[0] ?? "";
         const trailingLineEndingCount = trailingLineEndings
           ? trailingLineEndings.match(/\r\n|\r|\n/g)?.length ?? 0
           : 0;
@@ -105,7 +194,7 @@ export function combinePreservedSourceBlocks(
       result += replacements.join(`${lineEnding}${lineEnding}`);
       const lastReplaced = oldEnd > oldCursor ? originalBlocks[oldEnd - 1] : null;
       const preservedSeparator = lastReplaced
-        ? `${lastReplaced.source.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? ""}${lastReplaced.separator}`
+        ? `${lastReplaced.source.match(/[\r\n]+$/)?.[0] ?? ""}${lastReplaced.separator}`
         : "";
       const endsAtSyntheticTail =
         syntheticTailIndex >= 0 &&
@@ -149,7 +238,7 @@ export function inspectSourceEnvelope(source: string): SourceEnvelope {
   return {
     bom: source.startsWith("\uFEFF") ? "\uFEFF" : "",
     lineEnding: detectLineEnding(source),
-    terminalNewlines: source.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? "",
+    terminalNewlines: source.match(/[\r\n]+$/)?.[0] ?? "",
   };
 }
 

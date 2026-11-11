@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import {
   appStore,
   closeFormulaJump,
@@ -59,6 +59,19 @@ watch(
   { immediate: true },
 );
 
+watch(() => appStore.formulaJumpActiveIndex, () => {
+  void nextTick(() => panel.value?.querySelector<HTMLElement>(`[data-navigation-index="${appStore.formulaJumpActiveIndex}"]`)?.scrollIntoView({ block: "nearest" }));
+});
+
+function handleNavigationKey(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === "ArrowDown") moveSelection(1);
+  else if (event.key === "ArrowUp") moveSelection(-1);
+  else jumpSelected();
+}
+
 function moveSelection(delta: 1 | -1) {
   if (candidates.value.length === 0) return;
   const next = appStore.formulaJumpActiveIndex + delta;
@@ -106,14 +119,13 @@ function summary(equation: MathEquationTarget) {
         v-model="appStore.formulaJumpQuery"
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="按编号、标签或公式内容查找"
-        @keydown.down.prevent="moveSelection(1)"
-        @keydown.up.prevent="moveSelection(-1)"
-        @keydown.enter.prevent="jumpSelected"
+        @keydown="handleNavigationKey"
       />
       <div class="max-h-96 overflow-auto p-2">
         <button
           v-for="(equation, index) in candidates"
           :key="equation.id"
+          :data-navigation-index="index"
           class="formula-jump-item"
           :class="{ active: index === appStore.formulaJumpActiveIndex }"
           @mouseenter="appStore.formulaJumpActiveIndex = index"

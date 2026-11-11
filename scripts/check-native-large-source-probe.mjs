@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { runNativeLargeSourceProbe, createNativeLargeSourceFixture } from './qa/native-large-source-probe.mjs';
+const fixture=createNativeLargeSourceFixture('harness');
+assert.ok(Buffer.byteLength(fixture.fixtureContent)>5*1024*1024);
+assert.ok(!/[\r\n]$/.test(fixture.fixtureContent),'EOF tests require a real non-empty terminal line');
+let seen=0;
+const result=await runNativeLargeSourceProbe({evaluate(expression,timeout){seen++;new vm.Script(expression);assert.ok(timeout>=30000);return 'compiled';}}, {fixturePath:'E:/owned/fixture.md',fixtureContent:'owned'});
+assert.equal(result,'compiled');assert.equal(seen,1);
+console.log('Large native generated browser program syntax and EOF fixture checks passed.');

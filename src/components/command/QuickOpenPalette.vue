@@ -18,6 +18,19 @@ watch(
   { immediate: true },
 );
 
+watch(() => appStore.quickOpenActiveIndex, () => {
+  void nextTick(() => panel.value?.querySelector<HTMLElement>(`[data-navigation-index="${appStore.quickOpenActiveIndex}"]`)?.scrollIntoView({ block: "nearest" }));
+});
+
+function handleNavigationKey(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === "ArrowDown") moveSelection(1);
+  else if (event.key === "ArrowUp") moveSelection(-1);
+  else void handleEnter(event);
+}
+
 function moveSelection(delta: 1 | -1) {
   if (candidates.value.length === 0) return;
   const next = appStore.quickOpenActiveIndex + delta;
@@ -73,14 +86,13 @@ function sourceLabel(candidate: QuickOpenCandidate) {
         v-model="appStore.quickOpenQuery"
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="快速打开文件"
-        @keydown.down.prevent="moveSelection(1)"
-        @keydown.up.prevent="moveSelection(-1)"
-        @keydown.enter.prevent="handleEnter"
+        @keydown="handleNavigationKey"
       />
       <div class="max-h-96 overflow-auto p-2">
         <button
           v-for="(candidate, index) in candidates"
           :key="candidate.path"
+          :data-navigation-index="index"
           class="block w-full rounded px-3 py-2 text-left text-sm transition-colors"
           :class="index === appStore.quickOpenActiveIndex
             ? 'bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100'

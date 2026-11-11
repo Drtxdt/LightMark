@@ -7,6 +7,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { EditorState } from "@tiptap/pm/state";
 import { history, redo, undo } from "@tiptap/pm/history";
+import { Step, StepMap, StepResult } from "@tiptap/pm/transform";
 import { compileTypeScriptModuleGraph } from "./transpile-module-graph.mjs";
 
 const tempDir = fs.mkdtempSync(path.resolve("scripts/.lightmark-source-piece-adapter-"));
@@ -61,6 +62,24 @@ try {
     }
     assert.fail("expected a typed source piece adapter failure");
   };
+
+  class UnknownDocumentStep extends Step {
+    apply(document) {
+      return StepResult.ok(document.copy(document.content));
+    }
+
+    getMap() {
+      return StepMap.empty;
+    }
+
+    invert() {
+      return this;
+    }
+
+    map() {
+      return this;
+    }
+  }
   const apply = (adapterState, editorState, transaction) => {
     const nextAdapter = adapter.applySourcePieceAdapterTransaction(adapterState, transaction);
     const nextEditor = editorState.apply(transaction);
@@ -121,6 +140,62 @@ try {
     ({ adapterState: pieceState, editorState } = apply(pieceState, editorState, transaction));
     assert.equal(sourceOf(pieceState), "left?\r\n\r\nright!\n");
     assert.equal(pieceState.source.operationCost.blocksTouched, 2);
+  }
+
+  // A replacement only records the changed text range.  The adapter does not
+  // rebuild the complete leaf, and two disjoint edits in one leaf stay two
+  // independent piece patches.
+  {
+    let editorState = stateFor(doc(paragraph("abcdefghij")));
+    let pieceState = adapter.createSourcePieceAdapter("abcdefghij", editorState.doc, "adapter-local-patch");
+    const range = adapter.getSourcePieceAdapterLeafRange(pieceState, 0);
+    assert.ok(range);
+    const beforeBlock = adapter.getSourcePieceAdapterBlock(pieceState, 0);
+    const beforeLocators = pieceState.leafLocators;
+    let transaction = editorState.tr.insertText("XYZ", range.from + 2, range.from + 4);
+    const next = adapter.applySourcePieceAdapterTransaction(pieceState, transaction, "local-replace");
+    const delta = pieceEngine.getSourcePieceDelta(next.source);
+    assert.deepEqual(delta?.forward, [{
+      blockId: "source-block:0",
+      pieceFrom: 2,
+      pieceTo: 4,
+      expected: "cd",
+      insert: "XYZ",
+    }]);
+    assert.equal(sourceOf(next), "abXYZefghij");
+    assert.notEqual(adapter.getSourcePieceAdapterBlock(next, 0), beforeBlock);
+    assert.equal(next.leafLocators, beforeLocators);
+
+    editorState = stateFor(doc(paragraph("abcdefghij")));
+    pieceState = adapter.createSourcePieceAdapter("abcdefghij", editorState.doc, "adapter-disjoint-local");
+    const disjointRange = adapter.getSourcePieceAdapterLeafRange(pieceState, 0);
+    assert.ok(disjointRange);
+    transaction = editorState.tr.insertText("X", disjointRange.from + 1);
+    transaction = transaction.insertText("Y", disjointRange.from + 8);
+    const disjoint = adapter.applySourcePieceAdapterTransaction(pieceState, transaction, "disjoint-local");
+    const disjointDelta = pieceEngine.getSourcePieceDelta(disjoint.source);
+    assert.deepEqual(disjointDelta?.forward, [
+      { blockId: "source-block:0", pieceFrom: 1, pieceTo: 1, expected: "", insert: "X" },
+      { blockId: "source-block:0", pieceFrom: 7, pieceTo: 7, expected: "", insert: "Y" },
+    ]);
+    assert.equal(sourceOf(disjoint), "aXbcdefgYhij");
+
+    editorState = stateFor(doc(paragraph("abcdefghij")));
+    pieceState = adapter.createSourcePieceAdapter("abcdefghij", editorState.doc, "adapter-same-point-local");
+    const samePointRange = adapter.getSourcePieceAdapterLeafRange(pieceState, 0);
+    assert.ok(samePointRange);
+    transaction = editorState.tr.insertText("X", samePointRange.from + 1);
+    transaction = transaction.insertText("Y", samePointRange.from + 2);
+    const samePoint = adapter.applySourcePieceAdapterTransaction(pieceState, transaction, "same-point-local");
+    const samePointDelta = pieceEngine.getSourcePieceDelta(samePoint.source);
+    assert.deepEqual(samePointDelta?.forward, [{
+      blockId: "source-block:0",
+      pieceFrom: 1,
+      pieceTo: 1,
+      expected: "",
+      insert: "XY",
+    }]);
+    assert.equal(sourceOf(samePoint), "aXYbcdefghij");
   }
 
   // BOM, mixed line endings and an astral character stay in the piece source;
@@ -319,6 +394,40 @@ try {
     const transaction = editorState.tr.addMark(range.from, range.to, schema.marks.bold.create());
     assert.equal(errorCode(() => adapter.applySourcePieceAdapterTransaction(pieceState, transaction)), "marks-changed");
     assert.equal(sourceOf(pieceState), "abc");
+  }
+
+  // A mark Step after a text Step uses the mark step's pre-step coordinates;
+  // it must be mapped back through the preceding replacement and fail the
+  // whole transaction before any source patch is committed.
+  {
+    const editorState = stateFor(doc(paragraph("abc")));
+    const pieceState = adapter.createSourcePieceAdapter("abc", editorState.doc, "adapter-mark-after-text");
+    const range = adapter.getSourcePieceAdapterLeafRange(pieceState, 0);
+    assert.ok(range);
+    let transaction = editorState.tr.insertText("X", range.from + 1);
+    transaction = transaction.addMark(range.from + 1, range.from + 2, schema.marks.bold.create());
+    const beforeSource = sourceOf(pieceState);
+    const beforeRevision = pieceState.source.revision;
+    assert.equal(errorCode(() => adapter.applySourcePieceAdapterTransaction(pieceState, transaction)), "marks-changed");
+    assert.equal(sourceOf(pieceState), beforeSource);
+    assert.equal(pieceState.source.revision, beforeRevision);
+  }
+
+  // Unknown document-changing steps, including empty-map steps without a
+  // from/to range, cannot disappear when a transaction also has a valid text
+  // step.  The transaction remains atomic and the source is untouched.
+  {
+    const editorState = stateFor(doc(paragraph("abc")));
+    const pieceState = adapter.createSourcePieceAdapter("abc", editorState.doc, "adapter-unknown-step");
+    const range = adapter.getSourcePieceAdapterLeafRange(pieceState, 0);
+    assert.ok(range);
+    let transaction = editorState.tr.insertText("X", range.to);
+    transaction = transaction.step(new UnknownDocumentStep());
+    const beforeSource = sourceOf(pieceState);
+    const beforeRevision = pieceState.source.revision;
+    assert.equal(errorCode(() => adapter.applySourcePieceAdapterTransaction(pieceState, transaction)), "unsupported-step");
+    assert.equal(sourceOf(pieceState), beforeSource);
+    assert.equal(pieceState.source.revision, beforeRevision);
   }
 
   console.log(JSON.stringify({

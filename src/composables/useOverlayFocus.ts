@@ -41,6 +41,43 @@ function visibleBackdrops() {
 }
 
 /**
+ * Apply the focus trap's Tab boundary to one already-selected overlay.  This
+ * small pure boundary keeps panel focus (the initial fallback when no
+ * autofocus target is available) inside the dialog on the very first Tab.
+ */
+export function handleOverlayTabKeydown(
+  event: Pick<KeyboardEvent, "key" | "shiftKey" | "preventDefault">,
+  panel: HTMLElement,
+  focusable: HTMLElement[],
+  activeElement: Element | null,
+) {
+  if (event.key !== "Tab") return;
+  if (focusable.length === 0) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  // A panel with tabindex=-1 is the intentional initial focus fallback. It
+  // is a trap boundary just like focus outside the panel.
+  if (!panel.contains(activeElement) || activeElement === panel) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+export function isTopmostOverlay(backdrop: HTMLElement, orderedBackdrops: HTMLElement[]) {
+  return orderedBackdrops.at(-1) === backdrop;
+}
+
+/**
  * Gives command overlays deterministic desktop-style focus behavior. Vue's
  * conditional mounting and WebView focus retention make the HTML `autofocus`
  * attribute insufficient on its own.
@@ -51,12 +88,12 @@ export function useOverlayFocus(options: OverlayFocusOptions) {
   let stopWatching: WatchStopHandle | null = null;
 
   function isTopmost() {
-    return visibleBackdrops().at(-1) === options.backdrop.value;
+    return isTopmostOverlay(options.backdrop.value as HTMLElement, visibleBackdrops());
   }
 
   function handleKeydown(event: KeyboardEvent) {
     if (!isTopmost()) return;
-    if (event.key === "Escape") {
+    if (event.key === "Escape" && !event.isComposing) {
       event.preventDefault();
       event.stopImmediatePropagation();
       options.close();
@@ -66,24 +103,8 @@ export function useOverlayFocus(options: OverlayFocusOptions) {
     const panel = options.panel.value;
     const focusable = Array.from(panel?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [])
       .filter(isElementVisible);
-    if (focusable.length === 0) {
-      event.preventDefault();
-      panel?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const activeElement = document.activeElement;
-    if (!panel?.contains(activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    if (!panel) return;
+    handleOverlayTabKeydown(event, panel, focusable, document.activeElement);
   }
 
   function activate() {

@@ -20,6 +20,11 @@ const panel = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
 useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeHeadingJump });
 
+watch(() => appStore.headingJumpActiveIndex, async () => {
+  await nextTick();
+  panel.value?.querySelector<HTMLElement>(`[data-heading-index="${appStore.headingJumpActiveIndex}"]`)?.scrollIntoView({ block: "nearest" });
+});
+
 const activePaneId = computed(() => appStore.splitLayout.activePaneId);
 const outline = computed(() => getPaneStructuredOutline(activePaneId.value));
 
@@ -113,14 +118,15 @@ function lineLabel(item: StructuredOutlineItem) {
         v-model="appStore.headingJumpQuery"
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="前往指定标题"
-        @keydown.down.prevent="moveSelection(1)"
-        @keydown.up.prevent="moveSelection(-1)"
-        @keydown.enter.prevent="jumpSelected"
+        @keydown.down="!$event.isComposing && ($event.preventDefault(), moveSelection(1))"
+        @keydown.up="!$event.isComposing && ($event.preventDefault(), moveSelection(-1))"
+        @keydown.enter="!$event.isComposing && ($event.preventDefault(), jumpSelected())"
       />
       <div class="max-h-96 overflow-auto p-2">
         <button
           v-for="(candidate, index) in candidates"
           :key="candidate.item.id"
+          :data-heading-index="index"
           class="block w-full rounded px-3 py-2 text-left text-sm transition-colors"
           :class="index === appStore.headingJumpActiveIndex
             ? 'bg-paper-200 text-ink-900 dark:bg-paper-800 dark:text-ink-100'

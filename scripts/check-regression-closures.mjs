@@ -16,8 +16,8 @@ const [wysiwyg, appStore, settings, appDialog, overlay, command, quickOpen, head
   read("src/components/command/GoToLinePalette.vue"),
 ]);
 
-assert.match(wysiwyg, /wysiwygFormatHistory\.undo\.push/);
-assert.match(wysiwyg, /before:\s*event\.detail\.source/);
+assert.match(wysiwyg, /history\.record\(/);
+assert.ok(wysiwyg.includes("history.checkpoint(event.detail.result.text)"));
 assert.match(wysiwyg, /setMeta\("addToHistory", false\)/);
 assert.match(wysiwyg, /const markdown = paneContent\.value;/);
 const requiredMatch = (source, expression, description) => {
@@ -27,14 +27,14 @@ const requiredMatch = (source, expression, description) => {
 };
 const wysiwygUpdate = requiredMatch(
   wysiwyg,
-  /onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/,
+  /onUpdate\(\{\s*editor(?:\s*:\s*[A-Za-z_$][\w$]*)?\s*,\s*transaction\s*\}\)[\s\S]*?\n  },/,
   "WysiwygEditor update handler was not found; regression assertions would otherwise be vacuous",
 );
 assert.match(wysiwyg, /registerDocumentSession/);
-assert.match(wysiwyg, /blocks:\s*\(\) => \{[\s\S]*?currentEditor\.state\.doc\.forEach/);
+assert.match(wysiwyg, /blocks:\s*\(\) => \{[\s\S]*?(?:currentEditor|activeEditor)\.state\.doc\.forEach/);
 assert.match(wysiwyg, /serializeBlock:\s*\(block\)[\s\S]*?DOMSerializer\.fromSchema/);
 assert.match(wysiwyg, /convertBlock:\s*\(html\) => editorHtmlToMarkdown\(html\)/);
-assert.match(wysiwyg, /oracle:\s*\(previousMarkdown\)[\s\S]*?currentEditor\.getHTML\(\)/);
+assert.match(wysiwyg, /oracle:\s*\(previousMarkdown\)[\s\S]*?(?:currentEditor|activeEditor)\.getHTML\(\)/);
 assert.doesNotMatch(wysiwygUpdate, /getHTML|editorHtmlToMarkdown|setPaneContent/,
   "WYSIWYG input updates must not serialize or copy the full document");
 assert.match(wysiwygUpdate, /markDocumentChanged/);
@@ -56,7 +56,7 @@ assert.match(overlay, /event\.stopImmediatePropagation\(\)/);
 assert.match(overlay, /requestAnimationFrame/);
 assert.match(overlay, /getClientRects\(\)\.length > 0/);
 assert.match(overlay, /overlayZIndex/);
-assert.match(overlay, /!panel\?\.contains\(activeElement\)/);
+assert.match(overlay, /!panel(?:\.|\?\.)contains\(activeElement\)/);
 assert.match(overlay, /\.lm-modal-backdrop, \.dialog-backdrop/);
 assert.match(overlay, /closingBackdrop/);
 const isTopmost = requiredMatch(

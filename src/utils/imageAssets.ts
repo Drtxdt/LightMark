@@ -2,7 +2,19 @@ import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { appStore, refreshFileTree } from "../stores/appStore";
 import { processPastedImage, type ProcessedPastedImage } from "./imageCompression";
 
+import type { ImageSettings } from "../types";
+
 export type ImageAssetInputSource = "clipboard" | "drop";
+
+export interface ImageAssetTarget {
+  readonly markdownPath: string;
+  readonly documentMode: "normal" | "large";
+  readonly settings: Readonly<ImageSettings>;
+}
+
+export function captureImageAssetTarget(): ImageAssetTarget {
+  return Object.freeze({ markdownPath: appStore.currentFilePath, documentMode: appStore.documentMode, settings: Object.freeze({ ...appStore.settings.image }) });
+}
 
 const imageExtensionByType: Record<string, string> = {
   "image/png": "png",
@@ -27,14 +39,15 @@ export function getImageFilesFromDrop(data: DataTransfer | null) {
 
 export async function saveImagesAsMarkdown(
   files: File[],
-  options: { source?: ImageAssetInputSource } = {},
+  options: { source?: ImageAssetInputSource; target?: ImageAssetTarget } = {},
 ) {
+  const target = options.target ?? captureImageAssetTarget();
   if (files.length === 0) return "";
-  if (!appStore.currentFilePath) {
+  if (!target.markdownPath) {
     appStore.statusMessage = "请先保存或打开 Markdown 文件，再粘贴图片。";
     return "";
   }
-  if (appStore.documentMode === "large") {
+  if (target.documentMode === "large") {
     appStore.statusMessage = "大文件模式暂不支持直接粘贴图片。";
     return "";
   }
@@ -44,33 +57,33 @@ export async function saveImagesAsMarkdown(
   const timestamp = new Date();
   for (const originalFile of files) {
     const result = options.source === "clipboard"
-      ? await processPastedImage(originalFile, appStore.settings.image, timestamp)
+      ? await processPastedImage(originalFile, target.settings, timestamp)
       : unchangedDroppedImage(originalFile);
     processed.push(result);
-    const relativePath = await saveImageAsset(result.file);
-    snippets.push(`![${imageAlt(result.file)}](${formatMarkdownImagePath(relativePath)})`);
+    const relativePath = await saveImageAsset(result.file, target);
+    snippets.push(`![${imageAlt(result.file)}](${formatMarkdownImagePath(relativePath, target.settings)})`);
   }
   await refreshFileTree().catch(() => {});
   appStore.statusMessage = imageSaveStatus(processed);
   return snippets.join("\n\n");
 }
 
-export async function imagePathsAsMarkdown(paths: string[]) {
+export async function imagePathsAsMarkdown(paths: string[], target = captureImageAssetTarget()) {
   if (paths.length === 0) return "";
-  if (!appStore.currentFilePath) {
+  if (!target.markdownPath) {
     appStore.statusMessage = "请先保存或打开 Markdown 文件，再插入图片。";
     return "";
   }
-  if (appStore.documentMode === "large") {
+  if (target.documentMode === "large") {
     appStore.statusMessage = "大文件模式暂不支持直接插入图片。";
     return "";
   }
   const markdown = await invoke<string>("image_paths_to_markdown", {
-    markdownPath: appStore.currentFilePath,
+    markdownPath: target.markdownPath,
     paths,
-    useRelativePath: appStore.settings.image.useRelativePath,
-    ensureDotSlash: appStore.settings.image.ensureDotSlash,
-    escapePath: appStore.settings.image.escapePath,
+    useRelativePath: target.settings.useRelativePath,
+    ensureDotSlash: target.settings.ensureDotSlash,
+    escapePath: target.settings.escapePath,
   });
   appStore.statusMessage = `已插入 ${paths.length} 张图片引用`;
   return markdown;
@@ -117,15 +130,15 @@ function unwrapImageOnlyParagraphs(root: DocumentFragment) {
   });
 }
 
-async function saveImageAsset(file: File) {
+async function saveImageAsset(file: File, target: ImageAssetTarget) {
   const fallbackName = `image-${new Date().toISOString().replace(/[:.]/g, "-")}.${extensionFor(file)}`;
   const fileName = file.name || fallbackName;
   const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
   return await invoke<string>("save_asset_file", {
-    markdownPath: appStore.currentFilePath,
+    markdownPath: target.markdownPath,
     fileName,
     bytes,
-    assetFolder: appStore.settings.image.assetFolder || "assets",
+    assetFolder: target.settings.assetFolder || "assets",
   });
 }
 
@@ -175,10 +188,10 @@ function imageAlt(file: File) {
   return name || "image";
 }
 
-function formatMarkdownImagePath(path: string) {
+function formatMarkdownImagePath(path: string, settings: Readonly<ImageSettings>) {
   let normalized = path.replace(/\\/g, "/");
   if (
-    appStore.settings.image.ensureDotSlash &&
+    settings.ensureDotSlash &&
     !normalized.startsWith("./") &&
     !normalized.startsWith("../") &&
     !normalized.startsWith("/") &&
@@ -186,7 +199,7 @@ function formatMarkdownImagePath(path: string) {
   ) {
     normalized = `./${normalized}`;
   }
-  return appStore.settings.image.escapePath ? normalized.split("/").map(encodePathSegment).join("/") : normalized;
+  return settings.escapePath ? normalized.split("/").map(encodePathSegment).join("/") : normalized;
 }
 
 function encodePathSegment(segment: string) {

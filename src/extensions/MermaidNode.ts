@@ -1,5 +1,12 @@
+import { notifyPendingEditorInput, registerPendingEditorBuffer } from '../editor/pendingEditorBuffer';
+import { DOCUMENT_FLUSH_META_KEY, type PendingMathFlushRequest } from '../editor/documentMutationTracker';
 import { mergeAttributes, Node } from "@tiptap/core";
 import { Plugin, TextSelection } from "@tiptap/pm/state";
+import {
+  registerRecoveryLocalBufferForOwner,
+  retainAndUnregisterRecoveryLocalBufferForOwner,
+  type RecoveryLocalBufferV3,
+} from "../editor/recoveryLocalState";
 
 type MermaidAttrs = {
   code: string;
@@ -86,6 +93,79 @@ export const MermaidNode = Node.create({
 
 type NodeViewPosition = (() => number | undefined) | boolean;
 
+function readMermaidNodePosition(getPos: NodeViewPosition) {
+  if (typeof getPos !== "function") return null;
+  try {
+    const position = getPos();
+    return Number.isSafeInteger(position) && (position as number) >= 0 ? position as number : null;
+  } catch {
+    return null;
+  }
+}
+
+function readMermaidNodeBinding(
+  editor: any,
+  getPos: NodeViewPosition,
+  acceptedCode: string,
+  acceptedEditing: boolean,
+  lastKnownPosition: number | null,
+) {
+  const position = readMermaidNodePosition(getPos);
+  if (position === null) {
+    return {
+      position: lastKnownPosition,
+      failure: {
+        code: "node-view-position-unavailable",
+        message: "Mermaid NodeView position is unavailable; its local value was retained as an orphan.",
+        status: "orphaned" as const,
+      },
+    };
+  }
+  let currentNode: any = null;
+  try {
+    currentNode = editor?.view?.state?.doc?.nodeAt?.(position) ?? null;
+  } catch {
+    currentNode = null;
+  }
+  if (!currentNode || currentNode.type?.name !== "mermaidDiagram") {
+    return {
+      position,
+      failure: {
+        code: "document-node-unavailable",
+        message: "The current PM node no longer matches this Mermaid NodeView.",
+        status: "conflicted" as const,
+      },
+    };
+  }
+  if (String(currentNode.attrs.code || "") !== acceptedCode || Boolean(currentNode.attrs.editing) !== acceptedEditing) {
+    return {
+      position,
+      failure: {
+        code: "document-node-changed",
+        message: "The PM Mermaid node changed while its local value was pending.",
+        status: "conflicted" as const,
+      },
+    };
+  }
+  return { position, currentNode };
+}
+
+function restoreMermaidTextUi(
+  control: HTMLTextAreaElement | null,
+  ui: RecoveryLocalBufferV3["ui"],
+) {
+  if (!control || !ui) return;
+  requestAnimationFrame(() => {
+    if (ui.focused) control.focus();
+    const max = control.value.length;
+    control.setSelectionRange(
+      Math.max(0, Math.min(ui.anchor, max)),
+      Math.max(0, Math.min(ui.head, max)),
+      ui.direction === "none" ? undefined : ui.direction,
+    );
+  });
+}
+
 function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPosition) {
   const dom = document.createElement("section");
   dom.className = "mermaid-node";
@@ -93,15 +173,37 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
 
   let code = attrs.code || "";
   let editing = Boolean(attrs.editing) || !code.trim();
+  let acceptedCode = code;
+  let acceptedEditing = Boolean(attrs.editing);
+  let composing = false;
+  let lastKnownPosition = readMermaidNodePosition(getPos);
+  const recoveryId = `mermaid-local-${++mermaidId}`;
   let previewTimer = 0;
   let previewVersion = 0;
 
-  const updateAttrs = (next: Partial<MermaidAttrs>) => {
-    if (typeof getPos !== "function") return;
-    const pos = getPos();
-    if (typeof pos !== "number") return;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { code, editing, ...next }));
+  let destroyed = false;
+  let pendingConflict = false;
+  const updateAttrs = (next: Partial<MermaidAttrs>, request?: PendingMathFlushRequest) => {
+    if (destroyed) return false;
+    const binding = readMermaidNodeBinding(editor, getPos, acceptedCode, acceptedEditing, lastKnownPosition);
+    if (binding.failure || binding.position === null) { pendingConflict = true; return false; }
+    lastKnownPosition = binding.position;
+    const nextAttrs = { code, editing, ...next };
+    if (nextAttrs.code === acceptedCode && nextAttrs.editing === acceptedEditing) return true;
+    let transaction = editor.view.state.tr.setNodeMarkup(binding.position, undefined, nextAttrs);
+    if (nextAttrs.code === acceptedCode) transaction = transaction.setMeta('lightmarkLocalEditorUi', true).setMeta('addToHistory', false);
+    if (request) transaction = transaction.setMeta(DOCUMENT_FLUSH_META_KEY, request.flushId);
+    editor.view.dispatch(transaction);
+    return true;
   };
+  const unregisterPending = registerPendingEditorBuffer(editor, {
+    id: recoveryId, kind: 'mermaid',
+    hasPending: () => composing || pendingConflict || code !== acceptedCode,
+    flush(request) {
+      if (composing) throw new Error('Mermaid 输入法组合尚未结束。');
+      if (pendingConflict || !updateAttrs({ code, editing }, request)) throw new Error('Mermaid 局部输入与文档发生冲突，已保留恢复材料。');
+    },
+  });
 
   const exitToDocument = () => {
     editing = false;
@@ -137,7 +239,7 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     }
   };
 
-  const renderEditor = () => {
+  const renderEditor = (focus = true) => {
     dom.innerHTML = "";
     dom.className = "mermaid-node mermaid-node-editing";
 
@@ -161,16 +263,20 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     const refresh = () => {
       code = textarea.value;
       textarea.rows = Math.max(4, code.split(/\r?\n/).length);
-      updateAttrs({ code, editing: true });
+      notifyPendingEditorInput(editor);
       const version = ++previewVersion;
       window.clearTimeout(previewTimer);
       previewTimer = window.setTimeout(() => {
+        previewTimer = 0;
         if (version === previewVersion) void renderMermaid(preview, code, version, () => previewVersion);
       }, 150);
     };
 
     textarea.addEventListener("input", refresh);
+    textarea.addEventListener("compositionstart", () => { composing = true; });
+    textarea.addEventListener("compositionend", () => { composing = false; });
     textarea.addEventListener("keydown", (event) => {
+      if (event.isComposing || composing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         event.preventDefault();
         textarea.blur();
@@ -184,6 +290,7 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     textarea.addEventListener("blur", () => {
       window.setTimeout(() => {
         if (document.activeElement === textarea) return;
+        if (destroyed || composing) return;
         editing = false;
         updateAttrs({ code, editing: false });
         if (code.trim()) void renderDisplay();
@@ -192,8 +299,90 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
 
     dom.append(open, textarea, close, preview);
     void renderMermaid(preview, code, previewVersion, () => previewVersion);
-    requestAnimationFrame(() => textarea.focus());
+    if (focus) requestAnimationFrame(() => textarea.focus());
   };
+
+  const captureRecovery = () => {
+    const binding = readMermaidNodeBinding(editor, getPos, acceptedCode, acceptedEditing, lastKnownPosition);
+    if (binding.position !== null) lastKnownPosition = binding.position;
+    const control = dom.querySelector<HTMLTextAreaElement>(".mermaid-source-editor");
+    const payload = {
+      accepted: { code: acceptedCode, editing: acceptedEditing },
+      draft: { code: control?.value ?? code, editing },
+      preview: { generation: previewVersion, status: previewTimer ? "scheduled" : "idle" },
+      valueRevision: previewVersion,
+    };
+    if (binding.failure) {
+      return {
+        ok: false as const,
+        ...binding.failure,
+        payload,
+        positionHint: binding.position,
+      };
+    }
+    if (editing && !control) {
+      return {
+        ok: false as const,
+        code: "dom-value-unavailable",
+        message: "Mermaid editor value is unavailable while the NodeView is editing.",
+        status: "orphaned" as const,
+        payload,
+        positionHint: binding.position,
+      };
+    }
+    if (control && control.value !== code) {
+      return {
+        ok: false as const,
+        code: "dom-closure-mismatch",
+        message: "Mermaid DOM value and closure value disagree.",
+        status: "conflicted" as const,
+        payload,
+        positionHint: binding.position,
+      };
+    }
+    return {
+      ok: true as const,
+      buffer: {
+        id: recoveryId,
+        kind: "mermaid" as const,
+        status: editing ? "editing" as const : "accepted" as const,
+        sourceRevision: 0,
+        positionHint: binding.position,
+        payload,
+        ...(control ? {
+          ui: {
+            anchor: control.selectionStart ?? control.value.length,
+            head: control.selectionEnd ?? control.value.length,
+            direction: control.selectionDirection === "forward" || control.selectionDirection === "backward"
+              ? control.selectionDirection
+              : "none" as const,
+            focused: document.activeElement === control,
+            composing,
+          },
+        } : {}),
+      },
+    };
+  };
+
+  const restoreRecovery = (buffer: RecoveryLocalBufferV3) => {
+    const payload = buffer.payload as {
+      accepted?: { code?: string; editing?: boolean };
+      draft?: string | { code?: string; editing?: boolean };
+    };
+    const draft = payload.draft;
+    code = typeof draft === "string" ? draft : String(draft?.code ?? payload.accepted?.code ?? "");
+    editing = buffer.status === "editing" || Boolean(typeof draft === "object" && draft?.editing);
+    editing ? renderEditor(false) : void renderDisplay();
+    if (editing) restoreMermaidTextUi(dom.querySelector<HTMLTextAreaElement>(".mermaid-source-editor"), buffer.ui);
+  };
+  const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+    id: recoveryId,
+    kind: "mermaid",
+    sourceRevision: 0,
+    positionHint: lastKnownPosition,
+    capture: captureRecovery,
+    restore: restoreRecovery,
+  });
 
   editing ? renderEditor() : void renderDisplay();
 
@@ -203,7 +392,33 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
       if (nextNode.type.name !== "mermaidDiagram") return false;
       const nextCode = nextNode.attrs.code || "";
       const nextEditing = Boolean(nextNode.attrs.editing) || !nextCode.trim();
-      if (editing && nextEditing && dom.querySelector(".mermaid-source-editor")) return true;
+      const control = dom.querySelector<HTMLTextAreaElement>('.mermaid-source-editor');
+      if (editing && control) {
+        if (nextCode === code || nextCode === acceptedCode) {
+          acceptedCode = nextCode;
+          acceptedEditing = Boolean(nextNode.attrs.editing);
+          if (nextCode === code) pendingConflict = false;
+          return true;
+        }
+        if (code !== acceptedCode) {
+          pendingConflict = true;
+          return true;
+        }
+        // A clean buffer follows history or an external model transaction.
+        // Reuse the control so an accepted update does not destroy focus.
+        const anchor = control.selectionStart, head = control.selectionEnd, direction = control.selectionDirection;
+        code = nextCode;
+        acceptedCode = nextCode;
+        acceptedEditing = Boolean(nextNode.attrs.editing);
+        control.value = code;
+        control.rows = Math.max(4, code.split(/\r?\n/).length);
+        control.setSelectionRange(Math.min(anchor, code.length), Math.min(head, code.length), direction);
+        const preview = dom.querySelector<HTMLElement>('.mermaid-live-preview');
+        if (preview) void renderMermaid(preview, code, ++previewVersion, () => previewVersion);
+        return true;
+      }
+      acceptedCode = nextCode;
+      acceptedEditing = Boolean(nextNode.attrs.editing);
       code = nextCode;
       editing = nextEditing;
       editing ? renderEditor() : void renderDisplay();
@@ -224,8 +439,14 @@ function createMermaidView(attrs: MermaidAttrs, editor: any, getPos: NodeViewPos
     ignoreMutation: () => true,
     stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
     destroy() {
+      destroyed = true;
+      unregisterPending();
+      const control = dom.querySelector<HTMLTextAreaElement>(".mermaid-source-editor");
+      const pending = pendingConflict || composing || code !== acceptedCode || Boolean(control && control.value !== code);
       window.clearTimeout(previewTimer);
       previewVersion += 1;
+      if (pending) retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryId);
+      else unregisterRecovery();
     },
   };
 }

@@ -27,7 +27,7 @@ const aliases: Record<string, string> = {
   vue: "xml", svelte: "xml", astro: "xml",
 };
 
-const pending = new Map<string, Promise<boolean>>();
+const pendingByInstance = new WeakMap<LowlightInstance, Map<string, Promise<boolean>>>();
 
 export function installLowlightPlainTextFallback(lowlight: LowlightInstance) {
   const highlight = lowlight.highlight.bind(lowlight);
@@ -49,6 +49,8 @@ export async function ensureLowlightLanguage(lowlight: LowlightInstance, rawLang
   if (!requested || lowlight.registered(requested)) return false;
   const canonical = aliases[requested] || requested;
   if (lowlight.registered(canonical)) return false;
+  let pending = pendingByInstance.get(lowlight);
+  if (!pending) { pending = new Map(); pendingByInstance.set(lowlight, pending); }
   const existing = pending.get(canonical);
   if (existing) return existing;
   const suffix = `/highlight.js/es/languages/${canonical}.js`;
@@ -57,7 +59,7 @@ export async function ensureLowlightLanguage(lowlight: LowlightInstance, rawLang
   const task = loaderEntry[1]().then((module) => {
     lowlight.register(canonical, module.default);
     return true;
-  }).finally(() => pending.delete(canonical));
+  }).finally(() => pending!.delete(canonical));
   pending.set(canonical, task);
   return task;
 }

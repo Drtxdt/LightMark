@@ -3,9 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { appStore, setPaneContent } from "../../stores/appStore";
-import { extractAssetReferences, replaceAssetReference, type AssetReference } from "../../utils/documentAssets";
-import type { MarkdownFormatResult } from "../../utils/markdownFormat";
+import { appStore, completePendingAssetRelink } from "../../stores/appStore";
+import { extractAssetReferences, type AssetReference } from "../../utils/documentAssets";
+import { beginPendingAssetCommand, captureDocumentCommandTarget } from "../../editor/documentRuntime";
+import { releasePendingCommand, type PendingCommandHandle } from '../../editor/pendingDocumentCommands';
 
 interface AssetFileInfo {
   source: string;
@@ -22,6 +23,7 @@ interface AssetInspection {
 }
 interface ReferenceRow extends AssetReference {
   info: AssetFileInfo | null;
+  sourceMarkdown: string;
 }
 
 const tab = ref<"references" | "missing" | "unreferenced">("references");
@@ -58,7 +60,8 @@ async function refresh() {
   const currentGeneration = ++generation;
   busy.value = true;
   error.value = "";
-  const parsed = extractAssetReferences(appStore.currentContent);
+  const sourceMarkdown = appStore.currentContent;
+  const parsed = extractAssetReferences(sourceMarkdown);
   try {
     const local = parsed.filter((item) => !item.external);
     const result = await invoke<AssetInspection>("inspect_document_assets", {
@@ -70,6 +73,7 @@ async function refresh() {
     let localIndex = 0;
     references.value = parsed.map((item) => ({
       ...item,
+      sourceMarkdown,
       info: item.external ? null : result.references[localIndex++] || null,
     }));
     inspection.value = result;
@@ -97,34 +101,25 @@ function locate(item: AssetReference) {
 }
 
 async function relink(item: ReferenceRow) {
-  const selected = await invoke<string | null>("open_asset_file_dialog");
-  if (!selected) return;
-  const nextSource = await invoke<string>("asset_path_to_reference", {
-    markdownPath: appStore.currentFilePath,
-    path: selected,
-    useRelativePath: appStore.settings.image.useRelativePath,
-    ensureDotSlash: appStore.settings.image.ensureDotSlash,
-    escapePath: appStore.settings.image.escapePath,
-  });
-  const source = appStore.currentContent;
-  const next = replaceAssetReference(source, item, nextSource);
-  if (next == null) {
-    appStore.statusMessage = "该资源引用位置已经变化，资源索引已刷新，请重新选择。";
-    await refresh();
-    return;
-  }
-  const lineMap = source.split(/\r?\n/).map((_, index) => index);
-  const result: MarkdownFormatResult = {
-    text: next,
-    changed: true,
-    stats: { changedLines: 1, tablesFormatted: 0, listIndentationFixed: 0, trailingWhitespaceRemoved: 0, blankLinesRemoved: 0 },
-    lineMap,
-  };
-  const detail = { paneId: appStore.splitLayout.activePaneId, source, result, handled: false };
-  window.dispatchEvent(new CustomEvent("lightmark:apply-markdown-format", { detail }));
-  if (!detail.handled) setPaneContent(appStore.splitLayout.activePaneId, next, true);
-  appStore.statusMessage = `已重新链接 ${item.source}，尚未保存。`;
-  scheduleRefresh();
+  let command: PendingCommandHandle | undefined;
+  try {
+    const tabId = appStore.activeTabId;
+    const settings = { ...appStore.settings.image };
+    const target = await captureDocumentCommandTarget(tabId, "externalDiff");
+    if (target.markdown !== item.sourceMarkdown) throw new Error('正文已变化，正在刷新资源列表，请重新选择原引用。');
+    const peers = extractAssetReferences(target.markdown).filter(ref => ref.source === item.source && ref.syntax === item.syntax);
+    const reference = peers.find(ref => ref.from === item.from && ref.to === item.to);
+    if (!reference) throw new Error("该资源引用位置已经变化，请刷新资源列表后重新选择。");
+    command = beginPendingAssetCommand(target, { from: reference.from, to: reference.to, expected: reference.source, insert: '' });
+    const selected = await invoke<string | null>("open_asset_file_dialog");
+    if (!selected) return;
+    await completePendingAssetRelink(command, selected, settings);
+    appStore.statusMessage = `已重新链接 ${item.source}，尚未保存。`;
+    scheduleRefresh();
+  } catch (cause) {
+    error.value = String(cause);
+    appStore.statusMessage = error.value;
+  } finally { if (command) releasePendingCommand(command); scheduleRefresh(); }
 }
 
 async function copyPath(path: string) {
@@ -211,19 +206,23 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.resource-tabs { border-radius: 7px; background: rgba(120, 113, 108, .08); }
-.resource-tabs button { min-width: 0; border: 0; border-radius: 5px; background: transparent; padding: 6px 3px; color: #777066; font-size: 11px; }
-.resource-tabs button.active { background: rgba(255,255,255,.85); color: #2f2b26; box-shadow: 0 1px 4px rgba(40,35,30,.08); }
-.resource-state,.resource-hint { padding: 8px 4px; color: #888076; font-size: 12px; line-height: 1.5; }
-.resource-hint { margin-bottom: 8px; border-left: 2px solid rgba(154,106,53,.45); padding-left: 8px; }
-.resource-card { margin-bottom: 8px; overflow: hidden; border: 1px solid rgba(120,113,108,.16); border-radius: 7px; background: rgba(255,255,255,.34); }
-.resource-main { display: block; width: 100%; min-width: 0; border: 0; background: transparent; padding: 8px; text-align: left; }
+.resource-tabs { border-radius: 7px; background: var(--lm-accent-soft); }
+.resource-tabs button { min-width: 0; border: 0; border-radius: 5px; background: transparent; padding: 6px 3px; color: var(--lm-ink-muted); font-size: 11px; }
+.resource-tabs button.active { background: var(--lm-surface-raised); color: var(--lm-ink); box-shadow: var(--lm-shadow-sm); }
+.resource-state,.resource-hint { padding: 8px 4px; color: var(--lm-ink-muted); font-size: 12px; line-height: 1.5; }
+.resource-hint { margin-bottom: 8px; border-left: 2px solid color-mix(in srgb, var(--lm-accent) 48%, transparent); padding-left: 8px; }
+.resource-card { margin-bottom: 8px; overflow: hidden; border: 1px solid var(--lm-border); border-radius: 7px; background: color-mix(in srgb, var(--lm-surface-raised) 72%, transparent); }
+.resource-main { display: block; width: 100%; min-width: 0; border: 0; background: transparent; padding: 8px; color: inherit; text-align: left; }
 button.resource-main { cursor: pointer; }
 .resource-name,.resource-meta,.resource-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.resource-name { color: #3d3832; font-size: 13px; font-weight: 600; }
-.resource-meta,.resource-path { margin-top: 3px; color: #8a8278; font-size: 11px; }
+.resource-name { color: var(--lm-ink); font-size: 13px; font-weight: 600; }
+.resource-meta,.resource-path { margin-top: 3px; color: var(--lm-ink-muted); font-size: 11px; }
 .resource-actions { display: flex; gap: 5px; padding: 0 8px 8px; }
-.resource-actions button { border: 0; border-radius: 4px; background: rgba(120,113,108,.09); padding: 3px 7px; color: #6f675d; font-size: 11px; }
-:global(.dark) .resource-tabs button.active,:global(.dark) .resource-card { background: rgba(50,47,43,.78); color: #ddd6cc; }
-:global(.dark) .resource-name { color: #e4ddd3; }
+.resource-actions button { border: 0; border-radius: 4px; background: var(--lm-accent-soft); padding: 3px 7px; color: var(--lm-ink-soft); font-size: 11px; }
+.resource-tabs button:focus-visible,
+.resource-main:focus-visible,
+.resource-actions button:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
+}
 </style>

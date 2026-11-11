@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { history, historyKeymap, isolateHistory } from "@codemirror/commands";
+import { isolateHistory } from "@codemirror/commands";
+import { materializeHistoryRoot, historySourceBookmark } from "../../editor/historySource";
 import { SearchQuery, search, setSearchQuery } from "@codemirror/search";
-import { EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
   Decoration,
   GutterMarker,
@@ -27,23 +28,33 @@ import {
   getPanePendingModeCursor,
   getPaneTab,
   markDocumentChanged,
+  setPaneContent,
   recordNavigationLocation,
   revealHeadingAtLine,
   setPanePendingModeCursor,
   toggleHeadingFoldByKey,
   updatePaneOutlineAnchor,
   updatePanePosition,
+  completePendingImageCommand,
 } from "../../stores/appStore";
-import { publishDocumentDerivedState, registerDocumentSession } from "../../editor/documentRuntime";
+import { documentHistoryForTab, moveDocumentHistory, advanceDocumentRevision, documentRevision, publishDocumentDerivedState, registerDocumentSession, beginPendingImageCommand, documentCommandLease, mapPendingDocumentCommands } from "../../editor/documentRuntime";
+import { releasePendingCommand } from '../../editor/pendingDocumentCommands';
+import { extractAssetReferences } from '../../utils/documentAssets';
+import { blockSpacedMarkdown } from '../../editor/inactiveDocumentPatch';
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { normalizeMatchIndex, replacementForMatch, type TextMatch } from "../../utils/findReplace";
-import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown } from "../../utils/imageAssets";
+import { getImageFilesFromClipboard, getImageFilesFromDrop, imagePathsAsMarkdown, saveImagesAsMarkdown, type ImageAssetTarget } from "../../utils/imageAssets";
 import { normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import { mapMarkdownOffset, type MarkdownFormatResult } from "../../utils/markdownFormat";
 import { decidePairAction, isMarkdownTableLine, listContinuationForLine } from "../../utils/inputRules";
 import { sourceFocusRange, typewriterScrollDelta } from "../../utils/writingModes";
 import { wikiCompletionCandidates as findWikiCompletionCandidates, type WikiCompletionCandidate } from "../../utils/wikiLinks";
-import { buildSourceOutlineIndex, sourceContextAtLine, updateSourceOutlineIndex } from "../../editor/sourceOutlineIndex";
+import { buildSourceOutlineIndex, sourceContextAtLine } from "../../editor/sourceOutlineIndex";
+import { updateSourceOutlineChanges } from "../../editor/sourceOutlineChanges";
+import {
+  createSourceCompositionFence,
+  isSourceEditorComposing,
+} from "../../editor/sourceCompositionFence";
 import { recordStartupStage } from "../../editor/startupMetrics";
 import {
   normalizeSourceLineBreaks,
@@ -61,7 +72,7 @@ import {
   prepareSmartPaste,
   readClipboardPayload,
 } from "../../utils/smartPaste";
-import type { CapturedEditorTarget, EditorPaneId } from "../../types";
+import type { CapturedEditorTarget, DocumentTab, EditorPaneId } from "../../types";
 
 const props = withDefaults(defineProps<{ paneId?: EditorPaneId }>(), {
   paneId: "main",
@@ -75,8 +86,11 @@ let typewriterFrame = 0;
 let sourceManualScrollUntil = 0;
 let sourceFindMatches: TextMatch[] = [];
 let sourceRevision = 0;
+let pendingCommandLease = 0;
 let sourceWordCount = 0;
 let unregisterDocumentSession = () => {};
+let ownerTab: DocumentTab | null = null;
+let ownerTabId = "";
 const wikiCompletion = ref({
   visible: false,
   query: "",
@@ -123,6 +137,13 @@ const mathDiagnosticField = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
+// The keyed editor shell can keep an old page mounted during a tab/mode
+// transition.  Once its raw-tab owner is invalidated, disable that view until
+// Vue unmounts it; an old DOM node must never accept input that has no owner.
+const sourceEditableCompartment = new Compartment();
+const sourceCompositionFence = createSourceCompositionFence();
+let detachSourceCompositionEvents = () => {};
+
 const refreshSourceFocus = StateEffect.define<void>();
 const sourceFocusPlugin = ViewPlugin.fromClass(class {
   decorations: DecorationSet;
@@ -149,22 +170,7 @@ const sourceOutlineField = StateField.define({
   },
   update(value, transaction) {
     if (!transaction.docChanged) return value;
-    let oldFrom = transaction.startState.doc.length;
-    let newFrom = transaction.state.doc.length;
-    let newTo = 0;
-    transaction.changes.iterChangedRanges((fromA, _toA, fromB, toB) => {
-      oldFrom = Math.min(oldFrom, fromA);
-      newFrom = Math.min(newFrom, fromB);
-      newTo = Math.max(newTo, toB);
-    });
-    return updateSourceOutlineIndex(
-      value,
-      transaction.startState.doc,
-      transaction.state.doc,
-      oldFrom,
-      newFrom,
-      newTo,
-    );
+    return updateSourceOutlineChanges(value, transaction.startState.doc, transaction.changes, transaction.newDoc).index;
   },
 });
 
@@ -541,12 +547,22 @@ const sourceInputKeymap: KeyBinding[] = [
   },
 ];
 
+const sourceHistoryKeymap: KeyBinding[] = [
+  { key: "Mod-z", run: () => requestSourceHistory(-1) },
+  { key: "Mod-Shift-z", run: () => requestSourceHistory(1) },
+  { key: "Mod-y", run: () => requestSourceHistory(1) },
+];
+function requestSourceHistory(direction: -1 | 1) {
+  if (!ownerTab || !ownerTabStillExists() || isSourceEditorComposing(view, sourceCompositionFence)) return false;
+  void moveDocumentHistory(ownerTab.id, direction).catch(error => { appStore.statusMessage = String(error); });
+  return true;
+}
+
 function extensions(sourceDocument: ReturnType<typeof parseSourceDocument>) {
   return [
     lineNumbers(),
-    history(),
     search({ top: true }),
-    keymap.of([...sourceInputKeymap, ...historyKeymap]),
+    keymap.of([...sourceHistoryKeymap, ...sourceInputKeymap]),
     sourceFindField,
     mathDiagnosticField,
     sourceLineEndingsExtension(sourceDocument.lineEndings),
@@ -657,18 +673,38 @@ function extensions(sourceDocument: ReturnType<typeof parseSourceDocument>) {
       },
     }),
     minimalTheme,
+    sourceEditableCompartment.of(EditorView.editable.of(true)),
     EditorView.updateListener.of((update) => {
+      if (update.docChanged && ownerTab && pendingCommandLease) {
+        const ranges: Array<{ from: number; to: number; inserted: number }> = [];
+        update.changes.iterChangedRanges((from, to, newFrom, newTo) => ranges.push({ from, to, inserted: newTo - newFrom }));
+        mapPendingDocumentCommands(ownerTab.id, pendingCommandLease, [ranges], anchor => update.state.sliceDoc(anchor.from, anchor.to) === anchor.binding?.expected);
+      }
       if (update.docChanged && !applyingExternalChange) {
+        if (ownerTab && ownerTabStillExists()) {
+          const transaction = update.transactions.find(transaction => transaction.docChanged);
+          const event = transaction?.annotation(Transaction.userEvent) ?? "";
+          const kind = event.includes("compose") ? "composition" : event === "input.type" ? "typing" : event === "delete.backward" ? "delete-backward" : event === "delete.forward" ? "delete-forward" : "command";
+          documentHistoryForTab(ownerTab.id).record({ mode: "source", doc: update.state.doc, lineEndings: update.state.field(sourceLineEndingsField) }, {
+            kind, before: update.startState.selection.main, after: update.state.selection.main, time: Date.now(),
+            composition: kind === "composition" ? sourceCompositionFence.pendingEditVersion() : undefined,
+          });
+        }
         updateSourceWordCount(update);
-        sourceRevision += 1;
-        const tab = getPaneTab(props.paneId);
+        sourceRevision = advanceDocumentRevision(ownerTab!.id, sourceRevision);
+        const tab = ownerTab;
         const outlineIndex = update.state.field(sourceOutlineField);
-        if (tab) markDocumentChanged(tab.id, sourceRevision, {
+        if (tab && ownerTabStillExists()) markDocumentChanged(tab.id, sourceRevision, {
           chars: update.state.doc.length,
           lines: update.state.doc.lines,
           words: sourceWordCount,
           outline: outlineIndex.outlineChanged ? outlineIndex.items : undefined,
         });
+      }
+      if (update.selectionSet && !update.docChanged && ownerTab && ownerTabStillExists()) {
+        const history = documentHistoryForTab(ownerTab.id);
+        history.closeGroup();
+        if (history.current) history.project({ mode: 'source', doc: update.state.doc, lineEndings: update.state.field(sourceLineEndingsField) }, update.state.selection.main);
       }
       if (update.docChanged) queueMathDiagnosticChanges(update);
       if (update.docChanged || update.selectionSet) updateWikiCompletion(update.view);
@@ -853,34 +889,32 @@ function moveSourceTableCell(currentView: EditorView, reverse: boolean) {
   return true;
 }
 
-async function insertImageFilesIntoSource(
-  files: File[],
-  currentView: EditorView,
-  position?: number,
-  source: "clipboard" | "drop" = "drop",
-) {
-  const markdown = await saveImagesAsMarkdown(files, { source });
-  if (!markdown) return;
-  insertImageMarkdownIntoSource(markdown, currentView, position);
+async function insertSourceImagesAtBookmark(currentView: EditorView, position: number | undefined, produce: (target: ImageAssetTarget) => Promise<string>) {
+  const owner = ownerTab;
+  if (!owner || view !== currentView || !ownerTabStillExists()) return;
+  const selection = currentView.state.selection.main;
+  const command = beginPendingImageCommand(owner.id, position ?? selection.from, position ?? selection.to);
+  const target: ImageAssetTarget = Object.freeze({ markdownPath: owner.path, documentMode: 'normal', settings: Object.freeze({ ...appStore.settings.image }) });
+  try {
+    const markdown = await produce(target);
+    if (!markdown) return;
+    await completePendingImageCommand(command, markdown, target);
+  } catch (error) { appStore.statusMessage = error instanceof Error ? error.message : String(error); }
+  finally { releasePendingCommand(command); }
 }
-
+async function insertImageFilesIntoSource(files: File[], currentView: EditorView, position?: number, source: 'clipboard' | 'drop' = 'drop') {
+  await insertSourceImagesAtBookmark(currentView, position, target => saveImagesAsMarkdown(files, { source, target }));
+}
 async function insertImagePathsIntoSource(paths: string[], currentView: EditorView, position?: number) {
-  const markdown = await imagePathsAsMarkdown(paths);
-  if (!markdown) return;
-  insertImageMarkdownIntoSource(markdown, currentView, position);
+  await insertSourceImagesAtBookmark(currentView, position, target => imagePathsAsMarkdown(paths, target));
 }
-
-function insertImageMarkdownIntoSource(markdown: string, currentView: EditorView, position?: number) {
+function insertImageMarkdownIntoSource(markdown: string, currentView: EditorView, position?: number, range?: { from: number; to: number }) {
   const state = currentView.state;
-  const from = position ?? state.selection.main.from;
-  const to = position ?? state.selection.main.to;
+  const from = range?.from ?? position ?? state.selection.main.from;
+  const to = range?.to ?? position ?? state.selection.main.to;
   const insert = normalizeSourceLineBreaks(withBlockSpacing(state.doc.toString(), from, to, markdown));
-  currentView.dispatch({
-    changes: { from, to, insert },
-    selection: { anchor: from + insert.length },
-    scrollIntoView: true,
-  });
-  currentView.focus();
+  currentView.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true });
+  if (props.paneId === appStore.splitLayout.activePaneId) currentView.focus();
 }
 
 function withBlockSpacing(documentText: string, from: number, to: number, markdown: string) {
@@ -902,6 +936,7 @@ onMounted(() => {
       extensions: extensions(sourceDocument),
     }),
   });
+  detachSourceCompositionEvents = sourceCompositionFence.attach(view.dom);
   // CodeMirror is ready here. Capture this boundary before the diagnostic
   // worker request so startup metrics keep editor-ready and worker-settled
   // costs distinct.
@@ -910,8 +945,9 @@ onMounted(() => {
   mathWorker.onmessage = (event) => applyMathDiagnostics(event.data);
   registerSourceDocumentSession();
   scheduleMathDiagnostics(view, 0);
+  const restoringModeCursor = Boolean(getPanePendingModeCursor(props.paneId));
   restorePendingSourceCursor();
-  restorePendingSourcePosition();
+  if (!restoringModeCursor) restorePendingSourcePosition();
   syncSourceWritingModes();
   window.addEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
   window.addEventListener("lightmark:restore-position", handleRestorePosition as EventListener);
@@ -930,24 +966,32 @@ onMounted(() => {
 });
 
 watch(
-  () => paneTab.value?.id || "",
-  () => {
-    if (!view) return;
-    sourceWordCount = countWords(paneContent.value);
-    const sourceDocument = parseSourceDocument(paneContent.value);
-    applyingExternalChange = true;
-    try {
-      view.setState(EditorState.create({
-        doc: sourceDocument.text,
-        extensions: extensions(sourceDocument),
-      }));
-    } finally {
-      applyingExternalChange = false;
-    }
-    registerSourceDocumentSession();
-    scheduleMathDiagnostics(view, 0);
-    syncSourceWritingModes();
-    restorePendingSourcePosition();
+  [
+    () => {
+      const current = getPaneTab(props.paneId);
+      return current ? toRaw(current) as DocumentTab : null;
+    },
+    () => paneDocumentMode.value,
+    () => paneEditorMode.value,
+  ],
+  ([nextOwner, nextDocumentMode, nextEditorMode]) => {
+    if (!view || !ownerTab) return;
+
+    // EditorShell keys the editor page by tab id and mode. During its
+    // transition the old SourceEditor can remain mounted while the new one
+    // is being created. Its CodeMirror state is owned by the raw tab captured
+    // at mount; never rebind that state to a newly projected tab here.
+    const sameRawOwner = nextOwner === ownerTab;
+    const ownerStillValid = sameRawOwner
+      && nextDocumentMode === "normal"
+      && nextEditorMode === "source";
+    if (ownerStillValid) return;
+
+    // Invalidate only the old adapter. A keyed remount will register the new
+    // tab after it has created its own CodeMirror view. Disable the old DOM
+    // view immediately so input cannot land in an unowned document during the
+    // transition.
+    invalidateSourceDocumentOwner();
   },
 );
 
@@ -978,7 +1022,9 @@ function countWords(value: string) {
 }
 
 onBeforeUnmount(() => {
-  unregisterDocumentSession();
+  detachSourceCompositionEvents();
+  detachSourceCompositionEvents = () => {};
+  invalidateSourceDocumentOwner();
   mathWorker?.terminate();
   mathWorker = null;
   window.removeEventListener("lightmark:capture-mode-cursor", handleModeCursorCapture as EventListener);
@@ -1000,72 +1046,203 @@ onBeforeUnmount(() => {
   view = null;
 });
 
+function invalidateSourceDocumentOwner() {
+  unregisterDocumentSession();
+  ownerTab = null;
+  ownerTabId = "";
+  if (view) view.dispatch({ effects: sourceEditableCompartment.reconfigure(EditorView.editable.of(false)) });
+}
+
 function registerSourceDocumentSession() {
   unregisterDocumentSession();
-  const tab = getPaneTab(props.paneId);
-  if (!tab || !view) return;
+  const candidate = getPaneTab(props.paneId);
+  const tab = candidate ? toRaw(candidate) as DocumentTab : null;
+  if (!tab || tab.documentMode !== "normal" || paneEditorMode.value !== "source" || !view) {
+    ownerTab = null;
+    ownerTabId = "";
+    return;
+  }
+  const activeEditor = view;
+  ownerTab = tab;
+  ownerTabId = tab.id;
+  sourceRevision = Math.max(documentRevision(tab.id), appStore.runtimeDerivedByTab[tab.id]?.revision ?? 0);
   const tabId = tab.id;
+  const history = documentHistoryForTab(tabId);
+  history.mount({ mode: "source", doc: activeEditor.state.doc, lineEndings: activeEditor.state.field(sourceLineEndingsField) }, activeEditor.state.selection.main, tab.content, !tab.isDirty);
   unregisterDocumentSession = registerDocumentSession({
     tabId,
     paneId: props.paneId,
     mode: "source",
+    initialCommandMarkdown: tab.content,
+    captureAssetCommandAnchor(patch, markdown) {
+      const reference = extractAssetReferences(markdown).find(item => item.from === patch.from && item.to === patch.to && item.source === patch.expected);
+      if (!reference) throw new Error('原资源引用已变化，请刷新资源列表。');
+      return { from: rawOffsetToSourceOffset(markdown, patch.from), to: rawOffsetToSourceOffset(markdown, patch.to), binding: { expected: patch.expected, syntax: reference.syntax } };
+    },
+    async commandAnchorToSource(anchor, kind, markdown) {
+      const from = sourceOffsetToRawOffset(markdown, anchor.from), to = sourceOffsetToRawOffset(markdown, anchor.to);
+      const expected = markdown.slice(from, to);
+      if (kind === 'asset' && (!extractAssetReferences(markdown).some(item => item.from === from && item.to === to && item.source === anchor.binding?.expected && item.syntax === anchor.binding?.syntax))) throw new Error('原资源引用已修改或删除，请刷新资源列表。');
+      return { from, to, expected };
+    },
+    async commandAnchorFromSource(anchor, kind, markdown) {
+      if (kind === 'asset') {
+        const reference = extractAssetReferences(markdown).find(item => item.from === anchor.from && item.to === anchor.to && item.source === anchor.expected);
+        if (!reference) throw new Error('原资源引用已修改或删除，请刷新资源列表。');
+        return { from: rawOffsetToSourceOffset(markdown, anchor.from), to: rawOffsetToSourceOffset(markdown, anchor.to), binding: { expected: anchor.expected, syntax: reference.syntax } };
+      }
+      return { from: rawOffsetToSourceOffset(markdown, anchor.from), to: rawOffsetToSourceOffset(markdown, anchor.to) };
+    },
+    validateCommandAnchor(anchor) { return activeEditor.state.sliceDoc(anchor.from, anchor.to) === anchor.binding?.expected; },
+    async applyPendingCommand(anchor, payload, expectedRevision, assertCurrent) {
+      assertCurrent();
+      if (view !== activeEditor || sourceRevision !== expectedRevision || !ownerTabStillExists()) throw new Error('原文档会话已变化，已保留资源。');
+      const source = serializeSourceDocument(activeEditor.state.doc, activeEditor.state.field(sourceLineEndingsField));
+      let from = sourceOffsetToRawOffset(source, anchor.from), to = sourceOffsetToRawOffset(source, anchor.to);
+      if (payload.kind === 'asset' && !extractAssetReferences(source).some(item => item.from === from && item.to === to && item.source === anchor.binding?.expected && item.syntax === anchor.binding?.syntax)) throw new Error('原资源引用已修改或删除，请刷新资源列表。');
+      if (payload.kind === 'image' && from === 0 && to === 0 && source.startsWith('\uFEFF')) from = to = 1;
+      const insert = payload.kind === 'asset' ? payload.insert : blockSpacedMarkdown(source, from, to, payload.markdown);
+      activeEditor.dispatch({ changes: { from: rawOffsetToSourceOffset(source, from), to: rawOffsetToSourceOffset(source, to), insert: normalizeSourceLineBreaks(insert) }, annotations: [Transaction.userEvent.of('input.replace'), isolateHistory.of('full')] });
+    },
     get revision() {
       return sourceRevision;
     },
+    isComposing() { return isSourceEditorComposing(activeEditor, sourceCompositionFence); },
+    hasPendingEdits() {
+      return isSourceEditorComposing(activeEditor, sourceCompositionFence);
+    },
+    pendingEditVersion() {
+      return sourceCompositionFence.pendingEditVersion();
+    },
+    async flushPendingEdits() {
+      if (isSourceEditorComposing(activeEditor, sourceCompositionFence)) {
+        throw new Error("源码输入法组合文字尚未结束，请在 compositionend 后重试。");
+      }
+    },
     async snapshot(_reason, options) {
-      if (!view) throw new Error("源码编辑器已经关闭。");
+      if (view !== activeEditor || ownerTab !== tab || !ownerTabStillExists()) {
+        throw new Error("源码编辑器会话已被替换。");
+      }
+      if (isSourceEditorComposing(activeEditor, sourceCompositionFence)) {
+        throw new Error("源码输入法组合文字尚未结束，已阻止快照。");
+      }
       if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
-      const markdown = serializeSourceDocument(view.state.doc, view.state.field(sourceLineEndingsField));
+      const markdown = serializeSourceDocument(activeEditor.state.doc, activeEditor.state.field(sourceLineEndingsField));
       if (options?.signal?.aborted) throw new DOMException("文档快照已取消。", "AbortError");
+      if (!ownerTabStillExists()) throw new Error("源码编辑器会话已被替换。");
+      if (isSourceEditorComposing(activeEditor, sourceCompositionFence)) {
+        throw new Error("源码输入法组合文字尚未结束，已阻止快照。");
+      }
+      history.checkpoint(markdown);
+      history.project({ mode: 'source', doc: activeEditor.state.doc, lineEndings: activeEditor.state.field(sourceLineEndingsField) }, activeEditor.state.selection.main);
       return {
         tabId,
         revision: sourceRevision,
         markdown,
-        dirty: getPaneTab(props.paneId)?.isDirty ?? false,
+        dirty: tab.isDirty,
       };
     },
     derivedState() {
-      if (!view) return {};
+      if (view !== activeEditor || ownerTab !== tab || !ownerTabStillExists()) return { revision: sourceRevision };
       return {
         revision: sourceRevision,
-        chars: view.state.doc.length,
-        lines: view.state.doc.lines,
+        chars: activeEditor.state.doc.length,
+        lines: activeEditor.state.doc.lines,
         words: sourceWordCount,
-        outline: view.state.field(sourceOutlineField).items,
+        outline: activeEditor.state.field(sourceOutlineField).items,
         findMatches: sourceFindMatches.length,
       };
     },
+    captureHistoryRoot() { return { mode: "source", doc: activeEditor.state.doc, lineEndings: activeEditor.state.field(sourceLineEndingsField) }; },
+    captureHistoryBookmark() { return activeEditor.state.selection.main; },
+    async restoreSourceBookmark(markdown, bookmark) {
+      if (view !== activeEditor || !ownerTabStillExists()) return;
+      sourceSelectionRestoreEpoch++;
+      activeEditor.dispatch({ selection: {
+        anchor: rawOffsetToSourceOffset(markdown, bookmark.anchor), head: rawOffsetToSourceOffset(markdown, bookmark.head),
+      }, scrollIntoView: true });
+      const pending = getPanePendingModeCursor(props.paneId);
+      if (pending?.targetMode === 'source') setPanePendingModeCursor(props.paneId, null);
+      activeEditor.focus();
+    },
+    async prepareHistoryReplay(projection, exactSource, dirty) {
+      const markdown = await materializeHistoryRoot(projection.root, exactSource);
+      const parsed = parseSourceDocument(markdown);
+      const rawBookmark = await historySourceBookmark(projection, markdown);
+      const selection = { anchor: rawOffsetToSourceOffset(markdown, rawBookmark.anchor), head: rawOffsetToSourceOffset(markdown, rawBookmark.head) };
+      const doc = projection.root.mode === "source" ? projection.root.doc : parsed.text;
+      const lineEndings = projection.root.mode === "source" ? projection.root.lineEndings : parsed.lineEndings;
+      return () => {
+        applyingExternalChange = true;
+        try {
+          activeEditor.dispatch({ changes: { from: 0, to: activeEditor.state.doc.length, insert: doc }, effects: resetSourceLineEndings.of(lineEndings), selection, scrollIntoView: true, annotations: Transaction.addToHistory.of(false) });
+        } finally { applyingExternalChange = false; }
+        sourceWordCount = countWords(parsed.text);
+        sourceRevision = advanceDocumentRevision(tab.id, sourceRevision);
+        setPaneContent(props.paneId, markdown, dirty, false);
+        publishDocumentDerivedState(tab.id, { revision: sourceRevision, words: sourceWordCount, chars: activeEditor.state.doc.length, lines: activeEditor.state.doc.lines, outline: activeEditor.state.field(sourceOutlineField).items });
+        activeEditor.focus();
+      };
+    },
+    async applySourcePatch(patch, expectedRevision) {
+      if (view !== activeEditor || !ownerTabStillExists() || sourceRevision !== expectedRevision || isSourceEditorComposing(activeEditor, sourceCompositionFence)) {
+        throw new Error("源码修改目标已变化，已保留当前输入。");
+      }
+      const source = serializeSourceDocument(activeEditor.state.doc, activeEditor.state.field(sourceLineEndingsField));
+      if (source.slice(patch.from, patch.to) !== patch.expected) throw new Error("资源引用位置已变化。");
+      activeEditor.dispatch({
+        changes: { from: rawOffsetToSourceOffset(source, patch.from), to: rawOffsetToSourceOffset(source, patch.to), insert: normalizeSourceLineBreaks(patch.insert) },
+        annotations: [Transaction.userEvent.of("input.replace"), isolateHistory.of("full")],
+      });
+    },
     async replaceMarkdown(markdown) {
-      if (!view) throw new Error("源码编辑器已经关闭。");
+      if (view !== activeEditor || ownerTab !== tab || !ownerTabStillExists()) {
+        throw new Error("源码编辑器会话已被替换。");
+      }
+      if (isSourceEditorComposing(activeEditor, sourceCompositionFence)) {
+        throw new Error("源码输入法组合文字尚未结束，已阻止覆盖。");
+      }
       const sourceDocument = parseSourceDocument(markdown);
       sourceWordCount = countWords(sourceDocument.text);
       applyingExternalChange = true;
       try {
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: sourceDocument.text },
+        activeEditor.dispatch({
+          changes: { from: 0, to: activeEditor.state.doc.length, insert: sourceDocument.text },
           effects: resetSourceLineEndings.of(sourceDocument.lineEndings),
         });
       } finally {
         applyingExternalChange = false;
       }
-      sourceRevision += 1;
+      if (!ownerTabStillExists()) throw new Error("源码编辑器会话已被替换。");
+      sourceRevision = advanceDocumentRevision(tab.id, sourceRevision);
       publishDocumentDerivedState(tabId, {
         revision: sourceRevision,
-        chars: view.state.doc.length,
-        lines: view.state.doc.lines,
+        chars: activeEditor.state.doc.length,
+        lines: activeEditor.state.doc.lines,
         words: sourceWordCount,
-        outline: view.state.field(sourceOutlineField).items,
+        outline: activeEditor.state.field(sourceOutlineField).items,
         findMatches: sourceFindMatches.length,
       });
     },
     navigate(target) {
-      if (!view) return;
-      const requested = target.offset ?? (target.line == null ? 0 : view.state.doc.line(Math.min(view.state.doc.lines, Math.max(1, target.line + 1))).from);
-      const position = Math.max(0, Math.min(view.state.doc.length, requested));
-      view.dispatch({ selection: { anchor: position }, scrollIntoView: true });
-      view.focus();
+      if (view !== activeEditor || ownerTab !== tab || !ownerTabStillExists()) return;
+      const requested = target.offset ?? (target.line == null ? 0 : activeEditor.state.doc.line(Math.min(activeEditor.state.doc.lines, Math.max(1, target.line + 1))).from);
+      const position = Math.max(0, Math.min(activeEditor.state.doc.length, requested));
+      activeEditor.dispatch({ selection: { anchor: position }, scrollIntoView: true });
+      activeEditor.focus();
     },
   });
+  pendingCommandLease = documentCommandLease(tab.id);
+}
+
+function ownerTabStillExists() {
+  const current = getPaneTab(props.paneId);
+  return Boolean(ownerTab
+    && current
+    && toRaw(current) === ownerTab
+    && current.id === ownerTabId
+    && current.documentMode === "normal"
+    && paneEditorMode.value === "source");
 }
 
 function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean }>) {
@@ -1155,15 +1332,17 @@ function handleModeCursorCapture(event: CustomEvent<{ from?: string; to?: string
   });
 }
 
+let sourceSelectionRestoreEpoch = 0;
 function restorePendingSourceCursor() {
   const pending = getPanePendingModeCursor(props.paneId);
   if (!view || !pending || pending.targetMode !== "source") return;
   setPanePendingModeCursor(props.paneId, null);
   const docLength = view.state.doc.length;
-  const anchor = clampOffset(pending.markdownAnchor, docLength);
-  const head = clampOffset(pending.markdownHead, docLength);
+  const anchor = clampOffset(rawOffsetToSourceOffset(paneContent.value, pending.markdownAnchor), docLength);
+  const head = clampOffset(rawOffsetToSourceOffset(paneContent.value, pending.markdownHead), docLength);
+  const requestedView = view, revision = sourceRevision, restoreEpoch = ++sourceSelectionRestoreEpoch;
   window.requestAnimationFrame(() => {
-    if (!view) return;
+    if (view !== requestedView || sourceRevision !== revision || restoreEpoch !== sourceSelectionRestoreEpoch) return;
     view.dispatch({
       selection: { anchor, head },
       effects: EditorView.scrollIntoView(anchor, { y: "center" }),
@@ -1231,8 +1410,9 @@ function restoreSourcePosition(position: any) {
   const docLength = view.state.doc.length;
   const anchor = clampOffset(position.markdownAnchor, docLength);
   const head = clampOffset(position.markdownHead, docLength);
+  const requestedView = view, revision = sourceRevision, restoreEpoch = ++sourceSelectionRestoreEpoch;
   window.requestAnimationFrame(() => {
-    if (!view) return;
+    if (view !== requestedView || sourceRevision !== revision || restoreEpoch !== sourceSelectionRestoreEpoch) return;
     view.dispatch({ selection: { anchor, head } });
     view.scrollDOM.scrollTop = scrollTopFromSnapshot(position, view.scrollDOM.scrollHeight, view.scrollDOM.clientHeight);
     view.focus();

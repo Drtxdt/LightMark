@@ -98,9 +98,12 @@ export function parseMarkdownTableBlock(lines: string[], start: number): Markdow
 export function renderMarkdownTables(
   markdown: string,
   renderInline: (source: string) => string,
+  observeReplacements?: (replacements: readonly { from: number; to: number; replacement: string }[]) => void,
 ) {
-  const lines = markdown.split(/\r?\n/);
-  const output: string[] = [];
+  const lines = markdown.split(/\r\n|\r|\n/);
+  const lineStarts = [0];
+  for (const match of markdown.matchAll(/\r\n|\r|\n/g)) lineStarts.push(match.index! + match[0].length);
+  const replacements: Array<{ from: number; to: number; replacement: string }> = [];
   let inFence: { marker: string; length: number } | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -109,20 +112,27 @@ export function renderMarkdownTables(
     if (fence) {
       if (!inFence) inFence = { marker: fence[1][0], length: fence[1].length };
       else if (fence[1][0] === inFence.marker && fence[1].length >= inFence.length) inFence = null;
-      output.push(line);
       continue;
     }
     if (!inFence) {
       const table = parseMarkdownTableBlock(lines, index);
       if (table) {
-        output.push(tableBlockToHtml(table, renderInline));
+        const last = index + table.rows.length - 1;
+        // A blank line closes MarkdownIt's HTML block before following prose
+        // or a comment; the DOM and source token stream then share a boundary.
+        replacements.push({ from: lineStarts[index], to: lineStarts[last] + lines[last].length, replacement: `${tableBlockToHtml(table, renderInline)}\n\n` });
         index += table.rows.length - 1;
         continue;
       }
     }
-    output.push(line);
   }
-  return output.join("\n");
+  observeReplacements?.(replacements);
+  let output = markdown;
+  for (let index = replacements.length - 1; index >= 0; index--) {
+    const { from, to, replacement } = replacements[index];
+    output = output.slice(0, from) + replacement + output.slice(to);
+  }
+  return output;
 }
 
 export function markdownPipeRowToTableHtml(text: string) {

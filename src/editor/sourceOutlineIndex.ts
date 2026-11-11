@@ -47,32 +47,36 @@ export function updateSourceOutlineIndex(
   const oldStartLine = oldDoc.lineAt(changedOldFrom).number;
   const newStartLine = newDoc.lineAt(changedNewFrom).number;
   const newEndLine = newDoc.lineAt(changedNewTo).number;
-  const startLine = Math.max(1, Math.floor((Math.min(oldStartLine, newStartLine) - 1) / CHECKPOINT_LINES) * CHECKPOINT_LINES + 1);
-  const checkpoint = [...previous.checkpoints].reverse().find((item) => item.line <= startLine);
-  const state = checkpoint ? cloneState(checkpoint.state) : createOutlineScanState(newDoc.line(1).text);
+  const checkpoint = [...previous.checkpoints].reverse().find((item) => item.line <= Math.min(oldStartLine, newStartLine));
+  const startLine = checkpoint?.line ?? 1;
+  const state = checkpoint && startLine > 1 ? cloneState(checkpoint.state) : createOutlineScanState(newDoc.line(1).text);
   const prefixItems = previous.rawItems.filter((item) => item.line < startLine - 1);
   const prefixCheckpoints = previous.checkpoints.filter((item) => item.line < startLine);
   const rawItems = [...prefixItems];
   const checkpoints = [...prefixCheckpoints];
   const lineDelta = newDoc.lines - oldDoc.lines;
+  // Suffix checkpoints move with inserted/deleted lines. Their new line
+  // numbers need not fall on the original 256-line grid.
+  const suffixCheckpoints = new Map(previous.checkpoints.map(item => [item.line + lineDelta, item]));
+  let lastCheckpointLine = checkpoints.at(-1)?.line ?? startLine - CHECKPOINT_LINES;
   for (let lineNumber = startLine; lineNumber <= newDoc.lines; lineNumber += 1) {
-    if ((lineNumber - 1) % CHECKPOINT_LINES === 0) {
-      const oldLine = lineNumber - lineDelta;
-      const oldCheckpoint = lineNumber > newEndLine
-        ? previous.checkpoints.find((item) => item.line === oldLine)
-        : undefined;
-      if (oldCheckpoint && statesEqual(state, oldCheckpoint.state)) {
-        checkpoints.push({ line: lineNumber, state: cloneState(state) });
-        for (const item of previous.rawItems.filter((candidate) => candidate.line >= oldLine - 1)) {
-          const shiftedLine = item.line + lineDelta;
-          rawItems.push({ ...item, line: shiftedLine, id: `heading-${shiftedLine}-${slugify(item.text)}` });
-        }
-        for (const old of previous.checkpoints.filter((item) => item.line > oldLine)) {
-          checkpoints.push({ line: old.line + lineDelta, state: cloneState(old.state) });
-        }
-        return finalizeIndex(rawItems, checkpoints, newDoc.lines, outlineSequenceChanged(previous, rawItems, lineDelta));
-      }
+    const oldCheckpoint = lineNumber > newEndLine ? suffixCheckpoints.get(lineNumber) : undefined;
+    if (oldCheckpoint && statesEqual(state, oldCheckpoint.state)) {
+      const oldLine = oldCheckpoint.line;
       checkpoints.push({ line: lineNumber, state: cloneState(state) });
+      for (const item of previous.rawItems) {
+        if (item.line < oldLine - 1) continue;
+        const shiftedLine = item.line + lineDelta;
+        rawItems.push({ ...item, line: shiftedLine, id: `heading-${shiftedLine}-${slugify(item.text)}` });
+      }
+      for (const old of previous.checkpoints) {
+        if (old.line > oldLine) checkpoints.push({ line: old.line + lineDelta, state: cloneState(old.state) });
+      }
+      return finalizeIndex(rawItems, checkpoints, newDoc.lines, outlineSequenceChanged(previous, rawItems, lineDelta));
+    }
+    if (lineNumber === startLine || lineNumber - lastCheckpointLine >= CHECKPOINT_LINES) {
+      checkpoints.push({ line: lineNumber, state: cloneState(state) });
+      lastCheckpointLine = lineNumber;
     }
     const item = scanOutlineLine(newDoc.line(lineNumber).text, lineNumber - 1, state);
     if (item) rawItems.push(item);

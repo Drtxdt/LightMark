@@ -1,3 +1,4 @@
+import { notifyPendingEditorInput } from '../editor/pendingEditorBuffer';
 import { mergeAttributes, Node } from "@tiptap/core";
 import { NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
 import { createVNode, render, type Component } from "vue";
@@ -25,6 +26,11 @@ import type {
   RecoveryPendingMath,
   RecoveryPendingMathEntry,
 } from "../editor/recoveryCodec";
+import {
+  registerRecoveryLocalBufferForOwner,
+  retainAndUnregisterRecoveryLocalBufferForOwner,
+  type RecoveryLocalBufferV3,
+} from "../editor/recoveryLocalState";
 
 type MathAttrs = {
   tex: string;
@@ -520,6 +526,144 @@ function captureMathRecoveryEntry(input: {
   };
 }
 
+function captureMathLocalBuffer(input: {
+  id: string;
+  kind: "inline" | "block";
+  editor: any;
+  getPos: NodeViewPosition;
+  dom: HTMLElement;
+  accepted: MathContentAttrs;
+  local: MathContentAttrs;
+  editing: boolean;
+  composing: boolean;
+  blurPending: boolean;
+  conflict: MathEditConflictError | null;
+  destroyed: boolean;
+  lastKnownPosition: number | null;
+}): {
+  ok: true;
+  buffer: RecoveryLocalBufferV3;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+  status: "conflicted" | "orphaned";
+  payload: unknown;
+  positionHint: number | null;
+} {
+  const expectedType = input.kind === "inline" ? "inlineMath" : "blockMath";
+  const currentPosition = readNodeViewPosition(input.getPos);
+  const position = currentPosition ?? input.lastKnownPosition;
+  let currentNode: any = null;
+  if (currentPosition !== null) {
+    try {
+      currentNode = input.editor?.view?.state?.doc?.nodeAt?.(currentPosition) ?? null;
+    } catch {
+      currentNode = null;
+    }
+  }
+  const pending = recoveryMathState({
+    editing: input.editing,
+    composing: input.composing,
+    blurPending: input.blurPending,
+    conflict: Boolean(input.conflict),
+    local: input.local,
+    accepted: input.accepted,
+  });
+  const control = input.kind === "block"
+    ? input.dom.querySelector<HTMLTextAreaElement>(".math-block-editor")
+    : input.dom.querySelector<HTMLElement>(".math-inline-source-editor");
+  const localText = input.kind === "block"
+    ? control instanceof HTMLTextAreaElement ? control.value : input.local.tex
+    : control?.textContent ?? input.local.tex;
+  const payload = {
+    accepted: recoveryContent(input.accepted),
+    local: recoveryContent(input.local),
+    valueRevision: getPendingMathInputVersion(input.editor),
+    ...(control ? {
+      ui: input.kind === "block"
+        ? {
+          anchor: (control as HTMLTextAreaElement).selectionStart ?? localText.length,
+          head: (control as HTMLTextAreaElement).selectionEnd ?? localText.length,
+          direction: (control as HTMLTextAreaElement).selectionDirection === "forward"
+            || (control as HTMLTextAreaElement).selectionDirection === "backward"
+            ? (control as HTMLTextAreaElement).selectionDirection
+            : "none" as const,
+          focused: document.activeElement === control,
+          composing: input.composing,
+        }
+        : {
+          anchor: getContentEditableCaret(control),
+          head: getContentEditableCaret(control),
+          direction: "none" as const,
+          focused: document.activeElement === control,
+          composing: input.composing,
+        },
+    } : {}),
+  };
+  if (input.destroyed || currentPosition === null || !currentNode) {
+    return {
+      ok: false,
+      code: input.destroyed ? "node-view-destroyed" : "document-node-unavailable",
+      message: input.destroyed
+        ? "Math NodeView was destroyed; its local value was retained as an orphan."
+        : "Math NodeView position or document node is unavailable.",
+      status: "orphaned",
+      payload,
+      positionHint: position,
+    };
+  }
+  const currentContent = currentMathNodeContent(currentNode, input.kind);
+  if (input.conflict || currentNode.type?.name !== expectedType || !currentContent || !sameMathContentAttrs(currentContent, input.accepted)) {
+    return {
+      ok: false,
+      code: input.conflict ? "node-view-edit-conflict" : "document-node-changed",
+      message: "Math PM attrs no longer prove the local value is linked.",
+      status: "conflicted",
+      payload,
+      positionHint: position,
+    };
+  }
+  if (editingHasMissingMathControl(input.editing, control)) {
+    return {
+      ok: false,
+      code: "dom-value-unavailable",
+      message: "Math editor value is unavailable while the NodeView is editing.",
+      status: "orphaned",
+      payload,
+      positionHint: position,
+    };
+  }
+  if (control && localText !== input.local.tex) {
+    return {
+      ok: false,
+      code: "dom-closure-mismatch",
+      message: "Math DOM value and closure value disagree.",
+      status: "conflicted",
+      payload,
+      positionHint: position,
+    };
+  }
+  return {
+    ok: true,
+    buffer: {
+      id: input.id,
+      kind: "math",
+      status: pending ? "editing" : "accepted",
+      sourceRevision: 0,
+      positionHint: position,
+      payload,
+    },
+  };
+}
+
+function editingHasMissingMathControl(
+  editing: boolean,
+  control: HTMLElement | HTMLTextAreaElement | null,
+) {
+  return editing && !control;
+}
+
 function registerPendingMathEdit(editor: object, edit: PendingMathEdit) {
   let registry = pendingMathEdits.get(editor);
   if (!registry) {
@@ -536,6 +680,7 @@ function registerPendingMathEdit(editor: object, edit: PendingMathEdit) {
     if (!active) return;
     registry!.version += 1;
     registry!.inputVersion += 1;
+    notifyPendingEditorInput(editor);
   };
   const unregister = () => {
     if (!active) return;
@@ -596,11 +741,15 @@ export function capturePendingMathRecovery(editor: object): RecoveryPendingMath 
 }
 
 type EditorMathEvaluation = {
+  doc: object;
   entriesByPos: Map<number, MathEvaluationEntry>;
   numberingMode: typeof appStore.settings.markdown.mathNumbering;
 };
 
-const editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
+// History deliberately retains immutable document roots. Keying full rendered
+// evaluations by those roots would retain one whole formula index per edit.
+// Each live editor keeps only its current root's derived evaluation instead.
+let editorMathEvaluationCache = new WeakMap<object, EditorMathEvaluation>();
 const visibleMathCallbacks = new WeakMap<Element, () => void>();
 const mathRefreshCallbacks = new Set<(kind: "settings" | "tools") => void>();
 let mathVisibilityObserver: IntersectionObserver | null = null;
@@ -632,9 +781,11 @@ function observeMathVisibility(element: Element, callback: () => void) {
 function subscribeMathRefresh(callback: (kind: "settings" | "tools") => void) {
   if (!mathGlobalListenersInstalled) {
     window.addEventListener("lightmark:math-settings-changed", () => {
+      editorMathEvaluationCache = new WeakMap();
       for (const listener of mathRefreshCallbacks) listener("settings");
     });
     window.addEventListener("lightmark:refresh-math", () => {
+      editorMathEvaluationCache = new WeakMap();
       for (const listener of mathRefreshCallbacks) listener("tools");
     });
     mathGlobalListenersInstalled = true;
@@ -645,9 +796,9 @@ function subscribeMathRefresh(callback: (kind: "settings" | "tools") => void) {
 
 function evaluateEditorMath(editor: any): EditorMathEvaluation {
   const doc = editor.view.state.doc as object;
-  const cached = editorMathEvaluationCache.get(doc);
+  const cached = editorMathEvaluationCache.get(editor);
   const numberingMode = appStore.settings.markdown.mathNumbering;
-  if (cached?.numberingMode === numberingMode) return cached;
+  if (cached?.doc === doc && cached.numberingMode === numberingMode) return cached;
 
   const tokens: MarkdownMathToken[] = [];
   editor.view.state.doc.descendants((node: any, pos: number) => {
@@ -666,10 +817,11 @@ function evaluateEditorMath(editor: any): EditorMathEvaluation {
   });
   const evaluated = evaluateMathTokens(tokens, { numberingMode });
   const value = {
+    doc,
     entriesByPos: new Map(evaluated.entries.map((entry) => [entry.token.from, entry])),
     numberingMode,
   };
-  editorMathEvaluationCache.set(doc, value);
+  editorMathEvaluationCache.set(editor, value);
   return value;
 }
 
@@ -815,7 +967,10 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
       return false;
     }
     const currentNode = editor.view.state.doc.nodeAt(pos);
-    if (!currentNode || currentNode.type !== acceptedNode.type || currentNode !== acceptedNode) {
+    // PM can retain an eq NodeView without calling update after an immutable
+    // root rebuild. Compare the complete accepted node (attrs/marks/content),
+    // while still refusing any unacknowledged semantic change at getPos().
+    if (!currentNode || currentNode.type !== acceptedNode.type || (currentNode !== acceptedNode && !currentNode.eq?.(acceptedNode))) {
       setEditConflict(new MathEditConflictError("公式节点已被文档更新，无法确认未提交内容已写入"));
       return false;
     }
@@ -913,6 +1068,56 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
   const unregisterPendingEdit = pendingRegistration.unregister;
   markPendingEditChanged = pendingRegistration.markChanged;
   markPendingInputChanged = pendingRegistration.markInputChanged;
+  const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+    id: recoveryEntryId,
+    kind: "math",
+    sourceRevision: 0,
+    positionHint: lastKnownPosition,
+    capture: () => captureMathLocalBuffer({
+      id: recoveryEntryId,
+      kind: "inline",
+      editor,
+      getPos,
+      dom,
+      accepted: acceptedAttrs,
+      local: localContentAttrs(),
+      editing,
+      composing,
+      blurPending,
+      conflict: editConflict,
+      destroyed,
+      lastKnownPosition,
+    }),
+    restore: (buffer) => {
+      const payload = buffer.payload as {
+        accepted?: MathContentAttrs;
+        local?: MathContentAttrs;
+        ui?: { anchor?: number; head?: number; focused?: boolean };
+      };
+      if (payload.accepted) acceptedAttrs = readMathContentAttrs(payload.accepted);
+      const local = payload.local || payload.accepted;
+      if (!local) throw new Error("Math recovery payload has no accepted or local value.");
+      const next = readMathContentAttrs(local);
+      tex = next.tex;
+      delimiter = next.delimiter;
+      raw = next.raw;
+      originalTex = next.originalTex;
+      displayMode = next.displayMode;
+      editing = buffer.status === "editing";
+      composing = false;
+      blurPending = false;
+      editConflict = null;
+      if (editing) renderEditor("end", false);
+      else renderDisplay();
+      const ui = payload.ui;
+      if (editing && ui) requestAnimationFrame(() => {
+        const source = dom.querySelector<HTMLElement>(".math-inline-source-editor");
+        if (!source) return;
+        setContentEditableCaret(source, Math.max(0, Math.min(ui.anchor ?? source.textContent?.length ?? 0, source.textContent?.length ?? 0)));
+        if (ui.focused) source.focus();
+      });
+    },
+  });
 
   const renderDisplay = () => {
     if (blurPending) markPendingEditChanged();
@@ -970,7 +1175,7 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
     renderDisplay();
   };
 
-  const renderEditor = (initialCaret: "start" | "end" = "end") => {
+  const renderEditor = (initialCaret: "start" | "end" = "end", focus = true) => {
     closePromptFinalized = false;
     if (blurPending) markPendingEditChanged();
     blurPending = false;
@@ -995,7 +1200,7 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
     const installEditingTools = () => {
       dom.querySelector(":scope > .math-tools-inline-editing")?.remove();
       appendMathTools(dom, body, { tex, delimiter, raw: "", displayMode }, () => {
-        editorMathEvaluationCache.delete(editor.view.state.doc);
+        editorMathEvaluationCache.delete(editor);
         window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
         renderKatex(body, tex, displayMode, "公式预览", {
           delimiter,
@@ -1107,8 +1312,10 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
     renderKatex(body, tex, displayMode, "公式预览", { delimiter, raw: "", evaluation });
     installEditingTools();
     const diagnostic = evaluation?.diagnostic ?? null;
-    source.focus();
-    setContentEditableCaret(source, initialCaret === "start" ? 0 : diagnostic?.texOffset ?? tex.length);
+    if (focus) {
+      source.focus();
+      setContentEditableCaret(source, initialCaret === "start" ? 0 : diagnostic?.texOffset ?? tex.length);
+    }
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -1139,7 +1346,6 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
     if (!editing) renderDisplay();
   });
   const stopRefresh = subscribeMathRefresh((kind) => {
-    if (kind === "tools") editorMathEvaluationCache.delete(editor.view.state.doc);
     if (!editing && displayRendered) renderDisplay();
   });
 
@@ -1208,8 +1414,10 @@ function createInlineMathView(node: any, editor: any, getPos: NodeViewPosition) 
       suggest?.destroy();
       if (hadPending) {
         setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+        retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryEntryId);
       } else {
         unregisterPendingEdit();
+        unregisterRecovery();
       }
       rejectCompositionWaiters(editConflict ?? new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
       stopVisibility();
@@ -1312,7 +1520,9 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
       return false;
     }
     const currentNode = editor.view.state.doc.nodeAt(pos);
-    if (!currentNode || currentNode.type !== acceptedNode.type || currentNode !== acceptedNode) {
+    // A reconstructed, fully equal PM node can reuse this live NodeView.
+    // Different attrs, marks, content or type remain conflicting updates.
+    if (!currentNode || currentNode.type !== acceptedNode.type || (currentNode !== acceptedNode && !currentNode.eq?.(acceptedNode))) {
       setEditConflict(new MathEditConflictError("公式节点已被文档更新，无法确认未提交内容已写入"));
       return false;
     }
@@ -1424,6 +1634,67 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
   markPendingEditChanged = pendingRegistration.markChanged;
   markPendingInputChanged = pendingRegistration.markInputChanged;
 
+  const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+    id: recoveryEntryId,
+    kind: "math",
+    sourceRevision: 0,
+    positionHint: lastKnownPosition,
+    capture: () => captureMathLocalBuffer({
+      id: recoveryEntryId,
+      kind: "block",
+      editor,
+      getPos,
+      dom,
+      accepted: acceptedAttrs,
+      local: localContentAttrs(),
+      editing,
+      composing,
+      blurPending,
+      conflict: editConflict,
+      destroyed,
+      lastKnownPosition,
+    }),
+    restore: (buffer) => {
+      const payload = buffer.payload as {
+        accepted?: MathContentAttrs;
+        local?: MathContentAttrs;
+        ui?: { anchor?: number; head?: number; focused?: boolean };
+      };
+      if (payload.accepted) acceptedAttrs = readMathContentAttrs({
+        ...payload.accepted,
+        delimiter: payload.accepted.delimiter || "display-dollar",
+        displayMode: true,
+      });
+      const local = payload.local || payload.accepted;
+      if (!local) throw new Error("Math recovery payload has no accepted or local value.");
+      const next = readMathContentAttrs({
+        ...local,
+        delimiter: local.delimiter || "display-dollar",
+        displayMode: true,
+      });
+      tex = next.tex;
+      delimiter = next.delimiter;
+      raw = next.raw;
+      originalTex = next.originalTex;
+      editing = buffer.status === "editing" || !tex;
+      composing = false;
+      blurPending = false;
+      editConflict = null;
+      if (editing) renderEditor("end", false);
+      else renderDisplay();
+      const ui = payload.ui;
+      if (editing && ui) requestAnimationFrame(() => {
+        const source = dom.querySelector<HTMLTextAreaElement>(".math-block-editor");
+        if (!source) return;
+        const max = source.value.length;
+        const anchor = Math.max(0, Math.min(ui.anchor ?? max, max));
+        const head = Math.max(0, Math.min(ui.head ?? anchor, max));
+        if (ui.focused) source.focus();
+        source.setSelectionRange(anchor, head);
+      });
+    },
+  });
+
   const renderDisplay = () => {
     if (blurPending) markPendingEditChanged();
     blurPending = false;
@@ -1480,7 +1751,7 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
     if (tex.trim()) renderDisplay();
   };
 
-  const renderEditor = () => {
+  const renderEditor = (_initialCaret: "start" | "end" = "end", focus = true) => {
     closePromptFinalized = false;
     if (blurPending) markPendingEditChanged();
     blurPending = false;
@@ -1511,7 +1782,7 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
     const installEditingTools = () => {
       dom.querySelector(":scope > .math-tools-block-editing")?.remove();
       appendMathTools(dom, body, { tex, delimiter, raw: "", displayMode: true }, () => {
-        editorMathEvaluationCache.delete(editor.view.state.doc);
+        editorMathEvaluationCache.delete(editor);
         window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
         renderKatex(body, tex, true, "公式预览", {
           delimiter,
@@ -1620,9 +1891,11 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
     installEditingTools();
     syncOverlayPosition();
     const diagnostic = evaluation?.diagnostic ?? null;
-    textarea.focus();
-    const offset = diagnostic?.texOffset ?? tex.length;
-    textarea.setSelectionRange(offset, offset);
+    if (focus) {
+      textarea.focus();
+      const offset = diagnostic?.texOffset ?? tex.length;
+      textarea.setSelectionRange(offset, offset);
+    }
   };
 
   dom.addEventListener("mousedown", (event) => {
@@ -1652,7 +1925,6 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
     if (!editing && tex.trim()) renderDisplay();
   });
   const stopRefresh = subscribeMathRefresh((kind) => {
-    if (kind === "tools") editorMathEvaluationCache.delete(editor.view.state.doc);
     if (!editing && displayRendered && tex.trim()) renderDisplay();
   });
 
@@ -1725,8 +1997,10 @@ function createBlockMathView(node: any, editor: any, getPos: NodeViewPosition) {
       suggest?.destroy();
       if (hadPending) {
         setEditConflict(new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
+        retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryEntryId);
       } else {
         unregisterPendingEdit();
+        unregisterRecovery();
       }
       rejectCompositionWaiters(editConflict ?? new MathEditConflictError("公式编辑视图已销毁，无法确认未提交内容已写入"));
       stopVisibility();

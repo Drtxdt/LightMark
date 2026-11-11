@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { dialogStore, resolveDialog } from "../../stores/dialogStore";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
+import { handleDialogBackdropKeydown } from "./dialogKeyboard";
 
 const backdrop = ref<HTMLElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
@@ -24,6 +25,16 @@ function closeWith(id?: string) {
   resolveDialog(id ?? dialog.cancelId);
 }
 
+function handleBackdropKeydown(event: KeyboardEvent) {
+  handleDialogBackdropKeydown(
+    event,
+    backdrop.value,
+    panel.value,
+    active.value?.defaultId,
+    (id) => closeWith(id),
+  );
+}
+
 function buttonClass(variant = "secondary") {
   return {
     "dialog-button-primary": variant === "primary",
@@ -41,7 +52,7 @@ function buttonClass(variant = "secondary") {
         ref="backdrop"
         class="dialog-backdrop"
         @click.self="closeWith()"
-        @keydown.enter.prevent.stop="active.defaultId && closeWith(active.defaultId)"
+        @keydown="handleBackdropKeydown"
       >
         <section ref="panel" class="dialog-panel" role="dialog" aria-modal="true" :aria-label="active.title" tabindex="-1">
           <header class="dialog-header">
@@ -80,7 +91,7 @@ function buttonClass(variant = "secondary") {
   z-index: 80;
   display: grid;
   place-items: center;
-  background: rgb(54 42 29 / 22%);
+  background: var(--lm-backdrop);
   padding: 24px;
   backdrop-filter: blur(3px) saturate(88%);
 }
@@ -160,37 +171,39 @@ function buttonClass(variant = "secondary") {
 }
 
 .dialog-button:focus-visible {
+  outline: 2px solid var(--lm-accent);
+  outline-offset: 2px;
   box-shadow: 0 0 0 3px var(--lm-focus);
 }
 
 .dialog-button-secondary {
-  border-color: rgb(219 213 202);
-  background: rgb(255 254 251);
-  color: rgb(74 68 59);
+  border-color: var(--lm-border-strong);
+  background: var(--lm-surface-raised);
+  color: var(--lm-ink);
 }
 
 .dialog-button-secondary:hover {
-  background: rgb(239 235 228);
+  background: var(--lm-accent-soft);
 }
 
 .dialog-button-primary {
   border-color: var(--lm-accent);
   background: var(--lm-accent);
-  color: rgb(255 254 251);
+  color: var(--lm-on-accent);
 }
 
 .dialog-button-primary:hover {
-  background: rgb(99 71 39);
+  background: color-mix(in srgb, var(--lm-accent) 84%, var(--lm-ink));
 }
 
 .dialog-button-danger {
-  border-color: rgb(156 61 45);
-  background: rgb(156 61 45);
-  color: rgb(255 254 251);
+  border-color: var(--lm-error);
+  background: var(--lm-error);
+  color: var(--lm-on-error);
 }
 
 .dialog-button-danger:hover {
-  background: rgb(131 49 36);
+  background: color-mix(in srgb, var(--lm-error) 84%, var(--lm-ink));
 }
 
 .dialog-fade-enter-active,
@@ -211,46 +224,6 @@ function buttonClass(variant = "secondary") {
 .dialog-fade-enter-from .dialog-panel,
 .dialog-fade-leave-to .dialog-panel {
   transform: translateY(6px) scale(0.985);
-}
-
-:global(.dark) .dialog-backdrop {
-  background: rgb(0 0 0 / 38%);
-}
-
-:global(.dark) .dialog-panel {
-  border-color: var(--lm-border-strong);
-  background: var(--lm-surface-raised);
-  box-shadow: var(--lm-shadow-md);
-  color: var(--lm-ink);
-}
-
-:global(.dark) .dialog-header h2 {
-  color: var(--lm-ink);
-}
-
-:global(.dark) .dialog-header p {
-  color: var(--lm-ink-soft);
-}
-
-:global(.dark) .dialog-details {
-  border-color: var(--lm-border);
-  background: var(--lm-surface-soft);
-  color: var(--lm-ink-soft);
-}
-
-:global(.dark) .dialog-actions {
-  border-color: var(--lm-border);
-  background: var(--lm-surface-soft);
-}
-
-:global(.dark) .dialog-button-secondary {
-  border-color: var(--lm-border-strong);
-  background: var(--lm-surface-raised);
-  color: var(--lm-ink);
-}
-
-:global(.dark) .dialog-button-secondary:hover {
-  background: var(--lm-accent-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {

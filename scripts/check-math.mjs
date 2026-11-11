@@ -1318,7 +1318,7 @@ try {
   assert.match(wysiwygSource, /serializeMathToken/);
   assert.match(wysiwygSource, /EscapedDollarNode/);
   assert.match(wysiwygSource, /LightMarkInlineCode/);
-  assert.match(wysiwygSource, /LIGHTMARK_TURNDOWN_HTML_BLOCK/);
+  assert.match(fs.readFileSync(path.resolve("src/editor/wysiwygCodec.ts"), "utf8"), /LIGHTMARK_TURNDOWN_HTML_BLOCK/);
   assert.match(wysiwygSource, /InlineMath/);
   assert.match(sourceEditor, /cm-math-error/);
   assert.match(sourceEditor, /mathDiagnostics\.worker\.ts/);

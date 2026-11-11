@@ -1,6 +1,6 @@
 # WP05 精细源码保真接线设计
 
-本文只定义 WYSIWYG 到原始 Markdown 的局部保真接线，当前不接入生产核心。它依赖已经通过独立检查的 `sourceLeafProvenance` 受限首片，以及版本化专用 recovery codec。设计目标是：一次 WYSIWYG 事务只记录受影响的原文范围，未改变的范围继续引用最近一次 snapshot 的原始片段；完整 UTF-16 字符串和 UTF-8 bytes 只在明确的 snapshot/保存/恢复边界物化，不能在每个输入事务中重新创建整篇 raw string。
+本文定义 WYSIWYG 到原始 Markdown 的局部保真接线。初版只批准独立模块；2026-09-08 继续实施时，生产接入按模块审查、真实编辑器验证的顺序推进，当前受限 helper 通过仍不等于已兑现完整保真契约。它依赖已经通过独立检查的 `sourceLeafProvenance` 受限首片，以及版本化专用 recovery codec。设计目标是：一次 WYSIWYG 事务只记录受影响的原文范围，未改变的范围继续引用最近一次 snapshot 的原始片段；完整 UTF-16 字符串和 UTF-8 bytes 只在明确的 snapshot/保存/恢复边界物化，不能在每个输入事务中重新创建整篇 raw string。
 
 ## 边界对象与版本
 

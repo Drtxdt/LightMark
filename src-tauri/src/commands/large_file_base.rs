@@ -5,13 +5,14 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
+        atomic::{AtomicUsize, AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::SystemTime,
 };
 
 use super::large_text_view::{BaseLine, ByteSpan, ImmutableBase};
+use super::persistent_text::{BaseSegment, Summary, SEGMENT_BYTES};
 
 pub const DEFAULT_IO_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -39,12 +40,14 @@ impl SourceFingerprint {
 pub struct SnapshotOptions {
     /// The bounded buffer size used for copy, reads, writes, and hashing.
     pub io_chunk_size: usize,
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SnapshotOptions {
     fn default() -> Self {
         Self {
             io_chunk_size: DEFAULT_IO_CHUNK_SIZE,
+            cancel: None,
         }
     }
 }
@@ -52,6 +55,7 @@ impl Default for SnapshotOptions {
 #[derive(Debug)]
 pub enum SnapshotError {
     InvalidOwnerId,
+    Cancelled,
     InvalidChunkSize,
     Io {
         operation: &'static str,
@@ -83,6 +87,7 @@ pub enum SnapshotError {
 impl fmt::Display for SnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(formatter, "snapshot operation cancelled"),
             Self::InvalidOwnerId => write!(formatter, "invalid snapshot owner id"),
             Self::InvalidChunkSize => write!(formatter, "snapshot IO chunk size must be positive"),
             Self::Io {
@@ -153,6 +158,7 @@ pub struct FileBaseSnapshot {
     snapshot_dir: PathBuf,
     snapshot_path: PathBuf,
     lines: Vec<BaseLine>,
+    segments: Vec<BaseSegment>,
     prefix: Option<ByteSpan>,
     size_bytes: u64,
     fingerprint: SourceFingerprint,
@@ -197,9 +203,13 @@ impl FileBaseSnapshot {
         snapshot_root: impl AsRef<Path>,
         owner_id: &str,
     ) -> Result<Self, SnapshotError> {
-        let mut snapshot = Self::create(owned_path.as_ref(), snapshot_root, owner_id)?;
-        snapshot.source_path = logical_source_path.as_ref().to_path_buf();
-        Ok(snapshot)
+        Self::create_from_stable_owned_file_with_options(owned_path, logical_source_path, snapshot_root, owner_id, SnapshotOptions::default())
+    }
+    pub(crate) fn create_from_stable_owned_file_with_options(
+        owned_path: impl AsRef<Path>, logical_source_path: impl AsRef<Path>, snapshot_root: impl AsRef<Path>, owner_id: &str, options: SnapshotOptions,
+    ) -> Result<Self, SnapshotError> {
+        let mut snapshot=Self::create_with_options(owned_path.as_ref(),snapshot_root,owner_id,options)?;
+        snapshot.source_path=logical_source_path.as_ref().to_path_buf();Ok(snapshot)
     }
 
     #[cfg(test)]
@@ -262,7 +272,7 @@ impl FileBaseSnapshot {
 
         // A second source pass catches same-size/content changes that metadata
         // alone cannot detect. The private copy remains the only accepted base.
-        let current = match fingerprint_path(&source_path, options.io_chunk_size) {
+        let current = match fingerprint_path_cancellable(&source_path, options.io_chunk_size, options.cancel.as_deref()) {
             Ok(value) => value,
             Err(primary) => return Err(cleanup_after_failure(snapshot_dir, primary)),
         };
@@ -301,6 +311,7 @@ impl FileBaseSnapshot {
             snapshot_dir,
             snapshot_path,
             lines: copied.lines,
+            segments: copied.segments,
             prefix: copied.prefix,
             size_bytes: copied.size_bytes,
             fingerprint: copied.fingerprint,
@@ -499,6 +510,9 @@ impl ImmutableBase for FileBaseSnapshot {
         &self.lines
     }
 
+    fn sparse_segments(&self) -> Option<&[BaseSegment]> { Some(&self.segments) }
+    fn delta_directory(&self) -> Option<PathBuf> { Some(self.snapshot_dir.clone()) }
+
     fn read_span(&self, span: ByteSpan) -> Result<Vec<u8>, String> {
         self.read_span_checked(span)
             .map_err(|error| error.to_string())
@@ -512,6 +526,7 @@ impl ImmutableBase for FileBaseSnapshot {
 
 struct CopiedSnapshot {
     lines: Vec<BaseLine>,
+    segments: Vec<BaseSegment>,
     prefix: Option<ByteSpan>,
     size_bytes: u64,
     fingerprint: SourceFingerprint,
@@ -541,12 +556,17 @@ fn copy_and_index(
 
     let mut hash = Sha256::new();
     let mut validator = StrictUtf8Validator::default();
-    let mut scanner = LineScanner::default();
+    #[cfg(test)]
+    let mut scanner = (source_before.0 <= 1024 * 1024).then(LineScanner::default);
+    let mut segment_buffer = Vec::with_capacity(SEGMENT_BYTES * 2);
+    let mut segments = Vec::new();
+    let mut segment_offset = 0_u64;
     let mut prefix_detector = PrefixDetector::default();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; options.io_chunk_size];
 
     loop {
+        if options.cancel.as_ref().is_some_and(|cancel|cancel.load(Ordering::Relaxed)){return Err(SnapshotError::Cancelled)}
         let read = input
             .read(&mut buffer)
             .map_err(|source| SnapshotError::Io {
@@ -559,7 +579,10 @@ fn copy_and_index(
         }
         let chunk = &buffer[..read];
         validator.push(chunk)?;
-        scanner.push(chunk);
+        #[cfg(test)]
+        if let Some(scanner) = scanner.as_mut() { scanner.push(chunk); }
+        segment_buffer.extend_from_slice(chunk);
+        flush_segments(&mut segment_buffer, &mut segment_offset, &mut segments, false)?;
         prefix_detector.push(chunk);
         hash.update(chunk);
         output
@@ -576,7 +599,11 @@ fn copy_and_index(
     }
     validator.finish()?;
     let prefix = prefix_detector.finish();
-    let mut lines = scanner.finish();
+    flush_segments(&mut segment_buffer, &mut segment_offset, &mut segments, true)?;
+    #[cfg(test)]
+    let mut lines = scanner.map(LineScanner::finish).unwrap_or_default();
+    #[cfg(not(test))]
+    let mut lines = Vec::new();
     if let Some(prefix) = prefix {
         strip_prefix_from_first_line(&mut lines, prefix);
     }
@@ -593,10 +620,26 @@ fn copy_and_index(
     };
     Ok(CopiedSnapshot {
         lines,
+        segments,
         prefix,
         size_bytes: bytes,
         fingerprint,
     })
+}
+
+fn flush_segments(buffer: &mut Vec<u8>, offset: &mut u64, segments: &mut Vec<BaseSegment>, finish: bool) -> Result<(), SnapshotError> {
+    while buffer.len() >= SEGMENT_BYTES || (finish && !buffer.is_empty()) {
+        let mut end = SEGMENT_BYTES.min(buffer.len());
+        while end > 0 && std::str::from_utf8(&buffer[..end]).is_err() { end -= 1; }
+        if !finish && end == buffer.len() && buffer[end - 1] == b'\r' { end -= 1; }
+        if end < buffer.len() && end > 0 && buffer[end - 1] == b'\r' && buffer[end] == b'\n' { end -= 1; }
+        if end == 0 { if !finish { break; } return Err(SnapshotError::InvalidUtf8 { offset: *offset }); }
+        let text = std::str::from_utf8(&buffer[..end]).map_err(|_| SnapshotError::InvalidUtf8 { offset: *offset })?;
+        let skip = if *offset == 0 && text.starts_with('\u{feff}') { 3 } else { 0 };
+        if end > skip { segments.push(BaseSegment { span: ByteSpan::new(*offset + skip as u64, (end - skip) as u64), summary: Summary::text(&text[skip..]) }); }
+        buffer.drain(..end); *offset += end as u64;
+    }
+    Ok(())
 }
 
 fn strip_prefix_from_first_line(lines: &mut [BaseLine], prefix: ByteSpan) {
@@ -610,6 +653,9 @@ fn strip_prefix_from_first_line(lines: &mut [BaseLine], prefix: ByteSpan) {
 }
 
 fn fingerprint_path(path: &Path, chunk_size: usize) -> Result<SourceFingerprint, SnapshotError> {
+    fingerprint_path_cancellable(path,chunk_size,None)
+}
+fn fingerprint_path_cancellable(path: &Path, chunk_size: usize, cancel: Option<&AtomicBool>) -> Result<SourceFingerprint, SnapshotError> {
     let before = source_metadata(path)?;
     let mut file = File::open(path).map_err(|source| SnapshotError::Io {
         operation: "open source for fingerprint",
@@ -620,6 +666,7 @@ fn fingerprint_path(path: &Path, chunk_size: usize) -> Result<SourceFingerprint,
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; chunk_size];
     loop {
+        if cancel.is_some_and(|cancel|cancel.load(Ordering::Relaxed)){return Err(SnapshotError::Cancelled)}
         let read = file.read(&mut buffer).map_err(|source| SnapshotError::Io {
             operation: "hash source",
             path: path.to_path_buf(),
@@ -911,6 +958,7 @@ mod tests {
             owner,
             SnapshotOptions {
                 io_chunk_size: chunk_size,
+                ..SnapshotOptions::default()
             },
         )
         .unwrap();
@@ -972,7 +1020,7 @@ mod tests {
             &source,
             &snapshots,
             "invalid-session",
-            SnapshotOptions { io_chunk_size: 1 },
+            SnapshotOptions { io_chunk_size: 1, ..SnapshotOptions::default() },
         );
         assert!(matches!(
             result,
@@ -1039,7 +1087,7 @@ mod tests {
             &source,
             &snapshots,
             "changed-during-copy-session",
-            SnapshotOptions { io_chunk_size: 1 },
+            SnapshotOptions { io_chunk_size: 1, ..SnapshotOptions::default() },
             &mut hook,
         );
 
@@ -1083,7 +1131,7 @@ mod tests {
             &source,
             &snapshots,
             "invalid-prefix-session",
-            SnapshotOptions { io_chunk_size: 2 },
+            SnapshotOptions { io_chunk_size: 2, ..SnapshotOptions::default() },
         );
         assert!(matches!(
             result,

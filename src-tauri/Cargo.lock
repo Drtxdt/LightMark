@@ -2324,6 +2324,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "image",
+ "memchr",
+ "memmap2",
  "notify",
  "regex",
  "resvg",

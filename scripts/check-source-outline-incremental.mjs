@@ -53,6 +53,28 @@ try {
     markdown = nextMarkdown;
     doc = nextDoc;
   }
+
+  // A newline changes checkpoint positions without changing parser state.
+  // Count actual line reads, rather than accepting a small recompute counter.
+  const large = Text.of(Array.from({ length: 50_000 }, (_, i) => i % 100 === 0 ? `# Heading ${i}` : 'ordinary text'));
+  const initial = buildSourceOutlineIndex(large);
+  for (const insert of ['x', '\n', '\n\n']) {
+    const at = large.line(3).from;
+    const next = large.replace(at, at, Text.of(insert.split('\n')));
+    let reads = 0;
+    const counted = new Proxy(next, { get(target, key) {
+      if (key === 'line') return (...args) => { reads++; return target.line(...args); };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const actual = updateSourceOutlineIndex(initial, large, counted, at, at, at + insert.length);
+    assert.deepEqual(actual.items, buildSourceOutlineIndex(next).items);
+    assert.ok(reads <= 520, `head edit ${JSON.stringify(insert)} read ${reads} lines`);
+  }
+  const deletionAt = large.line(3).to;
+  const deleted = large.replace(deletionAt, deletionAt + 1, Text.empty);
+  const afterDeletion = updateSourceOutlineIndex(initial, large, deleted, deletionAt, deletionAt, deletionAt);
+  assert.deepEqual(afterDeletion.items, buildSourceOutlineIndex(deleted).items);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

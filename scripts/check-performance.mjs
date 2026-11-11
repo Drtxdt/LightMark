@@ -26,7 +26,7 @@ const sourceUpdate = requiredMatch(
 );
 const wysiwygUpdate = requiredMatch(
   wysiwygEditor,
-  /onUpdate\(\{ editor, transaction \}\)[\s\S]*?\n  },/,
+  /onUpdate\(\{\s*editor(?:\s*:\s*[A-Za-z_$][\w$]*)?\s*,\s*transaction\s*\}\)[\s\S]*?\n  },/,
   "WysiwygEditor update handler was not found; performance assertions would otherwise be vacuous",
 );
 assert.doesNotMatch(sourceUpdate, /doc\.toString\(\)|setPaneContent/, "CodeMirror input copied the full document");
@@ -48,7 +48,7 @@ assert.doesNotMatch(wysiwygUpdate, /getHTML\(\)|editorHtmlToMarkdown|setPaneCont
 assert.match(sourceEditor, /new Worker\(new URL\("\.\.\/\.\.\/workers\/mathDiagnostics\.worker\.ts"/);
 assert.match(sourceEditor, /sourceOutlineField/);
 assert.match(wysiwygEditor, /markDocumentChanged/);
-assert.match(wysiwygEditor, /getWysiwygDerivedState\(editor\.state\)/);
+assert.match(wysiwygEditor, /getWysiwygDerivedState\((?:editor|updatedEditor)\.state\)/);
 assert.doesNotMatch(wysiwygUpdate, /collectWysiwygFindMatches/, "Tiptap input performed a full-document find");
 assert.doesNotMatch(wysiwygEditor, /scheduleWysiwygFindRefresh|function collectWysiwygFindMatches/, "Tiptap retained a deferred full-document find path");
 assert.match(wysiwygEditor, /createWysiwygFindPlugin/);

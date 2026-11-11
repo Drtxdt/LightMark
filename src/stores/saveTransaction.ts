@@ -1,5 +1,5 @@
 import { toRaw } from "vue";
-import type { DocumentSessionAdapter } from "../editor/documentRuntime";
+import type { DocumentSessionAdapter, DocumentSessionFlushResult } from "../editor/documentRuntime";
 import {
   documentMutationTokensEqual,
   type DocumentFlushReceipt,
@@ -41,6 +41,8 @@ export interface WindowCloseDraftReceipt {
   afterPending: boolean;
   afterMutationToken: DocumentMutationToken | null;
   flushReceipt?: DocumentFlushReceipt;
+  /** Large documents flush a remote edit batch without a Markdown token. */
+  largeFlush?: Pick<DocumentSessionFlushResult, "session" | "beforeRevision" | "afterRevision" | "beforeToken" | "afterToken">;
   content: string;
   dirty: boolean;
   draftId: string;

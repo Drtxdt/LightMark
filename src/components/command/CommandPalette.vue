@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import {
   appStore,
   closeCommandPalette,
@@ -29,6 +29,8 @@ const query = ref("");
 const backdrop = ref<HTMLElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
+const list = ref<HTMLElement | null>(null);
+const activeIndex = ref(0);
 useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeCommandPalette });
 
 const coreCommands = [
@@ -77,6 +79,23 @@ const commands = computed(() => {
   return text ? all.filter((command) => command.name.toLowerCase().includes(text)) : all;
 });
 
+watch(commands, () => { activeIndex.value = 0; });
+watch(activeIndex, async () => {
+  await nextTick();
+  list.value?.querySelector<HTMLElement>(`[data-command-index="${activeIndex.value}"]`)?.scrollIntoView({ block: "nearest" });
+});
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || !commands.value.length) return;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + commands.value.length) % commands.value.length;
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    void execute(commands.value[activeIndex.value]);
+  }
+}
+
 async function execute(command: { name: string; handler: () => unknown | Promise<unknown> }) {
   try {
     await command.handler();
@@ -95,11 +114,22 @@ async function execute(command: { name: string; handler: () => unknown | Promise
         v-model="query"
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"
         placeholder="搜索命令"
+        role="combobox"
+        aria-controls="command-results"
+        :aria-expanded="true"
+        :aria-activedescendant="commands.length ? `command-result-${activeIndex}` : undefined"
+        @keydown="onKeydown"
       />
-      <div class="max-h-80 overflow-auto p-2">
+      <div id="command-results" ref="list" class="max-h-80 overflow-auto p-2" role="listbox">
         <button
-          v-for="command in commands"
+          v-for="(command, index) in commands"
           :key="command.name"
+          :id="`command-result-${index}`"
+          :data-command-index="index"
+          role="option"
+          :aria-selected="index === activeIndex"
+          :style="index === activeIndex ? { background: 'var(--lm-accent-soft)', color: 'var(--lm-ink)' } : undefined"
+          @pointermove="activeIndex = index"
           class="block w-full rounded px-3 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-paper-100 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-paper-800 dark:hover:text-ink-100"
           @click="execute(command)"
         >

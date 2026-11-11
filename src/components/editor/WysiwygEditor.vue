@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, onBeforeUnmount, onMounted, watch } from "vue";
+import { prepareFineSourcePreservation, preserveFineSourceBlock, captureWysiwygSourceBaseline, type WysiwygSourceBaseline, removeGithubAlertTitle, serializeGithubAlertBody, serializeTableCell, normalizeFootnoteSource, preserveMarkdownTerminalNewlines, editorHtmlToMarkdown, normalizeLeadingImageWhitespace, normalizeCodeLanguage, displayCodeLanguage, codeLanguageItems, codeLanguageNames } from '../../editor/wysiwygCodec';
+
+import { matchesShortcut } from '../../utils/shortcuts';
+import { computed, ref, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
-import { Extension, Mark, mergeAttributes, Node, wrappingInputRule } from "@tiptap/core";
+import { CommandManager, Extension, Mark, mergeAttributes, Node, wrappingInputRule } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import Heading from "@tiptap/extension-heading";
@@ -12,9 +15,9 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TableRow } from "@tiptap/extension-table-row";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import TurndownService from "turndown";
+
 import { createLowlight } from "lowlight";
-import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { AllSelection, NodeSelection, Plugin, PluginKey, Selection, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { closeHistory } from "@tiptap/pm/history";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -28,6 +31,7 @@ import {
   getPanePendingModeCursor,
   getPaneTab,
   markDocumentChanged,
+  completePendingImageCommand,
   openWikiLink,
   revealHeadingAtLine,
   setPaneContent,
@@ -38,7 +42,14 @@ import {
 } from "../../stores/appStore";
 import {
   publishDocumentDerivedState,
+  documentHistoryForTab,
+  moveDocumentHistory,
+  advanceDocumentRevision,
+  documentRevision,
   registerDocumentSession,
+  beginPendingImageCommand,
+  documentCommandLease,
+  mapPendingDocumentCommands,
   type DocumentSessionAdapter,
   type PendingFlushOptions,
   type SnapshotReason,
@@ -51,10 +62,20 @@ import {
   type DocumentMutationTracker,
   type PendingMathFlushRequest,
 } from "../../editor/documentMutationTracker";
+import { assetReferenceTransaction, captureAssetReferenceBookmark, projectAssetReferenceBookmark, validateAssetReferenceBookmark, assetBookmarkTransaction } from "../../editor/assetReferenceTransaction";
+import { releasePendingCommand } from '../../editor/pendingDocumentCommands';
+import { markAssetAttributeTransaction, pendingPmCommandMaps } from '../../editor/pendingPmCommandMaps';
+import { checkpointSourceTransactionNode, compactSourceTransactionProvenance, recordSourceTransactionProvenance, sourceProvenanceDepth } from '../../editor/sourceTransactionProvenance';
+import { equalCanonicalDocument } from '../../editor/canonicalDocumentEquality';
+import type { ImageAssetTarget } from '../../utils/imageAssets';
+import { convertInlineMarkdownSyntax, convertInlineCodeSyntax } from "../../editor/inlineMarkdownConversion";
+import { materializeHistoryRoot, historySourceBookmark, historyPmBookmark, historyPmDocumentForSchema } from '../../editor/historySource';
+import { subscribePendingEditorInput, hasPendingEditorBuffers, flushPendingEditorBuffers, pendingEditorInputVersion } from '../../editor/pendingEditorBuffer';
 import { WysiwygSnapshotCache } from "../../editor/wysiwygSnapshot";
 import { createWysiwygDerivedPlugin, getWysiwygDerivedState } from "../../editor/wysiwygDerived";
 import { createWysiwygFocusPlugin } from "../../editor/wysiwygFocus";
 import {
+  canonicalMarkdownHistoryState,
   clearExposeMarkdownMeta,
   exposeHeadingMarkdown,
   exposeMarkdownAtCursor,
@@ -89,7 +110,7 @@ import { recordStartupStage } from "../../editor/startupMetrics";
 import { findOptions, findReplaceStore, setFindResult } from "../../stores/findReplaceStore";
 import { normalizeMatchIndex, replacementForMatch } from "../../utils/findReplace";
 import { markdownTopLevelSourceBlocks, renderMarkdownForEditor } from "../../utils/markdown";
-import { combinePreservedSourceBlocks, inspectSourceEnvelope, sourceBlocksForNodeCount } from "../../editor/sourcePreservation";
+import { combinePreservedSourceBlocks, inspectSourceEnvelope, sourceBlocksForNodes } from "../../editor/sourcePreservation";
 import { extractMathMacroDefinitions, mathTokenFromParts, parseMarkdownMath, serializeMathToken, type MathDelimiter } from "../../utils/mathMarkdown";
 import { buildEditorPositionSnapshot, normalizeScrollSnapshot, scrollTopFromSnapshot } from "../../utils/editorPosition";
 import {
@@ -147,6 +168,7 @@ import { MarkdownHeading } from "../../extensions/MarkdownHeading";
 import {
   BlockMath,
   InlineMath,
+  capturePendingMathRecovery,
   finalizePendingMathForClosePrompt,
   flushPendingMathEdits,
   getPendingMathEditVersion,
@@ -156,6 +178,27 @@ import {
 import { InlineHtmlNode, RawHtmlNode } from "../../extensions/InlineHtmlNode";
 import { EscapedDollarNode } from "../../extensions/EscapedDollarNode";
 import { MermaidNode } from "../../extensions/MermaidNode";
+import {
+  decodeRecoveryBundleV3,
+  encodeRecoveryBundleV3,
+  assertRecoverySourceMappingProven,
+  mergeRecoveryPendingMath,
+  subtractCapturedPendingMath,
+  type RecoveryCaptureV3,
+  type RecoveryExposedMarkdownV3,
+  type RecoveryLocalBufferV3,
+  type RecoveryLocalStateV3,
+  type RecoveryPendingMath,
+} from "../../editor/recoveryCodec";
+import {
+  captureRecoveryLocalBuffersForOwner,
+  hasRecoveryLocalBufferIssuesForOwner,
+  registerRecoveryLocalBufferForOwner,
+  recoveryLocalBufferRestoreIssuesForOwner,
+  retainAndUnregisterRecoveryLocalBufferForOwner,
+  restoreRecoveryLocalBuffersForOwner,
+  type RecoveryLocalBufferRestoreIssue,
+} from "../../editor/recoveryLocalState";
 import type { CapturedEditorTarget, EditorPaneId, SlashCommandDefinition, WysiwygFormatHistoryEntry } from "../../types";
 import UiIcon from "../ui/UiIcon.vue";
 
@@ -167,16 +210,22 @@ const lowlight = installLowlightPlainTextFallback(createLowlight());
 let wysiwygRevision = 0;
 let documentMutationTracker: DocumentMutationTracker | null = null;
 let observedPendingMathInputVersion = 0;
+let observedPendingLocalInputVersion = 0;
 let unregisterDocumentSession = () => {};
+let pendingCommandLease = 0;
+let unsubscribePendingEditorInput = () => {};
 let snapshotCache: WysiwygSnapshotCache | null = null;
+let primeExactWysiwygMarkdown: ((markdown: string) => void) | null = null;
 let cachedWysiwygFind: { items: WysiwygFindMatch[]; error: string } = { items: [], error: "" };
 let outlineDecorationEpoch = 0;
 let outlineDecorationCache: { state: object; epoch: number; collapsed: string; value: Decoration[] } | null = null;
+type WysiwygDocumentSessionAdapter = DocumentSessionAdapter & { readonly editorIdentity: object };
 const outlineHeadingDecorationsKey = new PluginKey<{
   decorations: DecorationSet;
   epoch: number;
   collapsed: string;
 }>("lightmarkOutlineHeadingDecorations");
+const LOCAL_EDITOR_UI_TRANSACTION_META_KEY = "lightmarkLocalEditorUi";
 
 function syncTrackedPendingMathInput(editor: object) {
   const nextVersion = getPendingMathInputVersion(editor);
@@ -184,6 +233,122 @@ function syncTrackedPendingMathInput(editor: object) {
   observedPendingMathInputVersion = nextVersion;
   documentMutationTracker?.recordPendingInput();
   return nextVersion;
+}
+
+type PendingLocalEditor = {
+  readonly id: string;
+  readonly hasPending: () => boolean;
+  readonly flush: (request: PendingMathFlushRequest) => void | Promise<void>;
+};
+
+type PendingLocalEditorRegistry = {
+  readonly entries: Set<PendingLocalEditor>;
+  version: number;
+  inputVersion: number;
+};
+
+type CombinedPendingEditVersion = {
+  mathVersion: number;
+  localVersion: number;
+  epoch: number;
+};
+
+// Math and NodeView-local registries have independent counters.  Combining
+// them with Math.max can hide a change whenever the smaller counter advances;
+// keep a monotonic per-editor epoch keyed by the pair instead.
+const combinedPendingEditVersions = new WeakMap<object, CombinedPendingEditVersion>();
+
+function getCombinedPendingEditVersion(editor: object) {
+  const mathVersion = getPendingMathInputVersion(editor);
+  const localVersion = getPendingLocalInputVersion(editor);
+  const previous = combinedPendingEditVersions.get(editor);
+  if (!previous) {
+    combinedPendingEditVersions.set(editor, { mathVersion, localVersion, epoch: 0 });
+    return 0;
+  }
+  if (previous.mathVersion === mathVersion && previous.localVersion === localVersion) return previous.epoch;
+  const next = {
+    mathVersion,
+    localVersion,
+    epoch: previous.epoch + 1,
+  };
+  combinedPendingEditVersions.set(editor, next);
+  return next.epoch;
+}
+
+// Local NodeView controls update a closure first and only write PM attrs at a
+// commit boundary.  Keep a small per-editor registry so ordinary save/close
+// can observe those buffers without serializing the whole document on input.
+const pendingLocalEditors = new WeakMap<object, PendingLocalEditorRegistry>();
+
+function registerPendingLocalEditor(editor: object, entry: PendingLocalEditor) {
+  let registry = pendingLocalEditors.get(editor);
+  if (!registry) {
+    registry = { entries: new Set(), version: 0, inputVersion: 0 };
+    pendingLocalEditors.set(editor, registry);
+  }
+  if ([...registry.entries].some((candidate) => candidate.id === entry.id)) {
+    throw new Error(`本地编辑器缓冲 id 重复：${entry.id}`);
+  }
+  registry.entries.add(entry);
+  registry.version += 1;
+  let active = true;
+  return {
+    markInputChanged() {
+      if (!active) return;
+      registry!.version += 1;
+      registry!.inputVersion += 1;
+    },
+    markChanged() {
+      if (active) registry!.version += 1;
+    },
+    unregister() {
+      if (!active) return;
+      active = false;
+      registry!.entries.delete(entry);
+      registry!.version += 1;
+    },
+  };
+}
+
+function hasPendingLocalEdits(editor: object) {
+  return hasRecoveryLocalBufferIssuesForOwner(editor)
+    || [...(pendingLocalEditors.get(editor)?.entries ?? [])].some((entry) => entry.hasPending());
+}
+
+function getPendingLocalEditVersion(editor: object) {
+  return pendingLocalEditors.get(editor)?.version ?? 0;
+}
+
+function getPendingLocalInputVersion(editor: object) {
+  return pendingLocalEditors.get(editor)?.inputVersion ?? 0;
+}
+
+function markPendingLocalInput(ownerEditor: object) {
+  const registry = pendingLocalEditors.get(ownerEditor);
+  if (!registry) return;
+  registry.version += 1;
+  registry.inputVersion += 1;
+  if (editor.value === ownerEditor && ownerTabStillExists() && editorOwnerTab) {
+    markDocumentChanged(editorOwnerTab.id, wysiwygRevision);
+  }
+}
+
+function syncTrackedPendingLocalInput(editor: object) {
+  const nextVersion = getPendingLocalInputVersion(editor);
+  if (nextVersion === observedPendingLocalInputVersion) return nextVersion;
+  observedPendingLocalInputVersion = nextVersion;
+  documentMutationTracker?.recordPendingInput();
+  return nextVersion;
+}
+
+async function flushPendingLocalEditors(editor: object, request: PendingMathFlushRequest) {
+  if (hasRecoveryLocalBufferIssuesForOwner(editor)) {
+    throw new Error("存在未解决的本地恢复缓冲，已保留当前窗口。请先从恢复列表处理。");
+  }
+  const entries = pendingLocalEditors.get(editor)?.entries;
+  if (!entries?.size) return;
+  for (const entry of [...entries]) await entry.flush(request);
 }
 
 function recordTrackedTransactions(
@@ -194,10 +359,12 @@ function recordTrackedTransactions(
   const tracker = documentMutationTracker;
   if (!tracker) return;
   syncTrackedPendingMathInput(editor);
+  syncTrackedPendingLocalInput(editor);
   const activeFlushId = tracker.activeFlushId;
   const transactions = [transaction, ...appendedTransactions];
   for (const current of transactions) {
     if (!current.docChanged) continue;
+    if (current.getMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY)) continue;
     const isRoot = current === transaction;
     const authorized = Boolean(activeFlushId) && (
       isRoot
@@ -213,6 +380,255 @@ function recordTrackedTransactions(
         ? { kind: "pending-flush", flushId: activeFlushId! }
         : { kind: "document" },
     );
+  }
+}
+
+let nextRecoveryNodeViewId = 0;
+
+function recoveryNodeViewId(kind: string) {
+  nextRecoveryNodeViewId += 1;
+  return `${kind}-local-${nextRecoveryNodeViewId}`;
+}
+
+type RecoveryNodeViewPosition = (() => number | undefined) | boolean;
+
+type RecoveryNodeBinding = {
+  position: number | null;
+  currentNode: any | null;
+  failure?: {
+    code: string;
+    message: string;
+    status: "conflicted" | "orphaned";
+  };
+};
+
+function readRecoveryNodePosition(getPos: RecoveryNodeViewPosition) {
+  if (typeof getPos !== "function") return null;
+  try {
+    const position = getPos();
+    return Number.isSafeInteger(position) && (position as number) >= 0 ? position as number : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameRecoveryNodeAttrs(left: any, right: any) {
+  if (!left || !right || left.type?.name !== right.type?.name) return false;
+  const keys = new Set([...Object.keys(left.attrs || {}), ...Object.keys(right.attrs || {})]);
+  return [...keys].every((key) => left.attrs?.[key] === right.attrs?.[key]);
+}
+
+function readRecoveryNodeBinding(
+  editor: any,
+  getPos: RecoveryNodeViewPosition,
+  acceptedNode: any,
+  expectedType: string,
+  lastKnownPosition: number | null,
+): RecoveryNodeBinding {
+  const position = readRecoveryNodePosition(getPos);
+  if (position === null) {
+    return {
+      position: lastKnownPosition,
+      currentNode: null,
+      failure: {
+        code: "node-view-position-unavailable",
+        message: "NodeView position is unavailable; its local value was retained as an orphan.",
+        status: "orphaned",
+      },
+    };
+  }
+  const doc = editor?.view?.state?.doc;
+  let currentNode: any = null;
+  try {
+    currentNode = doc?.nodeAt?.(position) ?? null;
+  } catch {
+    currentNode = null;
+  }
+  if (!currentNode || currentNode.type?.name !== expectedType) {
+    return {
+      position,
+      currentNode,
+      failure: {
+        code: "document-node-unavailable",
+        message: "The current PM node no longer matches this local NodeView.",
+        status: "conflicted",
+      },
+    };
+  }
+  if (!sameRecoveryNodeAttrs(currentNode, acceptedNode)) {
+    return {
+      position,
+      currentNode,
+      failure: {
+        code: "document-node-changed",
+        message: "The PM node changed while its local value was pending.",
+        status: "conflicted",
+      },
+    };
+  }
+  return { position, currentNode };
+}
+
+function readRecoveryTextUi(
+  control: HTMLInputElement | HTMLTextAreaElement,
+  composing: boolean,
+) {
+  const direction = control.selectionDirection === "forward" || control.selectionDirection === "backward"
+    ? control.selectionDirection
+    : "none" as const;
+  return {
+    anchor: control.selectionStart ?? control.value.length,
+    head: control.selectionEnd ?? control.value.length,
+    direction,
+    focused: document.activeElement === control,
+    composing,
+  };
+}
+
+function recoveryTextFailurePayload(
+  accepted: Record<string, unknown>,
+  textKey: string,
+  value: string,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    accepted,
+    draft: { [textKey]: value },
+    ...extra,
+  };
+}
+
+type RecoverySourceBaseline = {
+  readonly sourceText: string;
+  readonly sourceBytes: Uint8Array;
+  readonly revision: number;
+  readonly mappingProven: false;
+  readonly reason: string;
+};
+
+const recoveryNodeKinds = {
+  frontMatter: "frontmatter",
+  htmlBlock: "htmlBlock",
+  footnotes: "footnote",
+  tableOfContents: "toc",
+  mermaidDiagram: "mermaid",
+  inlineMath: "math",
+  blockMath: "math",
+} as const;
+
+function recoveryNodeCounts(doc: any) {
+  const counts: Record<string, number> = {
+    frontmatter: 0,
+    htmlBlock: 0,
+    footnote: 0,
+    toc: 0,
+    mermaid: 0,
+    math: 0,
+  };
+  doc?.descendants?.((node: any) => {
+    const kind = recoveryNodeKinds[node?.type?.name as keyof typeof recoveryNodeKinds];
+    if (kind) counts[kind] += 1;
+    return true;
+  });
+  return counts;
+}
+
+function recoveryBufferCounts(buffers: readonly RecoveryLocalBufferV3[]) {
+  const counts: Record<string, number> = {
+    frontmatter: 0,
+    htmlBlock: 0,
+    footnote: 0,
+    toc: 0,
+    mermaid: 0,
+    math: 0,
+  };
+  for (const buffer of buffers) counts[buffer.kind] += 1;
+  return counts;
+}
+
+function recoveryCountsMismatch(doc: any, buffers: readonly RecoveryLocalBufferV3[]) {
+  const expected = recoveryNodeCounts(doc);
+  const actual = recoveryBufferCounts(buffers);
+  const mismatches: string[] = [];
+  for (const kind of Object.keys(expected)) {
+    if (actual[kind] < expected[kind]) {
+      mismatches.push(`${kind}: expected at least ${expected[kind]}, captured ${actual[kind]}`);
+      continue;
+    }
+    if (actual[kind] <= expected[kind]) continue;
+    const extras = buffers.filter((buffer) => buffer.kind === kind && (buffer.status === "accepted" || buffer.status === "editing"));
+    if (extras.length) {
+      mismatches.push(`${kind}: ${extras.length} accepted/editing buffer(s) have no current PM node`);
+    }
+  }
+  return mismatches;
+}
+
+function defaultRecoveryExposedRange(state: any) {
+  let blockFrom = 0;
+  let blockEnd = 0;
+  state.doc.descendants((node: any, pos: number) => {
+    if (!node?.isTextblock) return true;
+    blockFrom = pos;
+    blockEnd = pos + node.nodeSize - 1;
+    return false;
+  });
+  const from = blockFrom + 1 <= blockEnd ? blockFrom + 1 : 0;
+  const to = from;
+  return {
+    kind: "inline" as const,
+    from,
+    to,
+    blockFrom,
+    open: "",
+    close: "",
+  };
+}
+
+function recoveryExposedMarkdownState(state: any, revision: number): RecoveryExposedMarkdownV3 {
+  const active = exposedMarkdownLifecycleKey.getState(state);
+  const selection = { anchor: state.selection.anchor, head: state.selection.head };
+  if (!active) {
+    return {
+      active: false,
+      range: defaultRecoveryExposedRange(state),
+      docRevision: revision,
+      selection,
+    };
+  }
+  return {
+    active: true,
+    range: { ...active },
+    docRevision: revision,
+    selection,
+  };
+}
+
+function recoverableTextControl(dom: HTMLElement, selector: string) {
+  return dom.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+}
+
+function restoreRecoveryTextUi(
+  control: HTMLInputElement | HTMLTextAreaElement | null,
+  ui: RecoveryLocalBufferV3["ui"],
+) {
+  if (!control || !ui) return;
+  requestAnimationFrame(() => {
+    if (ui.focused) control.focus();
+    const max = control.value.length;
+    control.setSelectionRange(
+      Math.max(0, Math.min(ui.anchor, max)),
+      Math.max(0, Math.min(ui.head, max)),
+      ui.direction === "none" ? undefined : ui.direction,
+    );
+  });
+}
+
+function recoveryIssuePayloadText(issue: RecoveryLocalBufferRestoreIssue) {
+  try {
+    return JSON.stringify(issue.buffer, null, 2);
+  } catch {
+    return String(issue.buffer.payload);
   }
 }
 
@@ -251,6 +667,44 @@ type ToolbarEditorCommand =
 type ToolbarEditorCommandDetail = { command?: ToolbarEditorCommand; value?: string | number | null };
 const WYSIWYG_FORMAT_HISTORY_LIMIT = 20;
 let suppressWysiwygUpdate = false;
+const composingControls = new Set<EventTarget>();
+function trackCompositionStart(event: CompositionEvent) {
+  if (event.target instanceof globalThis.Node && editorShell.value?.contains(event.target)) composingControls.add(event.target);
+}
+function trackCompositionEnd(event: CompositionEvent) { if (event.target) composingControls.delete(event.target); }
+let historySourceBaseline: WysiwygSourceBaseline | null = null;
+let sourceProvenanceDoc: ReturnType<typeof canonicalMarkdownHistoryState>['doc'] | null = null;
+const sourceProvenancePending = new Map<number, ReturnType<typeof canonicalMarkdownHistoryState>['doc']>();
+let sourceProvenanceTimer: number | null = null;
+function trackSourceProvenance(transaction: Transaction, canonical: ReturnType<typeof canonicalMarkdownHistoryState>) {
+  if (sourceProvenanceDoc) {
+    if (sourceProvenanceDoc.childCount !== canonical.doc.childCount) sourceProvenancePending.clear();
+    for (const { index, node } of recordSourceTransactionProvenance(sourceProvenanceDoc, canonical.doc, transaction)) {
+      if (sourceProvenanceDepth(node) >= 256) sourceProvenancePending.set(index, node);
+    }
+  }
+  sourceProvenanceDoc = canonical.doc;
+  scheduleSourceProvenanceCompaction();
+}
+function scheduleSourceProvenanceCompaction() {
+  if (!sourceProvenancePending.size || sourceProvenanceTimer != null) return;
+  sourceProvenanceTimer = window.setTimeout(async () => {
+    sourceProvenanceTimer = null;
+    try {
+      await prepareFineSourcePreservation();
+      if (!editor.value || editor.value.isDestroyed) { sourceProvenancePending.clear(); return; }
+      const started = performance.now();
+      for (const [index, node] of sourceProvenancePending) {
+        sourceProvenancePending.delete(index);
+        compactSourceTransactionProvenance(node, preserveFineSourceBlock);
+        if (performance.now() - started > 8) break;
+      }
+    } catch (error) { appStore.statusMessage = String(error); }
+    scheduleSourceProvenanceCompaction();
+  }, 50);
+}
+let historyBookmark = { anchor: 1, head: 1 };
+let wysiwygSelectionRestoreEpoch = 0;
 let wysiwygTypewriterFrame = 0;
 let wysiwygManualScrollUntil = 0;
 
@@ -264,6 +718,8 @@ const contextMenu = ref({
   flipY: false,
 });
 const editorShell = ref<HTMLElement | null>(null);
+const recoveryRestoreIssues = ref<RecoveryLocalBufferRestoreIssue[]>([]);
+const recoveryRestoreNotice = ref("");
 const codeLanguageInput = ref<HTMLInputElement | null>(null);
 const codeLanguageControl = ref({
   visible: false,
@@ -304,6 +760,13 @@ const paneTab = computed(() => getPaneTab(props.paneId));
 const paneContent = computed(() => getPaneContent(props.paneId));
 const paneEditorMode = computed(() => getPaneEditorMode(props.paneId));
 const paneDocumentMode = computed(() => getPaneDocumentMode(props.paneId));
+// A WYSIWYG instance belongs to the raw tab that created it.  During the
+// EditorShell transition the old and new instances briefly coexist; looking
+// up only the current tab id in an event callback lets an old editor mark the
+// new tab dirty.  Keep the raw object as the lifetime fence and let explicit
+// rebind paths create a new session when the document really changes owner.
+const editorOwnerTab = paneTab.value ? toRaw(paneTab.value) : null;
+wysiwygRevision = editorOwnerTab ? documentRevision(editorOwnerTab.id) : 0;
 const floatingCodeLanguageCandidates = computed(() => filterCodeLanguages(codeLanguageControl.value.query));
 const wysiwygWikiCandidates = computed(() => findWikiCompletionCandidates(appStore.wikiIndex, wikiCompletion.value.query));
 const typoraInlineMarkNames = ["bold", "italic", "code", "strike", "highlight", "superscript", "subscript", "link"];
@@ -314,125 +777,6 @@ const githubAlertKinds = [
   { kind: "warning", label: "Warning" },
   { kind: "caution", label: "Caution" },
 ] as const;
-const githubAlertLabels: Record<string, string> = {
-  note: "Note",
-  tip: "Tip",
-  important: "Important",
-  warning: "Warning",
-  caution: "Caution",
-};
-const codeLanguageItems = [
-  { name: "plaintext",   aliases: ["text", "txt", "plain"] },
-  { name: "actionscript", aliases: [] },
-  { name: "ada",         aliases: [] },
-  { name: "apache",      aliases: ["apacheconf"] },
-  { name: "applescript", aliases: [] },
-  { name: "arduino",     aliases: [] },
-  { name: "asciidoc",    aliases: ["adoc"] },
-  { name: "autohotkey",  aliases: ["ahk"] },
-  { name: "awk",         aliases: [] },
-  { name: "basic",       aliases: ["vb"] },
-  { name: "bash",        aliases: ["sh", "shell", "zsh"] },
-  { name: "c",           aliases: [] },
-  { name: "clojure",     aliases: ["clj"] },
-  { name: "cmake",       aliases: [] },
-  { name: "coffeescript", aliases: ["coffee"] },
-  { name: "cpp",         aliases: ["c++", "cc", "cxx"] },
-  { name: "crystal",     aliases: ["cr"] },
-  { name: "csharp",      aliases: ["cs", "c#"] },
-  { name: "css",         aliases: [] },
-  { name: "d",           aliases: [] },
-  { name: "dart",        aliases: [] },
-  { name: "delphi",      aliases: ["pascal", "pas"] },
-  { name: "diff",        aliases: ["patch"] },
-  { name: "django",      aliases: [] },
-  { name: "dockerfile",  aliases: ["docker"] },
-  { name: "elixir",      aliases: ["ex", "exs"] },
-  { name: "elm",         aliases: [] },
-  { name: "erb",         aliases: [] },
-  { name: "erlang",      aliases: ["erl"] },
-  { name: "fortran",     aliases: ["f", "f90"] },
-  { name: "fsharp",      aliases: ["fs"] },
-  { name: "gherkin",     aliases: ["feature"] },
-  { name: "glsl",        aliases: [] },
-  { name: "go",          aliases: ["golang"] },
-  { name: "gradle",      aliases: [] },
-  { name: "graphql",     aliases: ["gql"] },
-  { name: "groovy",      aliases: [] },
-  { name: "haml",        aliases: [] },
-  { name: "handlebars",  aliases: ["hbs"] },
-  { name: "haskell",     aliases: ["hs"] },
-  { name: "haxe",        aliases: ["hx"] },
-  { name: "html",        aliases: ["htm"] },
-  { name: "http",        aliases: [] },
-  { name: "ini",         aliases: [] },
-  { name: "java",        aliases: [] },
-  { name: "javascript",  aliases: ["js", "node"] },
-  { name: "json",        aliases: [] },
-  { name: "julia",       aliases: ["jl"] },
-  { name: "kotlin",      aliases: ["kt"] },
-  { name: "latex",       aliases: ["tex"] },
-  { name: "less",        aliases: [] },
-  { name: "lisp",        aliases: ["elisp", "emacs"] },
-  { name: "livescript",  aliases: ["ls"] },
-  { name: "lua",         aliases: [] },
-  { name: "makefile",    aliases: ["mk", "make"] },
-  { name: "markdown",    aliases: ["md"] },
-  { name: "mathematica", aliases: ["wl"] },
-  { name: "matlab",      aliases: [] },
-  { name: "nginx",       aliases: ["nginxconf"] },
-  { name: "nim",         aliases: [] },
-  { name: "nix",         aliases: [] },
-  { name: "objectivec",  aliases: ["objc", "obj-c"] },
-  { name: "ocaml",       aliases: ["ml"] },
-  { name: "perl",        aliases: ["pl"] },
-  { name: "pgsql",       aliases: ["postgresql", "postgres"] },
-  { name: "php",         aliases: [] },
-  { name: "powershell",  aliases: ["ps", "ps1"] },
-  { name: "processing",  aliases: [] },
-  { name: "prolog",      aliases: [] },
-  { name: "properties",  aliases: ["prop"] },
-  { name: "protobuf",    aliases: ["proto"] },
-  { name: "puppet",      aliases: ["pp"] },
-  { name: "python",      aliases: ["py"] },
-  { name: "qml",         aliases: [] },
-  { name: "r",           aliases: [] },
-  { name: "reasonml",    aliases: ["re"] },
-  { name: "ruby",        aliases: ["rb"] },
-  { name: "rust",        aliases: ["rs"] },
-  { name: "scala",       aliases: [] },
-  { name: "scheme",      aliases: [] },
-  { name: "scilab",      aliases: [] },
-  { name: "scss",        aliases: [] },
-  { name: "smalltalk",   aliases: [] },
-  { name: "sql",         aliases: [] },
-  { name: "stylus",      aliases: ["styl"] },
-  { name: "svelte",      aliases: [] },
-  { name: "swift",       aliases: [] },
-  { name: "tcl",         aliases: [] },
-  { name: "thrift",      aliases: [] },
-  { name: "toml",        aliases: [] },
-  { name: "twig",        aliases: [] },
-  { name: "typescript",  aliases: ["ts"] },
-  { name: "vala",        aliases: [] },
-  { name: "vbnet",       aliases: ["vb.net"] },
-  { name: "verilog",     aliases: ["v"] },
-  { name: "vhdl",        aliases: [] },
-  { name: "vim",         aliases: ["vimscript"] },
-  { name: "vue",         aliases: [] },
-  { name: "wasm",        aliases: ["wat"] },
-  { name: "x86asm",      aliases: ["asm"] },
-  { name: "xml",         aliases: [] },
-  { name: "xquery",      aliases: ["xq"] },
-  { name: "yaml",        aliases: ["yml"] },
-  { name: "zig",         aliases: [] },
-] as const;
-const codeLanguageNames = codeLanguageItems.map((item) => item.name);
-const codeLanguageAliases = new Map<string, string>();
-codeLanguageItems.forEach((item) => {
-  codeLanguageAliases.set(item.name, item.name);
-  item.aliases.forEach((alias) => codeLanguageAliases.set(alias, item.name));
-});
 let pendingWysiwygRestoreTimer: number | null = null;
 
 const TyporaHeading = Heading.extend({
@@ -613,12 +957,31 @@ const FrontMatterNode = Node.create({
       dom.contentEditable = "false";
       let yaml = node.attrs.yaml || "";
       let editing = Boolean(node.attrs.editing);
+      let composing = false;
+      let pendingConflict = false;
+      let acceptedNode = node;
+      let lastKnownPosition = readRecoveryNodePosition(getPos as RecoveryNodeViewPosition);
+      const recoveryId = recoveryNodeViewId("frontmatter");
 
-      const updateYaml = () => {
-        if (typeof getPos !== "function") return;
-        const pos = getPos();
-        if (typeof pos !== "number") return;
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { yaml, editing: false }));
+      const updateYaml = (flushRequest?: PendingMathFlushRequest) => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "frontMatter", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        if (binding.failure || binding.position === null) {
+          pendingConflict = true;
+          return false;
+        }
+        const pos = binding.position;
+        const acceptedYaml = String(acceptedNode.attrs.yaml || "");
+        const contentChanged = yaml !== acceptedYaml;
+        let transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, { yaml, editing });
+        if (!contentChanged) {
+          transaction = transaction
+            .setMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY, true)
+            .setMeta("addToHistory", false);
+        }
+        if (flushRequest) transaction = transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+        editor.view.dispatch(transaction);
+        return true;
       };
 
       const renderDisplay = () => {
@@ -630,7 +993,7 @@ const FrontMatterNode = Node.create({
         dom.append(pre);
       };
 
-      const renderEditor = () => {
+      const renderEditor = (focus = true) => {
         dom.innerHTML = "";
         dom.className = "front-matter-node front-matter-node-editing";
         const textarea = document.createElement("textarea");
@@ -642,15 +1005,126 @@ const FrontMatterNode = Node.create({
         textarea.addEventListener("input", () => {
           yaml = textarea.value;
           textarea.rows = Math.max(3, yaml.split(/\r?\n/).length);
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionstart", () => {
+          composing = true;
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionend", () => {
+          composing = false;
+          markPendingLocalInput(editor);
         });
         textarea.addEventListener("blur", () => {
+          if (composing) return;
           editing = false;
           updateYaml();
           renderDisplay();
         });
         dom.append(textarea);
-        requestAnimationFrame(() => textarea.focus());
+        if (focus) requestAnimationFrame(() => textarea.focus());
       };
+
+      const captureRecovery = () => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "frontMatter", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        const control = dom.querySelector<HTMLTextAreaElement>(".front-matter-editor");
+        const accepted = {
+          yaml: String(acceptedNode.attrs.yaml || ""),
+          editing: Boolean(acceptedNode.attrs.editing),
+        };
+        const value = control?.value ?? yaml;
+        const payload = {
+          accepted,
+          draft: { yaml: value, editing },
+          valueRevision: wysiwygRevision,
+        };
+        if (binding.failure) {
+          return {
+            ok: false as const,
+            ...binding.failure,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (editing && !control) {
+          return {
+            ok: false as const,
+            code: "dom-value-unavailable",
+            message: "FrontMatter editor value is unavailable while the NodeView is editing.",
+            status: "orphaned" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (control && control.value !== yaml) {
+          return {
+            ok: false as const,
+            code: "dom-closure-mismatch",
+            message: "FrontMatter DOM value and closure value disagree.",
+            status: "conflicted" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        return {
+          ok: true as const,
+          buffer: {
+            id: recoveryId,
+            kind: "frontmatter" as const,
+            status: editing ? "editing" as const : "accepted" as const,
+            sourceRevision: wysiwygRevision,
+            positionHint: binding.position,
+            payload,
+            ...(control ? { ui: readRecoveryTextUi(control, composing) } : {}),
+          },
+        };
+      };
+
+      const restoreRecovery = (buffer: RecoveryLocalBufferV3) => {
+        const payload = buffer.payload as {
+          accepted?: { yaml?: string; editing?: boolean };
+          draft?: string | { yaml?: string; editing?: boolean };
+        };
+        const draft = payload.draft;
+        yaml = typeof draft === "string" ? draft : String(draft?.yaml ?? payload.accepted?.yaml ?? "");
+        pendingConflict = false;
+        editing = buffer.status === "editing" || Boolean(typeof draft === "object" && draft?.editing);
+        editing ? renderEditor(false) : renderDisplay();
+        if (editing) restoreRecoveryTextUi(recoverableTextControl(dom, ".front-matter-editor"), buffer.ui);
+      };
+      const hasPending = () => {
+        const control = dom.querySelector<HTMLTextAreaElement>(".front-matter-editor");
+        const acceptedYaml = String(acceptedNode.attrs.yaml || "");
+        return composing
+          || pendingConflict
+          || (editing && !control)
+          || (control?.value ?? yaml) !== acceptedYaml;
+      };
+      const flushPending = (request: PendingMathFlushRequest) => {
+        if (pendingConflict) throw new Error("FrontMatter 节点与未提交输入发生冲突，已保留当前窗口。");
+        if (composing) throw new Error("FrontMatter 输入法组合尚未结束，已保留当前窗口。");
+        if (!hasPending()) return;
+        const control = dom.querySelector<HTMLTextAreaElement>(".front-matter-editor");
+        if (editing && !control) throw new Error("FrontMatter 编辑框已不可用，已保留当前窗口。");
+        if (control) yaml = control.value;
+        if (!updateYaml(request)) {
+          throw new Error("FrontMatter 节点位置已失效，已保留当前输入。");
+        }
+      };
+      const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+        id: recoveryId,
+        kind: "frontmatter",
+        sourceRevision: wysiwygRevision,
+        positionHint: lastKnownPosition,
+        capture: captureRecovery,
+        restore: restoreRecovery,
+      });
+      const unregisterPending = registerPendingLocalEditor(editor, {
+        id: recoveryId,
+        hasPending,
+        flush: flushPending,
+      }).unregister;
 
       dom.addEventListener("mousedown", (event) => {
         if (editing) return;
@@ -663,10 +1137,35 @@ const FrontMatterNode = Node.create({
       return {
         dom,
         update(nextNode: any) {
-          yaml = nextNode.attrs.yaml || "";
+          const previousYaml = String(acceptedNode.attrs.yaml || "");
+          const incomingYaml = String(nextNode.attrs.yaml || "");
+          const localChanged = yaml !== previousYaml;
+          const incomingChanged = incomingYaml !== previousYaml;
+          if (editing && nextNode.attrs.editing && incomingYaml === yaml) {
+            acceptedNode = nextNode;
+            pendingConflict = false;
+            return true;
+          }
+          if (editing && localChanged && !incomingChanged) {
+            acceptedNode = nextNode;
+            return true;
+          }
+          if (editing && localChanged && incomingChanged && incomingYaml !== yaml) {
+            pendingConflict = true;
+            return true;
+          }
+          pendingConflict = false;
+          acceptedNode = nextNode;
+          yaml = incomingYaml;
           editing = Boolean(nextNode.attrs.editing);
           editing ? renderEditor() : renderDisplay();
           return true;
+        },
+        destroy() {
+          const pending = hasPending();
+          unregisterPending();
+          if (pending) retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryId);
+          else unregisterRecovery();
         },
         ignoreMutation: () => true,
         stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
@@ -747,17 +1246,6 @@ function isLeadingFrontMatterFence(state: any) {
 function getFencedCodeLanguage(text: string) {
   const match = text.match(/^```([A-Za-z0-9_+-]*)\s*$/);
   return match ? match[1] : null;
-}
-
-function normalizeCodeLanguage(input: string | null | undefined) {
-  const value = (input || "").trim().toLowerCase();
-  if (!value) return "";
-  return codeLanguageAliases.get(value) || "";
-}
-
-function displayCodeLanguage(input: string | null | undefined) {
-  const value = (input || "").trim();
-  return normalizeCodeLanguage(value) || value;
 }
 
 function readCodeLanguageFromElement(element: HTMLElement) {
@@ -854,15 +1342,35 @@ const TableOfContentsNode = Node.create({
       dom.className = "toc-node";
       dom.contentEditable = "false";
       let editing = Boolean(node.attrs.editing);
+      let candidate = "[TOC]";
+      let composing = false;
+      let pendingConflict = false;
+      let acceptedNode = node;
+      let lastKnownPosition = readRecoveryNodePosition(getPos as RecoveryNodeViewPosition);
+      const recoveryId = recoveryNodeViewId("toc");
+      let retiring = false;
 
-      const updateAttrs = (nextEditing: boolean) => {
-        if (typeof getPos !== "function") return;
-        const pos = getPos();
-        if (typeof pos !== "number") return;
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { editing: nextEditing }));
+      const updateAttrs = (nextEditing: boolean, flushRequest?: PendingMathFlushRequest, uiOnly = false) => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "tableOfContents", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        if (binding.failure || binding.position === null) {
+          pendingConflict = true;
+          return false;
+        }
+        const pos = binding.position;
+        let transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, { editing: nextEditing });
+        if (uiOnly) {
+          transaction = transaction
+            .setMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY, true)
+            .setMeta("addToHistory", false);
+        }
+        if (flushRequest) transaction = transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+        editor.view.dispatch(transaction);
+        pendingConflict = false;
+        return true;
       };
 
-      const render = () => {
+      const render = (focus = true) => {
         dom.className = editing ? "toc-node toc-node-editing" : "toc-node";
         const headings: Array<{ level: number; text: string }> = [];
         editor.state.doc.descendants((node: any) => {
@@ -879,22 +1387,37 @@ const TableOfContentsNode = Node.create({
         if (editing) {
           const input = document.createElement("input");
           input.className = "toc-node-editor";
-          input.value = "[TOC]";
+          input.value = candidate;
           input.spellcheck = false;
+          input.addEventListener("input", () => {
+            candidate = input.value;
+            markPendingLocalInput(editor);
+          });
+          input.addEventListener("compositionstart", () => {
+            composing = true;
+            markPendingLocalInput(editor);
+          });
+          input.addEventListener("compositionend", () => {
+            composing = false;
+            markPendingLocalInput(editor);
+          });
           input.addEventListener("blur", () => {
             window.setTimeout(() => {
               if (document.activeElement === input) return;
-              if (input.value.trim().toUpperCase() !== "[TOC]") {
-                replaceTocWithText(editor, getPos, input.value);
+              if (composing) return;
+              candidate = input.value;
+              if (candidate.trim().toUpperCase() !== "[TOC]") {
+                retiring = true;
+                if (!replaceTocWithText(editor, getPos, candidate)) retiring = false;
                 return;
               }
               editing = false;
-              updateAttrs(false);
+              updateAttrs(false, undefined, true);
               render();
             }, 100);
           });
           dom.appendChild(input);
-          requestAnimationFrame(() => {
+          if (focus) requestAnimationFrame(() => {
             input.focus();
             input.select();
           });
@@ -907,6 +1430,102 @@ const TableOfContentsNode = Node.create({
           dom.appendChild(item);
         });
       };
+      const captureRecovery = () => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "tableOfContents", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        const control = dom.querySelector<HTMLInputElement>(".toc-node-editor");
+        const payload = {
+          candidate: control?.value ?? candidate,
+          accepted: "[TOC]",
+          editing,
+          valueRevision: wysiwygRevision,
+        };
+        if (binding.failure) {
+          return {
+            ok: false as const,
+            ...binding.failure,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (editing && !control) {
+          return {
+            ok: false as const,
+            code: "dom-value-unavailable",
+            message: "TOC editor value is unavailable while the NodeView is editing.",
+            status: "orphaned" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (control && control.value !== candidate) {
+          return {
+            ok: false as const,
+            code: "dom-closure-mismatch",
+            message: "TOC DOM value and closure value disagree.",
+            status: "conflicted" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        return {
+          ok: true as const,
+          buffer: {
+            id: recoveryId,
+            kind: "toc" as const,
+            status: editing ? "editing" as const : "accepted" as const,
+            sourceRevision: wysiwygRevision,
+            positionHint: binding.position,
+            payload,
+            ...(control ? { ui: readRecoveryTextUi(control, composing) } : {}),
+          },
+        };
+      };
+      const restoreRecovery = (buffer: RecoveryLocalBufferV3) => {
+        const payload = buffer.payload as { candidate?: string; accepted?: string; editing?: boolean };
+        candidate = String(payload.candidate ?? payload.accepted ?? "[TOC]");
+        editing = buffer.status === "editing" || Boolean(payload.editing);
+        render(false);
+        if (editing) restoreRecoveryTextUi(recoverableTextControl(dom, ".toc-node-editor"), buffer.ui);
+      };
+      const hasPending = () => !retiring && (pendingConflict || composing || candidate.trim().toUpperCase() !== "[TOC]");
+      const flushPending = (request: PendingMathFlushRequest) => {
+        if (pendingConflict) throw new Error("TOC 节点与未提交输入发生冲突，已保留当前窗口。");
+        if (composing) throw new Error("TOC 输入法组合尚未结束，已保留当前窗口。");
+        if (!hasPending()) return;
+        const control = dom.querySelector<HTMLInputElement>(".toc-node-editor");
+        if (editing && !control) throw new Error("TOC 编辑框已不可用，已保留当前窗口。");
+        if (control) candidate = control.value;
+        if (candidate.trim().toUpperCase() !== "[TOC]") {
+          retiring = true;
+          editing = false;
+          if (!replaceTocWithText(editor, getPos, candidate, request)) {
+            retiring = false;
+            editing = true;
+            throw new Error("TOC 节点位置已失效，已保留当前输入。");
+          }
+          return;
+        }
+        editing = false;
+        if (!updateAttrs(false, request, true)) {
+          editing = true;
+          throw new Error("TOC 节点位置已失效，已保留当前输入。");
+        }
+        render();
+      };
+      const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+        id: recoveryId,
+        kind: "toc",
+        sourceRevision: wysiwygRevision,
+        positionHint: lastKnownPosition,
+        capture: captureRecovery,
+        restore: restoreRecovery,
+      });
+      const unregisterPending = registerPendingLocalEditor(editor, {
+        id: recoveryId,
+        hasPending,
+        flush: flushPending,
+      }).unregister;
       const refresh = () => {
         if (!editing) render();
       };
@@ -915,30 +1534,39 @@ const TableOfContentsNode = Node.create({
         if (editing) return;
         event.preventDefault();
         editing = true;
-        updateAttrs(true);
+        updateAttrs(true, undefined, true);
         render();
       });
       render();
       return {
         dom,
         update: (nextNode: any) => {
+          if (editing && candidate.trim().toUpperCase() !== "[TOC]") {
+            acceptedNode = nextNode;
+            return true;
+          }
+          acceptedNode = nextNode;
           editing = Boolean(nextNode.attrs.editing);
           render();
           return true;
         },
         selectNode() {
           editing = true;
-          updateAttrs(true);
+          updateAttrs(true, undefined, true);
           render();
         },
         deselectNode() {
           if (!editing) return;
           editing = false;
-          updateAttrs(false);
+          updateAttrs(false, undefined, true);
           render();
         },
         destroy() {
           editor.off?.("update", refresh);
+          const pending = hasPending();
+          unregisterPending();
+          if (pending) retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryId);
+          else unregisterRecovery();
         },
         ignoreMutation: () => true,
         stopEvent: (event: Event) => event.target instanceof HTMLInputElement,
@@ -957,10 +1585,14 @@ const HtmlBlockNode = Node.create({
     return {
       html: {
         default: "",
-        parseHTML: (element) => sanitizeHtmlFragment(decodeHtmlEntities(element.getAttribute("data-html") || "")),
+        // Keep the source string as data.  The NodeView display path applies
+        // the existing HTML renderer/sanitizer separately; parsing or
+        // committing a sanitized value would silently destroy recoverable
+        // source bytes.
+        parseHTML: (element) => element.getAttribute("data-html") || "",
         renderHTML: (attributes) => ({
           "data-type": "html-block",
-          "data-html": sanitizeHtmlFragment(decodeHtmlEntities(attributes.html || "")),
+          "data-html": attributes.html || "",
         }),
       },
       editing: {
@@ -982,28 +1614,63 @@ const HtmlBlockNode = Node.create({
     return ({ node, editor, getPos }) => {
       const dom = document.createElement("section");
       dom.contentEditable = "false";
-      let html = sanitizeHtmlFragment(decodeHtmlEntities(node.attrs.html || ""));
+      let html = String(node.attrs.html || "");
       let editing = Boolean(node.attrs.editing);
       let committing = false;
+      let composing = false;
+      let pendingConflict = false;
+      let acceptedNode = node;
+      let lastKnownPosition = readRecoveryNodePosition(getPos as RecoveryNodeViewPosition);
+      const recoveryId = recoveryNodeViewId("html");
 
-      const updateAttrs = (next: { html?: string; editing?: boolean }) => {
-        if (typeof getPos !== "function") return;
-        const pos = getPos();
-        if (typeof pos !== "number") return;
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { html, editing, ...next }));
+      const updateAttrs = (
+        next: { html?: string; editing?: boolean },
+        flushRequest?: PendingMathFlushRequest,
+        uiOnly = false,
+      ) => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "htmlBlock", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        if (binding.failure || binding.position === null) {
+          pendingConflict = true;
+          return false;
+        }
+        const pos = binding.position;
+        const nextHtml = next.html ?? html;
+        const nextEditing = next.editing ?? editing;
+        const nextAttrs = { html: nextHtml, editing: nextEditing };
+        if (Object.entries(nextAttrs).every(([key, value]) => acceptedNode.attrs[key] === value)) return true;
+        const acceptedHtml = String(acceptedNode.attrs.html || "");
+        const contentChanged = nextHtml !== acceptedHtml;
+        let transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs);
+        if (uiOnly || !contentChanged) {
+          transaction = transaction
+            .setMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY, true)
+            .setMeta("addToHistory", false);
+        }
+        if (flushRequest) transaction = transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+        editor.view.dispatch(transaction);
+        return true;
       };
 
-      const commitEditor = (textarea?: HTMLTextAreaElement) => {
-        if (!editing || committing) return;
+      const commitEditor = (textarea?: HTMLTextAreaElement, flushRequest?: PendingMathFlushRequest) => {
+        if (committing || composing) return false;
+        const acceptedHtml = String(acceptedNode.attrs.html || "");
+        if (!editing && (!textarea || textarea.value === acceptedHtml)) return true;
         committing = true;
         if (textarea) html = textarea.value;
         editing = false;
-        html = sanitizeHtmlFragment(html);
-        updateAttrs({ html, editing: false });
+        const updated = updateAttrs({ html, editing: false }, flushRequest);
+        if (!updated) {
+          editing = true;
+          committing = false;
+          return false;
+        }
         renderDisplay();
-        window.setTimeout(() => {
+        if (flushRequest) committing = false;
+        else window.setTimeout(() => {
           committing = false;
         }, 0);
+        return true;
       };
 
       const renderDisplay = () => {
@@ -1015,7 +1682,7 @@ const HtmlBlockNode = Node.create({
         dom.appendChild(rendered);
       };
 
-      const renderEditor = () => {
+      const renderEditor = (focus = true) => {
         dom.innerHTML = "";
         dom.className = "html-block-node html-block-node-editing";
         const label = document.createElement("div");
@@ -1029,22 +1696,141 @@ const HtmlBlockNode = Node.create({
         textarea.addEventListener("input", () => {
           html = textarea.value;
           textarea.rows = Math.max(3, html.split(/\r?\n/).length);
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionstart", () => {
+          composing = true;
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionend", () => {
+          composing = false;
+          markPendingLocalInput(editor);
         });
         textarea.addEventListener("keydown", (event) => {
           if (event.key !== "Escape" && !(event.key === "Enter" && (event.ctrlKey || event.metaKey))) return;
+          if (composing) return;
           event.preventDefault();
           commitEditor(textarea);
         });
-        textarea.addEventListener("blur", () => commitEditor(textarea));
+        textarea.addEventListener("blur", () => {
+          if (composing) return;
+          commitEditor(textarea);
+        });
         dom.append(label, textarea);
-        requestAnimationFrame(() => textarea.focus());
+        if (focus) requestAnimationFrame(() => textarea.focus());
       };
+
+      const captureRecovery = () => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "htmlBlock", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        const control = dom.querySelector<HTMLTextAreaElement>(".html-block-editor");
+        const accepted = {
+          html: String(acceptedNode.attrs.html || ""),
+          editing: Boolean(acceptedNode.attrs.editing),
+          decoded: true,
+          sanitized: false,
+        };
+        const value = control?.value ?? html;
+        const payload = {
+          accepted,
+          draft: { html: value, editing },
+          committing,
+          valueRevision: wysiwygRevision,
+        };
+        if (binding.failure) {
+          return {
+            ok: false as const,
+            ...binding.failure,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (editing && !control) {
+          return {
+            ok: false as const,
+            code: "dom-value-unavailable",
+            message: "HTML editor value is unavailable while the NodeView is editing.",
+            status: "orphaned" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (control && control.value !== html) {
+          return {
+            ok: false as const,
+            code: "dom-closure-mismatch",
+            message: "HTML DOM value and closure value disagree.",
+            status: "conflicted" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        return {
+          ok: true as const,
+          buffer: {
+            id: recoveryId,
+            kind: "htmlBlock" as const,
+            status: editing ? "editing" as const : "accepted" as const,
+            sourceRevision: wysiwygRevision,
+            positionHint: binding.position,
+            payload,
+            ...(control ? { ui: readRecoveryTextUi(control, composing) } : {}),
+          },
+        };
+      };
+
+      const restoreRecovery = (buffer: RecoveryLocalBufferV3) => {
+        const payload = buffer.payload as {
+          accepted?: { html?: string; editing?: boolean };
+          draft?: string | { html?: string; editing?: boolean };
+          committing?: boolean;
+        };
+        const draft = payload.draft;
+        html = typeof draft === "string" ? draft : String(draft?.html ?? payload.accepted?.html ?? "");
+        pendingConflict = false;
+        committing = Boolean(payload.committing);
+        editing = buffer.status === "editing" || Boolean(typeof draft === "object" && draft?.editing);
+        editing ? renderEditor(false) : renderDisplay();
+        if (editing) restoreRecoveryTextUi(recoverableTextControl(dom, ".html-block-editor"), buffer.ui);
+      };
+      const hasPending = () => {
+        const control = dom.querySelector<HTMLTextAreaElement>(".html-block-editor");
+        const acceptedHtml = String(acceptedNode.attrs.html || "");
+        const localHtml = control?.value ?? html;
+        return pendingConflict
+          || composing
+          || (editing && !control)
+          || localHtml !== acceptedHtml;
+      };
+      const flushPending = (request: PendingMathFlushRequest) => {
+        if (pendingConflict) throw new Error("HTML 节点与未提交输入发生冲突，已保留当前窗口。");
+        if (composing) throw new Error("HTML 输入法组合尚未结束，已保留当前窗口。");
+        if (!hasPending()) return;
+        if (committing) throw new Error("HTML 编辑器仍在提交，已保留当前窗口。");
+        const control = dom.querySelector<HTMLTextAreaElement>(".html-block-editor");
+        if (editing && !control) throw new Error("HTML 编辑框已不可用，已保留当前窗口。");
+        if (control) html = control.value;
+        if (!updateAttrs({ html, editing }, request)) throw new Error("HTML 节点位置已失效，已保留当前输入。");
+      };
+      const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+        id: recoveryId,
+        kind: "htmlBlock",
+        sourceRevision: wysiwygRevision,
+        positionHint: lastKnownPosition,
+        capture: captureRecovery,
+        restore: restoreRecovery,
+      });
+      const unregisterPending = registerPendingLocalEditor(editor, {
+        id: recoveryId,
+        hasPending,
+        flush: flushPending,
+      }).unregister;
 
       dom.addEventListener("mousedown", (event) => {
         if (editing) return;
         event.preventDefault();
         editing = true;
-        updateAttrs({ editing: true });
+        updateAttrs({ editing: true }, undefined, true);
         renderEditor();
       });
 
@@ -1052,7 +1838,27 @@ const HtmlBlockNode = Node.create({
       return {
         dom,
         update(nextNode: any) {
-          html = sanitizeHtmlFragment(decodeHtmlEntities(nextNode.attrs.html || ""));
+          const previousHtml = String(acceptedNode.attrs.html || "");
+          const incomingHtml = String(nextNode.attrs.html || "");
+          const localHtml = html;
+          const localChanged = localHtml !== previousHtml;
+          const incomingChanged = incomingHtml !== previousHtml;
+          if (editing && nextNode.attrs.editing && incomingHtml === localHtml) {
+            acceptedNode = nextNode;
+            pendingConflict = false;
+            return true;
+          }
+          if (editing && localChanged && !incomingChanged) {
+            acceptedNode = nextNode;
+            return true;
+          }
+          if (editing && localChanged && incomingChanged && incomingHtml !== localHtml) {
+            pendingConflict = true;
+            return true;
+          }
+          pendingConflict = false;
+          acceptedNode = nextNode;
+          html = incomingHtml;
           editing = Boolean(nextNode.attrs.editing);
           editing ? renderEditor() : renderDisplay();
           return true;
@@ -1060,11 +1866,17 @@ const HtmlBlockNode = Node.create({
         selectNode() {
           if (editing) return;
           editing = true;
-          updateAttrs({ editing: true });
+          updateAttrs({ editing: true }, undefined, true);
           renderEditor();
         },
         deselectNode() {
           commitEditor();
+        },
+        destroy() {
+          const pending = hasPending();
+          unregisterPending();
+          if (pending) retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryId);
+          else unregisterRecovery();
         },
         ignoreMutation: () => true,
         stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
@@ -1233,31 +2045,69 @@ const FootnotesNode = Node.create({
       let fallbackHtml = node.attrs.html || "";
       let editing = Boolean(node.attrs.editing);
       let committing = false;
+      let composing = false;
       let frame = 0;
-      const updateAttrs = (next: { markdown?: string; editing?: boolean }) => {
-        if (typeof getPos !== "function") return;
-        const pos = getPos();
-        if (typeof pos !== "number") return;
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, { markdown, html: fallbackHtml, editing, ...next }));
+      let pendingConflict = false;
+      let acceptedNode = node;
+      let lastKnownPosition = readRecoveryNodePosition(getPos as RecoveryNodeViewPosition);
+      const recoveryId = recoveryNodeViewId("footnote");
+      const updateAttrs = (
+        next: { markdown?: string; editing?: boolean },
+        flushRequest?: PendingMathFlushRequest,
+        uiOnly = false,
+      ) => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "footnotes", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        if (binding.failure || binding.position === null) {
+          pendingConflict = true;
+          return false;
+        }
+        const pos = binding.position;
+        const nextMarkdown = next.markdown ?? markdown;
+        const nextHtml = fallbackHtml;
+        const nextEditing = next.editing ?? editing;
+        const nextAttrs = { markdown: nextMarkdown, html: nextHtml, editing: nextEditing };
+        if (Object.entries(nextAttrs).every(([key, value]) => acceptedNode.attrs[key] === value)) return true;
+        const acceptedMarkdown = normalizeFootnoteSource(String(acceptedNode.attrs.markdown || ""));
+        const acceptedHtml = String(acceptedNode.attrs.html || "");
+        const contentChanged = nextMarkdown !== acceptedMarkdown || nextHtml !== acceptedHtml;
+        let transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs);
+        if (uiOnly || !contentChanged) {
+          transaction = transaction
+            .setMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY, true)
+            .setMeta("addToHistory", false);
+        }
+        if (flushRequest) transaction = transaction.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
+        editor.view.dispatch(transaction);
+        return true;
       };
       const renderDisplay = () => {
         dom.className = "footnotes";
         dom.innerHTML = "";
         renderFootnotesView(dom, markdown, fallbackHtml);
       };
-      const commitEditor = (textarea?: HTMLTextAreaElement) => {
-        if (!editing || committing) return;
+      const commitEditor = (textarea?: HTMLTextAreaElement, flushRequest?: PendingMathFlushRequest) => {
+        if (committing || composing) return false;
+        const acceptedMarkdown = normalizeFootnoteSource(String(acceptedNode.attrs.markdown || ""));
+        if (!editing && (!textarea || normalizeFootnoteSource(textarea.value) === acceptedMarkdown)) return true;
         committing = true;
         if (textarea) markdown = normalizeFootnoteSource(textarea.value);
         editing = false;
         dom.dataset.markdown = markdown;
-        updateAttrs({ markdown, editing: false });
+        const updated = updateAttrs({ markdown, editing: false }, flushRequest);
+        if (!updated) {
+          editing = true;
+          committing = false;
+          return false;
+        }
         renderDisplay();
-        window.setTimeout(() => {
+        if (flushRequest) committing = false;
+        else window.setTimeout(() => {
           committing = false;
         }, 0);
+        return true;
       };
-      const renderEditor = () => {
+      const renderEditor = (focus = true) => {
         dom.className = "footnotes footnotes-editing";
         dom.innerHTML = "";
         const label = document.createElement("div");
@@ -1271,20 +2121,139 @@ const FootnotesNode = Node.create({
         textarea.addEventListener("input", () => {
           markdown = textarea.value;
           textarea.rows = Math.max(2, markdown.split(/\r?\n/).length);
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionstart", () => {
+          composing = true;
+          markPendingLocalInput(editor);
+        });
+        textarea.addEventListener("compositionend", () => {
+          composing = false;
+          markPendingLocalInput(editor);
         });
         textarea.addEventListener("keydown", (event) => {
           if (event.key === "Escape" || (event.key === "Enter" && (event.ctrlKey || event.metaKey))) {
+            if (composing) return;
             event.preventDefault();
             commitEditor(textarea);
           }
         });
-        textarea.addEventListener("blur", () => commitEditor(textarea));
+        textarea.addEventListener("blur", () => {
+          if (composing) return;
+          commitEditor(textarea);
+        });
         dom.append(label, textarea);
-        requestAnimationFrame(() => {
+        if (focus) requestAnimationFrame(() => {
           textarea.focus();
           textarea.setSelectionRange(textarea.value.length, textarea.value.length);
         });
       };
+      const captureRecovery = () => {
+        const binding = readRecoveryNodeBinding(editor, getPos as RecoveryNodeViewPosition, acceptedNode, "footnotes", lastKnownPosition);
+        if (binding.position !== null) lastKnownPosition = binding.position;
+        const control = dom.querySelector<HTMLTextAreaElement>(".footnotes-editor");
+        const payload = {
+          accepted: {
+            markdown: String(acceptedNode.attrs.markdown || ""),
+            html: String(acceptedNode.attrs.html || ""),
+            editing: Boolean(acceptedNode.attrs.editing),
+          },
+          draft: { markdown: control?.value ?? markdown, editing, normalized: !editing },
+          fallbackHtml,
+          normalized: !editing,
+          committing,
+          frame: frame ? "scheduled" as const : "idle" as const,
+          valueRevision: wysiwygRevision,
+        };
+        if (binding.failure) {
+          return {
+            ok: false as const,
+            ...binding.failure,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (editing && !control) {
+          return {
+            ok: false as const,
+            code: "dom-value-unavailable",
+            message: "Footnote editor value is unavailable while the NodeView is editing.",
+            status: "orphaned" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        if (control && control.value !== markdown) {
+          return {
+            ok: false as const,
+            code: "dom-closure-mismatch",
+            message: "Footnote DOM value and closure value disagree.",
+            status: "conflicted" as const,
+            payload,
+            positionHint: binding.position,
+          };
+        }
+        return {
+          ok: true as const,
+          buffer: {
+            id: recoveryId,
+            kind: "footnote" as const,
+            status: editing ? "editing" as const : "accepted" as const,
+            sourceRevision: wysiwygRevision,
+            positionHint: binding.position,
+            payload,
+            ...(control ? { ui: readRecoveryTextUi(control, composing) } : {}),
+          },
+        };
+      };
+      const restoreRecovery = (buffer: RecoveryLocalBufferV3) => {
+        const payload = buffer.payload as {
+          accepted?: { markdown?: string; html?: string; editing?: boolean };
+          draft?: string | { markdown?: string; editing?: boolean };
+          fallbackHtml?: string;
+          committing?: boolean;
+        };
+        const draft = payload.draft;
+        markdown = typeof draft === "string" ? draft : String(draft?.markdown ?? payload.accepted?.markdown ?? "");
+        fallbackHtml = String(payload.fallbackHtml ?? payload.accepted?.html ?? "");
+        pendingConflict = false;
+        committing = Boolean(payload.committing);
+        editing = buffer.status === "editing" || Boolean(typeof draft === "object" && draft?.editing);
+        editing ? renderEditor(false) : renderDisplay();
+        if (editing) restoreRecoveryTextUi(recoverableTextControl(dom, ".footnotes-editor"), buffer.ui);
+      };
+      const hasPending = () => {
+        const control = dom.querySelector<HTMLTextAreaElement>(".footnotes-editor");
+        const acceptedMarkdown = normalizeFootnoteSource(String(acceptedNode.attrs.markdown || ""));
+        const localMarkdown = normalizeFootnoteSource(control?.value ?? markdown);
+        return pendingConflict
+          || composing
+          || (editing && !control)
+          || localMarkdown !== acceptedMarkdown;
+      };
+      const flushPending = (request: PendingMathFlushRequest) => {
+        if (pendingConflict) throw new Error("脚注节点与未提交输入发生冲突，已保留当前窗口。");
+        if (composing) throw new Error("脚注输入法组合尚未结束，已保留当前窗口。");
+        if (!hasPending()) return;
+        if (committing) throw new Error("脚注编辑器仍在提交，已保留当前窗口。");
+        const control = dom.querySelector<HTMLTextAreaElement>(".footnotes-editor");
+        if (editing && !control) throw new Error("脚注编辑框已不可用，已保留当前输入。");
+        if (control) markdown = control.value;
+        if (!updateAttrs({ markdown: normalizeFootnoteSource(markdown), editing }, request)) throw new Error("脚注节点位置已失效，已保留当前输入。");
+      };
+      const unregisterRecovery = registerRecoveryLocalBufferForOwner(editor, {
+        id: recoveryId,
+        kind: "footnote",
+        sourceRevision: wysiwygRevision,
+        positionHint: lastKnownPosition,
+        capture: captureRecovery,
+        restore: restoreRecovery,
+      });
+      const unregisterPending = registerPendingLocalEditor(editor, {
+        id: recoveryId,
+        hasPending,
+        flush: flushPending,
+      }).unregister;
       const render = () => editing ? renderEditor() : renderDisplay();
       const scheduleRender = () => {
         if (editing) return;
@@ -1312,14 +2281,35 @@ const FootnotesNode = Node.create({
         if (editing) return;
         event.preventDefault();
         editing = true;
-        updateAttrs({ editing: true });
+        updateAttrs({ editing: true }, undefined, true);
         renderEditor();
       });
       editor.on?.("update", scheduleRender);
       return {
         dom,
         update(nextNode: any) {
-          markdown = nextNode.attrs.markdown || "";
+          const previousMarkdown = normalizeFootnoteSource(String(acceptedNode.attrs.markdown || ""));
+          const incomingMarkdown = normalizeFootnoteSource(String(nextNode.attrs.markdown || ""));
+          const localMarkdown = normalizeFootnoteSource(markdown);
+          const localChanged = localMarkdown !== previousMarkdown;
+          const incomingChanged = incomingMarkdown !== previousMarkdown;
+          if (editing && nextNode.attrs.editing && incomingMarkdown === localMarkdown) {
+            acceptedNode = nextNode;
+            pendingConflict = false;
+            return true;
+          }
+          if (editing && localChanged && !incomingChanged) {
+            acceptedNode = nextNode;
+            fallbackHtml = nextNode.attrs.html || fallbackHtml;
+            return true;
+          }
+          if (editing && localChanged && incomingChanged && incomingMarkdown !== localMarkdown) {
+            pendingConflict = true;
+            return true;
+          }
+          pendingConflict = false;
+          acceptedNode = nextNode;
+          markdown = incomingMarkdown;
           fallbackHtml = nextNode.attrs.html || "";
           editing = Boolean(nextNode.attrs.editing);
           dom.dataset.markdown = markdown;
@@ -1329,7 +2319,7 @@ const FootnotesNode = Node.create({
         selectNode() {
           if (editing) return;
           editing = true;
-          updateAttrs({ editing: true });
+          updateAttrs({ editing: true }, undefined, true);
           renderEditor();
         },
         deselectNode() {
@@ -1338,6 +2328,10 @@ const FootnotesNode = Node.create({
         destroy() {
           if (frame) cancelAnimationFrame(frame);
           editor.off?.("update", scheduleRender);
+          const pending = hasPending();
+          unregisterPending();
+          if (pending) retainAndUnregisterRecoveryLocalBufferForOwner(editor, recoveryId);
+          else unregisterRecovery();
         },
         ignoreMutation: () => true,
         stopEvent: (event: Event) => event.target instanceof HTMLTextAreaElement,
@@ -1548,63 +2542,6 @@ const TyporaHorizontalRule = Node.create({
   },
 });
 
-const turndown = new TurndownService({
-  headingStyle: "atx",
-  codeBlockStyle: "fenced",
-  bulletListMarker: "-",
-});
-
-turndown.escape = (text) => text;
-
-turndown.addRule("plainPaste", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.plainPaste === "true",
-  replacement: (_content, node) => plainTextToLiteralMarkdown(node.textContent || "").replace(/\t/g, "@@LIGHTMARK_PLAIN_TAB@@"),
-});
-
-turndown.addRule("horizontalRule", {
-  filter: "hr",
-  replacement: () => "\n\n---\n\n",
-});
-
-turndown.addRule("highlight", {
-  filter: "mark",
-  replacement: (content) => `==${content}==`,
-});
-
-turndown.addRule("strike", {
-  filter: ["s", "del"],
-  replacement: (content) => `~~${content}~~`,
-});
-
-turndown.addRule("superscript", {
-  filter: (node) => node.nodeName === "SUP" && !(node instanceof HTMLElement && node.hasAttribute("data-footnote-ref")),
-  replacement: (content) => `^${content}^`,
-});
-
-turndown.addRule("footnoteRef", {
-  filter: (node) =>
-    node instanceof HTMLElement &&
-    ((node.dataset.type === "footnote-ref" && node.hasAttribute("data-footnote-ref")) || node.hasAttribute("data-footnote-ref")),
-  replacement: (_content, node) => {
-    const id = node instanceof HTMLElement ? node.dataset.footnoteRef || "" : "";
-    return id ? `[^${id}]` : "";
-  },
-});
-
-turndown.addRule("footnotes", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "footnotes",
-  replacement: (_content, node) => {
-    const markdown = node instanceof HTMLElement ? node.dataset.markdown || "" : "";
-    const source = normalizeFootnoteSource(markdown);
-    return source ? `\n\n${source}\n\n` : "";
-  },
-});
-
-turndown.addRule("subscript", {
-  filter: "sub",
-  replacement: (content) => `~${content}~`,
-});
-
 const WritingFocusDecorations = Extension.create({
   name: "writingFocusDecorations",
 
@@ -1726,27 +2663,6 @@ const LightMarkInlineCode = Mark.create({
   },
 });
 
-turndown.addRule("wikiLink", {
-  filter: (node) => {
-    if (!(node instanceof HTMLElement) || node.nodeName !== "A") return false;
-    return Boolean(parseWikiLinkHref(node.getAttribute("href") || ""));
-  },
-  replacement: (_content, node) => {
-    if (!(node instanceof HTMLElement)) return "";
-    const target = parseWikiLinkHref(node.getAttribute("href") || "");
-    return target ? wikiLinkMarkdown(target) : "";
-  },
-});
-
-turndown.addRule("taskState", {
-  filter: (node) => node instanceof HTMLElement && node.hasAttribute("data-task-item"),
-  replacement: (content, node) => {
-    const checked = node instanceof HTMLElement && node.dataset.taskItem === "checked";
-    const text = content.replace(/^[☐☑]\s*/, "").trim();
-    return `${checked ? "[x]" : "[ ]"}${text ? ` ${text}` : ""}`;
-  },
-});
-
 const LightMarkTableCell = TableCell.extend({
   addAttributes() {
     return {
@@ -1770,210 +2686,6 @@ const LightMarkTableHeader = TableHeader.extend({
         renderHTML: renderTableCellAlign,
       },
     };
-  },
-});
-
-turndown.addRule("frontMatter", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "front-matter",
-  replacement: (_content, node) => {
-    const yaml = node instanceof HTMLElement ? node.dataset.yaml || node.textContent || "" : "";
-    return `---\n${yaml.trim()}\n---\n\n`;
-  },
-});
-
-turndown.addRule("tableOfContents", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "table-of-contents",
-  replacement: () => "\n\n[TOC]\n\n",
-});
-
-turndown.addRule("githubAlert", {
-  filter: (node) => node instanceof HTMLElement && node.nodeName === "BLOCKQUOTE" && Boolean(node.dataset.alert),
-  replacement: (_content, node) => {
-    if (!(node instanceof HTMLElement)) return "";
-    const kind = (node.dataset.alert || "note").toLowerCase();
-    const alert = kind.toUpperCase();
-    const clone = node.cloneNode(true) as HTMLElement;
-    removeGithubAlertTitle(clone, kind);
-    const body = serializeGithubAlertBody(clone);
-    const quoted = body
-      ? body
-          .split("\n")
-          .map((line) => (line ? `> ${line}` : ">"))
-          .join("\n")
-      : "";
-    return `\n\n> [!${alert}]${quoted ? `\n${quoted}` : ""}\n\n`;
-  },
-});
-
-function removeGithubAlertTitle(clone: HTMLElement, kind: string) {
-  const title = clone.querySelector(".markdown-alert-title");
-  if (title) {
-    title.remove();
-    return;
-  }
-
-  const expected = (githubAlertLabels[kind] || kind).toLowerCase();
-  const firstElement = Array.from(clone.children).find((child): child is HTMLElement => child instanceof HTMLElement);
-  if (!firstElement) return;
-
-  const tag = firstElement.tagName.toLowerCase();
-  const text = (firstElement.textContent || "").trim().toLowerCase();
-  if (clone.children.length > 1 && (tag === "p" || /^h[1-6]$/.test(tag)) && text === expected) firstElement.remove();
-}
-
-function serializeGithubAlertBody(node: HTMLElement) {
-  const parts = Array.from(node.childNodes)
-    .map((child) => {
-      if (child instanceof HTMLElement) return turndown.turndown(child.outerHTML).trim();
-      return (child.textContent || "").trim();
-    })
-    .filter(Boolean);
-  return parts.join("\n\n").trim();
-}
-
-turndown.addRule("htmlBlock", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "html-block",
-  replacement: (_content, node) => {
-    const html = node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
-    return `\n\n${sanitizeHtmlFragment(html).trim()}\n\n`;
-  },
-});
-
-turndown.addRule("inlineHtml", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-html",
-  replacement: (_content, node) => {
-    const html = node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
-    return sanitizeInlineHtmlSource(html);
-  },
-});
-
-turndown.addRule("rawHtml", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "raw-html",
-  replacement: (_content, node) => {
-    return node instanceof HTMLElement ? decodeHtmlEntities(node.getAttribute("data-html") || node.textContent || "") : "";
-  },
-});
-
-turndown.addRule("fencedCodeBlock", {
-  filter: (node) => node.nodeName === "PRE" && node.firstChild?.nodeName === "CODE",
-  replacement: (_content, node) => {
-    const code = node.firstChild?.textContent || "";
-    const className = node.firstChild instanceof HTMLElement ? node.firstChild.className : "";
-    const sourceLanguage = className.match(/language-([^\s]+)/)?.[1] || "";
-    const language = displayCodeLanguage(sourceLanguage);
-    return `\n\n\`\`\`${language}\n${code.replace(/\n$/, "")}\n\`\`\`\n\n`;
-  },
-});
-
-turndown.addRule("inlineMath", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "inline-math",
-  replacement: (content, node) => {
-    const tex = node instanceof HTMLElement ? node.dataset.tex || node.textContent || content || "" : content;
-    if (!(node instanceof HTMLElement)) return `$${tex}$`;
-    const delimiter = (node.dataset.mathDelimiter || "inline-dollar") as MathDelimiter;
-    const raw = node.dataset.mathRaw || "";
-    const originalTex = node.dataset.originalTex ?? tex;
-    const token = mathTokenFromParts({
-      tex: originalTex,
-      delimiter,
-      raw,
-      displayMode: node.dataset.displayMode === "true",
-    });
-    return serializeMathToken(token, tex, Boolean(raw) && tex === originalTex);
-  },
-});
-
-turndown.addRule("mermaid", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "mermaid",
-  replacement: (content, node) => {
-    const code = node instanceof HTMLElement ? node.dataset.code || node.textContent || content || "" : content;
-    return `\n\n\`\`\`mermaid\n${code}\n\`\`\`\n\n`;
-  },
-});
-
-turndown.addRule("table", {
-  filter: "table",
-  replacement: (_content, node) => {
-    if (!(node instanceof HTMLTableElement)) return "";
-    const rows = Array.from(node.rows).map((row) =>
-      Array.from(row.cells).map(serializeTableCell),
-    );
-    if (rows.length === 0) return "";
-
-    const columnCount = Math.max(...rows.map((row) => row.length));
-    const normalized = rows.map((row) => [...row, ...Array(Math.max(0, columnCount - row.length)).fill("")]);
-    const header = normalized[0];
-    const divider = tableColumnAlignments(node, columnCount).map(markdownTableDividerForAlign);
-    const body = normalized.slice(1);
-    const lines = [header, divider, ...body].map((row) => `| ${row.join(" | ")} |`);
-    return `\n\n${lines.join("\n")}\n\n`;
-  },
-});
-
-turndown.addRule("blockMath", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "block-math",
-  replacement: (content, node) => {
-    const tex = node instanceof HTMLElement ? node.dataset.tex || node.textContent || content || "" : content;
-    if (!(node instanceof HTMLElement)) return `\n\n$$\n${tex}\n$$\n\n`;
-    const delimiter = (node.dataset.mathDelimiter || "display-dollar") as MathDelimiter;
-    const raw = node.dataset.mathRaw || "";
-    const originalTex = node.dataset.originalTex ?? tex;
-    const token = mathTokenFromParts({ tex: originalTex, delimiter, raw, displayMode: true });
-    return `\n\n${serializeMathToken(token, tex, Boolean(raw) && tex === originalTex)}\n\n`;
-  },
-});
-
-turndown.addRule("inlineCodeExact", {
-  filter: (node) => node instanceof HTMLElement && node.nodeName === "CODE" && node.parentElement?.nodeName !== "PRE",
-  replacement: (content, node) => {
-    if (!(node instanceof HTMLElement)) return `\`${content}\``;
-    const raw = node.dataset.codeRaw || "";
-    const originalText = node.dataset.codeOriginal ?? content;
-    if (raw && content === originalText) return raw;
-    const longestRun = Math.max(0, ...(content.match(/`+/g) || []).map((run) => run.length));
-    const preferred = Number.parseInt(node.dataset.codeDelimiterLength || "1", 10) || 1;
-    const delimiter = "`".repeat(Math.max(preferred, longestRun + 1));
-    const padded = /^`|`$|^ .* $/.test(content) ? ` ${content} ` : content;
-    return `${delimiter}${padded}${delimiter}`;
-  },
-});
-
-turndown.addRule("escapedDollar", {
-  filter: (node) => node instanceof HTMLElement && node.dataset.type === "escaped-dollar",
-  replacement: (_content, node) => {
-    return node instanceof HTMLElement ? node.dataset.raw || "\\$" : "\\$";
-  },
-});
-
-turndown.addRule("image", {
-  filter: "img",
-  replacement: (_content, node) => {
-    if (!(node instanceof HTMLElement)) return "";
-    const src = markdownImageSourceFromElement(node).trim();
-    if (!src) return "";
-    if (node.hasAttribute("data-lightmark-width") || node.getAttribute("data-lightmark-align") !== "left" || node.hasAttribute("data-lightmark-caption")) {
-      return imageMarkdownOrFigure({
-        src,
-        alt: node.getAttribute("alt") || "",
-        title: node.getAttribute("title"),
-        widthPx: clampImageWidth(node.getAttribute("data-lightmark-width")),
-        alignment: (node.getAttribute("data-lightmark-align") || "left") as ImageAlignment,
-        caption: node.getAttribute("data-lightmark-caption") || "",
-      });
-    }
-    const alt = (node.getAttribute("alt") || "").replace(/]/g, "\\]");
-    const title = node.getAttribute("title");
-    const markdown = title ? `![${alt}](${src} "${title.replace(/"/g, '\\"')}")` : `![${alt}](${src})`;
-    return markdown;
-  },
-});
-
-turndown.addRule("lightmarkImageFigure", {
-  filter: (node) => node instanceof HTMLElement && node.tagName === "FIGURE" && node.hasAttribute("data-lightmark-image"),
-  replacement: (_content, node) => {
-    if (!(node instanceof HTMLElement)) return "";
-    const parsed = parseEnhancedFigureElement(node);
-    return parsed ? `\n\n${imageMarkdownOrFigure(parsed)}\n\n` : "";
   },
 });
 
@@ -2053,7 +2765,7 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
     if (typeof getPos !== "function") return;
     const pos = getPos();
     if (typeof pos !== "number") return;
-    const transaction = editor.view.state.tr.setNodeMarkup(pos, undefined, { ...currentNode.attrs, ...attrs });
+    const transaction = markAssetAttributeTransaction(editor.view.state.tr.setNodeMarkup(pos, undefined, { ...currentNode.attrs, ...attrs }), pos);
     if (!addToHistory) transaction.setMeta("addToHistory", false);
     editor.view.dispatch(transaction);
   };
@@ -2114,7 +2826,7 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
     };
     errorMessage = "";
     sourceVisible = false;
-    editor.view.dispatch(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs));
+    editor.view.dispatch(markAssetAttributeTransaction(editor.view.state.tr.setNodeMarkup(pos, undefined, nextAttrs), pos));
     render();
     return true;
   };
@@ -2501,6 +3213,7 @@ const editor = useEditor({
   enableInputRules: ["blockquote", "bulletList", "orderedList"],
   extensions: [
     StarterKit.configure({
+      undoRedo: false,
       heading: false,
       blockquote: false,
       codeBlock: false,
@@ -2783,56 +3496,98 @@ const editor = useEditor({
       return true;
     },
   },
-  onTransaction({ editor, transaction, appendedTransactions }) {
-    recordTrackedTransactions(editor, transaction, appendedTransactions);
+  onTransaction({ editor: updatedEditor, transaction, appendedTransactions }) {
+    if (!isCurrentWysiwygEditor(updatedEditor)) return;
+    recordTrackedTransactions(updatedEditor, transaction, appendedTransactions);
+    trackSourceProvenance(transaction, canonicalMarkdownHistoryState(updatedEditor.state, exposedMarkdownLifecycleKey.getState(updatedEditor.state)));
+    if (editorOwnerTab && pendingCommandLease) {
+      const maps = pendingPmCommandMaps([transaction, ...(appendedTransactions ?? [])]);
+      mapPendingDocumentCommands(editorOwnerTab.id, pendingCommandLease, maps, anchor => validateAssetReferenceBookmark(updatedEditor.state.doc, anchor));
+    }
   },
-  onUpdate({ editor, transaction }) {
+  onUpdate({ editor: updatedEditor, transaction }) {
+    if (!isCurrentWysiwygEditor(updatedEditor)) return;
     if (transaction.getMeta(markdownPresentationMeta)) return;
-    reconcileExposedHeading(editor.view);
+    if (transaction.getMeta(LOCAL_EDITOR_UI_TRANSACTION_META_KEY)) return;
+    reconcileExposedHeading(updatedEditor.view);
     if (suppressWysiwygUpdate || transaction.getMeta("lightmarkLowlightRefresh")) return;
-    getPaneTab(props.paneId)?.wysiwygFormatHistory.redo.splice(0);
-    wysiwygRevision += 1;
+    if (historySourceBaseline && editorOwnerTab) {
+      const history = documentHistoryForTab(editorOwnerTab.id);
+      const canonical = canonicalMarkdownHistoryState(updatedEditor.state, exposedMarkdownLifecycleKey.getState(updatedEditor.state));
+      trackSourceProvenance(transaction, canonical);
+      const previousProjection = history.current && history.projection(history.current, 'wysiwyg');
+      const previousRoot = previousProjection?.root;
+      if (previousRoot?.mode === 'wysiwyg' && equalCanonicalDocument(previousRoot.doc, canonical.doc)) {
+        const bookmark = previousRoot.doc.type.schema === canonical.doc.type.schema ? canonical.bookmark : previousProjection!.bookmark;
+        history.project({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline }, bookmark);
+        historyBookmark = bookmark;
+        return;
+      }
+      if (history.current && !history.isReplaying) {
+        const inputType = transaction.getMeta('uiEvent');
+        const composition = transaction.getMeta('composition');
+        const textOnly = transaction.steps.length === 1 && transaction.steps[0].toJSON().stepType === 'replace';
+        const step = textOnly ? transaction.steps[0].toJSON() : null;
+        const inserted = step?.slice?.content?.every((node: any) => node.type === 'text') && step.slice.content.map((node: any) => node.text).join('');
+        const kind = composition != null ? 'composition' : inputType === 'paste' || inputType === 'drop' || !textOnly ? 'command'
+          : inserted && step.from === step.to ? 'typing'
+          : !step.slice && step.to > step.from ? step.from < historyBookmark.head ? 'delete-backward' : 'delete-forward' : 'command';
+        history.record({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline }, {
+          kind, before: historyBookmark, after: canonical.bookmark, time: Date.now(), composition,
+        });
+      }
+      historyBookmark = canonical.bookmark;
+    }
+    wysiwygRevision = advanceDocumentRevision(editorOwnerTab!.id, wysiwygRevision);
     documentMutationTracker?.setRevision(wysiwygRevision);
     snapshotCache?.invalidate();
     const tab = getPaneTab(props.paneId);
-    const derived = getWysiwygDerivedState(editor.state);
+    const derived = getWysiwygDerivedState(updatedEditor.state);
     if (tab) markDocumentChanged(tab.id, wysiwygRevision, {
       words: derived.words,
       chars: derived.chars,
       lines: derived.lines,
-      outline: derived.outlineChanged ? wysiwygStructuredOutline(editor.state) : undefined,
+      outline: derived.outlineChanged ? wysiwygStructuredOutline(updatedEditor.state) : undefined,
     });
-    syncWysiwygFindState(editor.state);
+    publishToolbarFormatState(updatedEditor);
+    syncWysiwygFindState(updatedEditor.state);
     if (transactionChangesMathDependencies(transaction)) {
       window.dispatchEvent(new CustomEvent("lightmark:refresh-math"));
     }
-    updateCodeLanguageControl(editor.view);
-    void ensureSelectedCodeLanguage(editor.view);
-    updateTableControl(editor.view);
-    captureWysiwygPosition(editor.view);
-    captureWysiwygSelectionAnchor(editor.view);
-    updateWysiwygWikiCompletion(editor.view);
-    updateSlashMenu(editor.view);
-    scheduleWysiwygTypewriter(editor.view);
+    updateCodeLanguageControl(updatedEditor.view);
+    void ensureSelectedCodeLanguage(updatedEditor.view);
+    updateTableControl(updatedEditor.view);
+    captureWysiwygPosition(updatedEditor.view);
+    captureWysiwygSelectionAnchor(updatedEditor.view);
+    updateWysiwygWikiCompletion(updatedEditor.view);
+    updateSlashMenu(updatedEditor.view);
+    scheduleWysiwygTypewriter(updatedEditor.view);
   },
-  onSelectionUpdate({ editor }) {
-    if (restoreExposedMarkdownWhenOutside(editor.view)) return;
-    updateCodeLanguageControl(editor.view);
-    updateTableControl(editor.view);
-    captureWysiwygPosition(editor.view);
-    captureWysiwygSelectionAnchor(editor.view);
-    updateWysiwygWikiCompletion(editor.view);
-    updateSlashMenu(editor.view);
-    scheduleWysiwygTypewriter(editor.view);
+  onSelectionUpdate({ editor: updatedEditor, transaction }) {
+    if (!isCurrentWysiwygEditor(updatedEditor)) return;
+    publishToolbarFormatState(updatedEditor);
+    if (!transaction.docChanged && !transaction.getMeta(markdownPresentationMeta) && editorOwnerTab) documentHistoryForTab(editorOwnerTab.id).closeGroup();
+    if (!transaction.docChanged) historyBookmark = canonicalMarkdownHistoryState(updatedEditor.state, exposedMarkdownLifecycleKey.getState(updatedEditor.state)).bookmark;
+    if (restoreExposedMarkdownWhenOutside(updatedEditor.view)) return;
+    updateCodeLanguageControl(updatedEditor.view);
+    updateTableControl(updatedEditor.view);
+    captureWysiwygPosition(updatedEditor.view);
+    captureWysiwygSelectionAnchor(updatedEditor.view);
+    updateWysiwygWikiCompletion(updatedEditor.view);
+    updateSlashMenu(updatedEditor.view);
+    scheduleWysiwygTypewriter(updatedEditor.view);
   },
-  onFocus({ editor }) {
-    updateCodeLanguageControl(editor.view);
-    updateTableControl(editor.view);
-    scheduleWysiwygTypewriter(editor.view);
+  onFocus({ editor: updatedEditor }) {
+    if (!isCurrentWysiwygEditor(updatedEditor)) return;
+    updateCodeLanguageControl(updatedEditor.view);
+    updateTableControl(updatedEditor.view);
+    scheduleWysiwygTypewriter(updatedEditor.view);
   },
-  onBlur({ editor }) {
-    restoreExposedMarkdownWhenOutside(editor.view, true);
+  onBlur({ editor: updatedEditor }) {
+    if (!isCurrentWysiwygEditor(updatedEditor)) return;
+    restoreExposedMarkdownWhenOutside(updatedEditor.view, true);
     window.setTimeout(() => {
+      if (!isCurrentWysiwygEditor(updatedEditor)) return;
       closeWysiwygWikiCompletion();
       if (!document.activeElement?.closest?.(".slash-command-menu")) closeSlashMenu();
       if (codeLanguageControl.value.open) return;
@@ -2841,6 +3596,19 @@ const editor = useEditor({
     }, 120);
   },
 });
+
+function ownerTabStillExists() {
+  return Boolean(editorOwnerTab && appStore.tabs.some((tab) => toRaw(tab) === editorOwnerTab));
+}
+
+function isCurrentOwnerTab() {
+  const currentTab = getPaneTab(props.paneId);
+  return Boolean(editorOwnerTab && currentTab && toRaw(currentTab) === editorOwnerTab);
+}
+
+function isCurrentWysiwygEditor(candidate: any) {
+  return Boolean(candidate && candidate === editor.value && isCurrentOwnerTab());
+}
 
 function scheduleSlashMenuUpdate(view: EditorView) {
   window.setTimeout(() => updateSlashMenu(view), 0);
@@ -3419,27 +4187,17 @@ function captureWysiwygSelectionAnchor(view = editor.value?.view) {
   if (!view || paneEditorMode.value !== "wysiwyg" || paneDocumentMode.value !== "normal") return;
   const derived = getWysiwygDerivedState(view.state);
   const selectionHead = view.state.selection.head;
-  let low = 0;
-  let high = derived.headings.length - 1;
-  let activeIndex = -1;
-  while (low <= high) {
-    const middle = (low + high) >>> 1;
-    if (derived.headings[middle].pos <= selectionHead) {
-      activeIndex = middle;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  if (activeIndex < 0) {
-    updatePaneOutlineAnchor(props.paneId, 0, "selection");
+  const active = derived.headingBefore(selectionHead);
+  if (!active) {
+    updatePaneOutlineAnchor(props.paneId, 0, 'selection');
     return;
   }
+  const activeIndex = active.index;
   const tab = getPaneTab(props.paneId);
   const projected = tab ? appStore.runtimeDerivedByTab[tab.id]?.outline : undefined;
   updatePaneOutlineAnchor(
     props.paneId,
-    projected?.[activeIndex]?.line ?? derived.headings[activeIndex].blockIndex,
+    projected?.[activeIndex]?.line ?? active.heading.blockIndex,
     "selection",
   );
 }
@@ -3646,7 +4404,9 @@ function applyTableAlignment(align: "left" | "center" | "right") {
   let tr = activeEditor.state.tr;
   tableCellPositions(info.pos, info.node).forEach(({ pos, columnIndex, node }) => {
     if (!allColumns && columnIndex !== targetColumn) return;
-    tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, textAlign: align }, node.marks);
+    // Tiptap's table extension also owns `align`. Keep its semantic value
+    // consistent with our UI attribute so parsing the saved divider is exact.
+    tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, align, textAlign: align }, node.marks);
   });
   if (tr.docChanged) activeEditor.view.dispatch(tr.scrollIntoView());
   window.setTimeout(() => updateTableControl(), 0);
@@ -3679,25 +4439,25 @@ function isWholeTableSelected(info: { pos: number; node: any }) {
   return !selection.empty && selection.from <= info.pos && selection.to >= info.pos + info.node.nodeSize;
 }
 
-async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number, source: "clipboard" | "drop" = "drop") {
-  const markdown = await saveImagesAsMarkdown(files, { source });
-  if (!markdown) return;
-  insertImageMarkdownIntoWysiwyg(markdown, from, to);
+async function insertImagesAtBookmark(from: number, to: number, produce: (target: ImageAssetTarget) => Promise<string>) {
+  const ownerEditor = editor.value;
+  const owner = editorOwnerTab;
+  if (!ownerEditor || !owner) return;
+  const command = beginPendingImageCommand(owner.id, from, to);
+  const target: ImageAssetTarget = { markdownPath: owner.path, documentMode: 'normal', settings: Object.freeze({ ...appStore.settings.image }) };
+  try {
+    const markdown = await produce(target);
+    if (!markdown) return;
+    await completePendingImageCommand(command, markdown, target);
+  } catch (error) { appStore.statusMessage = String(error); }
+  finally { releasePendingCommand(command); }
 }
 
+async function insertImageFilesIntoWysiwyg(files: File[], from: number, to: number, source: 'clipboard' | 'drop' = 'drop') {
+  await insertImagesAtBookmark(from, to, target => saveImagesAsMarkdown(files, { source, target }));
+}
 async function insertImagePathsIntoWysiwyg(paths: string[], from: number, to: number) {
-  const markdown = await imagePathsAsMarkdown(paths);
-  if (!markdown) return;
-  insertImageMarkdownIntoWysiwyg(markdown, from, to);
-}
-
-function insertImageMarkdownIntoWysiwyg(markdown: string, from: number, to: number) {
-  const activeEditor = editor.value as any;
-  if (!activeEditor) return;
-  const images = parseMarkdownImageSnippets(markdown);
-  if (images.length === 0) return;
-  const content = images.map((image) => ({ type: "image", attrs: { ...image, editing: true } }));
-  activeEditor.commands.insertContentAt({ from, to }, content);
+  await insertImagesAtBookmark(from, to, target => imagePathsAsMarkdown(paths, target));
 }
 
 function parseMarkdownImageSnippets(markdown: string) {
@@ -3727,6 +4487,7 @@ function parseSingleMarkdownImage(markdown: string) {
 watch(
   () => paneTab.value?.id || "",
   () => {
+    if (!isCurrentOwnerTab()) return;
     closeWysiwygWikiCompletion();
     editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
     registerWysiwygDocumentSession();
@@ -3738,6 +4499,7 @@ watch(
 watch(
   () => paneEditorMode.value,
   () => {
+    if (!isCurrentOwnerTab()) return;
     closeWysiwygWikiCompletion();
     if (paneEditorMode.value === "wysiwyg") {
       editor.value?.commands.setContent(renderMarkdownForEditorWithAssets(paneContent.value), { emitUpdate: false });
@@ -3758,6 +4520,8 @@ watch(
 );
 
 onMounted(() => {
+  document.addEventListener("compositionstart", trackCompositionStart, true);
+  document.addEventListener("compositionend", trackCompositionEnd, true);
   schedulePendingWysiwygCursorRestore();
   schedulePendingWysiwygPositionRestore();
   document.addEventListener("pointerdown", handleDocumentTablePointerDown, true);
@@ -3777,6 +4541,7 @@ onMounted(() => {
   window.addEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.addEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.addEventListener("resize", handleEditorShellScroll);
+  window.addEventListener("keydown", handlePendingControlHistory, true);
   window.addEventListener("keydown", handleWysiwygPlainPasteCapture, true);
   syncWysiwygWritingModes();
   void ensureInitialCodeLanguages();
@@ -3784,8 +4549,18 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  primeExactWysiwygMarkdown = null;
+  if (sourceProvenanceTimer != null) window.clearTimeout(sourceProvenanceTimer);
+  sourceProvenanceTimer = null;
+  sourceProvenancePending.clear();
+  sourceProvenanceDoc = null;
+  document.removeEventListener("compositionstart", trackCompositionStart, true);
+  document.removeEventListener("compositionend", trackCompositionEnd, true);
+  composingControls.clear();
+  unsubscribePendingEditorInput();
   documentMutationTracker = null;
   observedPendingMathInputVersion = 0;
+  observedPendingLocalInputVersion = 0;
   unregisterDocumentSession();
   snapshotCache = null;
   document.removeEventListener("pointerdown", handleDocumentTablePointerDown, true);
@@ -3805,6 +4580,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("lightmark:writing-modes-changed", handleWysiwygWritingModesChanged);
   window.removeEventListener("lightmark:heading-folds-changed", handleWysiwygHeadingFoldsChanged as EventListener);
   window.removeEventListener("resize", handleEditorShellScroll);
+  window.removeEventListener("keydown", handlePendingControlHistory, true);
   window.removeEventListener("keydown", handleWysiwygPlainPasteCapture, true);
   window.cancelAnimationFrame(wysiwygTypewriterFrame);
   if (pendingWysiwygRestoreTimer !== null) window.clearTimeout(pendingWysiwygRestoreTimer);
@@ -3812,44 +4588,61 @@ onBeforeUnmount(() => {
 });
 
 function registerWysiwygDocumentSession() {
-  unregisterDocumentSession();
   const activeEditor = editor.value;
   const tab = getPaneTab(props.paneId);
-  if (!activeEditor || !tab) return;
-  const tabId = tab.id;
+  if (!activeEditor || !tab || !isCurrentOwnerTab()) return;
+  unregisterDocumentSession();
+  const ownerTab = toRaw(tab);
+  const tabId = ownerTab.id;
+  unsubscribePendingEditorInput();
+  unsubscribePendingEditorInput = subscribePendingEditorInput(activeEditor, () => {
+    if (editor.value === activeEditor && ownerTabStillExists()) {
+      documentMutationTracker?.recordPendingInput();
+      markDocumentChanged(ownerTab.id, wysiwygRevision);
+    }
+  });
+  const documentHistory = documentHistoryForTab(tabId);
+  const initialHistoryState = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+  historySourceBaseline = captureWysiwygSourceBaseline(ownerTab.content, initialHistoryState.doc);
+  historyBookmark = initialHistoryState.bookmark;
+  documentHistory.mount({ mode: 'wysiwyg', doc: initialHistoryState.doc, baseline: historySourceBaseline }, historyBookmark, ownerTab.content, !ownerTab.isDirty);
   const capturePreservationBaseline = (markdown: string) => {
     const nodes: object[] = [];
     activeEditor.state.doc.forEach((node: object) => nodes.push(node));
     const source = markdownTopLevelSourceBlocks(markdown);
-    const alignment = sourceBlocksForNodeCount(source.blocks, nodes.length);
+    const alignment = sourceBlocksForNodes(source.blocks, nodes as Array<{ type: { name: string }; content: { size: number } }>, source.prefix);
+    if (alignment) {
+      nodes.forEach((node, index) => checkpointSourceTransactionNode(node as ReturnType<typeof canonicalMarkdownHistoryState>['doc'], alignment.blocks[index].source));
+      sourceProvenanceDoc = activeEditor.state.doc;
+    }
     return alignment
       ? {
         nodes,
         blocks: alignment.blocks,
+        preservedMarkdownByNode: new WeakMap<object, string>(nodes.flatMap((node, index): Array<[object, string]> => alignment.blocks[index].generated ? [] : [[node, alignment.blocks[index].source.replace(/^[\r\n]+|[\r\n]+$/g, '')]])),
         syntheticTailOmitted: alignment.syntheticTailOmitted,
-        prefix: source.prefix,
+        prefix: alignment.prefix,
         lineEnding: inspectSourceEnvelope(markdown).lineEnding,
       }
       : null;
   };
-  let preservationBaseline = capturePreservationBaseline(getPaneContent(props.paneId));
+  let preservationBaseline = capturePreservationBaseline(ownerTab.content);
+  let recoverySourceBaseline: RecoverySourceBaseline | null = null;
+  let recoveryPendingMathRetention: RecoveryPendingMath = { version: 0, entries: [] };
   snapshotCache = new WysiwygSnapshotCache({
-    tabId: () => getPaneTab(props.paneId)?.id ?? tabId,
+    tabId: () => ownerTab.id,
     revision: () => wysiwygRevision,
-    dirty: () => getPaneTab(props.paneId)?.isDirty ?? false,
-    previousMarkdown: () => getPaneContent(props.paneId),
+    dirty: () => ownerTab.isDirty,
+    preservedBlockMarkdown: (block) => preservationBaseline?.preservedMarkdownByNode.get(block),
+    previousMarkdown: () => ownerTab.content,
     blocks: () => {
-      const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
       const blocks: object[] = [];
-      currentEditor.state.doc.forEach((node: object) => blocks.push(node));
+      activeEditor.state.doc.forEach((node: object) => blocks.push(node));
       return blocks;
     },
     serializeBlock: (block) => {
-      const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
       const container = document.createElement("div");
-      container.appendChild(DOMSerializer.fromSchema(currentEditor.state.schema).serializeNode(block as any));
+      container.appendChild(DOMSerializer.fromSchema(activeEditor.state.schema).serializeNode(block as any));
       return container.innerHTML;
     },
     convertBlock: (html) => editorHtmlToMarkdown(html).replace(/^\n+|\n+$/g, ""),
@@ -3862,6 +4655,7 @@ function registerWysiwygDocumentSession() {
         preservationBaseline.prefix,
         preservationBaseline.lineEnding,
         preservationBaseline.syntheticTailOmitted,
+        preserveFineSourceBlock,
       );
       if (previousMarkdown.length > 0) {
         throw new Error("无法建立 Markdown 源码映射，已阻止静默覆盖。请切换到源码模式恢复或另存为副本。");
@@ -3881,40 +4675,120 @@ function registerWysiwygDocumentSession() {
       );
     },
     oracle: (previousMarkdown) => {
-      const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
-      return preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(currentEditor.getHTML()), previousMarkdown);
+      return preserveMarkdownTerminalNewlines(editorHtmlToMarkdown(activeEditor.getHTML()), previousMarkdown);
     },
     verifyIncremental: () => window.localStorage.getItem("lightmark:verify-wysiwyg-snapshot") === "1",
     trustIncremental: () => Boolean(preservationBaseline),
   });
-  const sessionAdapter: DocumentSessionAdapter = {
+  const commitExactSourceCheckpoint = (markdown: string) => {
+    if (editor.value !== activeEditor || !ownerTabStillExists()) throw new Error('精确源码提交的原文档已关闭。');
+    preservationBaseline = capturePreservationBaseline(markdown);
+    const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+    historySourceBaseline = captureWysiwygSourceBaseline(markdown, canonical.doc);
+    documentHistory.checkpoint(markdown);
+    documentHistory.project({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline }, canonical.bookmark);
+    snapshotCache!.prime(markdown, wysiwygRevision, ownerTab.id);
+  };
+  primeExactWysiwygMarkdown = commitExactSourceCheckpoint;
+  const sessionAdapter: WysiwygDocumentSessionAdapter = {
     tabId,
     paneId: props.paneId,
     mode: "wysiwyg",
+    editorIdentity: activeEditor,
+    captureHistoryRoot() {
+      const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+      return { mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline! };
+    },
+    captureHistoryBookmark() { return canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state)).bookmark; },
+    async restoreSourceBookmark(markdown, rawBookmark) {
+      const restoreEpoch = ++wysiwygSelectionRestoreEpoch;
+      const before = activeEditor.state, revision = wysiwygRevision;
+      const original = canonicalMarkdownHistoryState(before, exposedMarkdownLifecycleKey.getState(before));
+      const bookmark = await historyPmBookmark(original.doc, markdown, rawBookmark);
+      if (restoreEpoch !== wysiwygSelectionRestoreEpoch || editor.value !== activeEditor || !isCurrentOwnerTab() || wysiwygRevision !== revision) return;
+      const current = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+      // Mount-time syntax revelation changes the live model without changing
+      // content or the user's canonical selection. Restore through its inverse
+      // mapping, rather than abandoning the requested caret at the default H1.
+      if (!current.doc.eq(original.doc) || current.bookmark.anchor !== original.bookmark.anchor || current.bookmark.head !== original.bookmark.head) return;
+      const intoLive = current.mapping.invert();
+      const anchor = intoLive.map(bookmark.anchor, 1), head = intoLive.map(bookmark.head, 1);
+      const transaction = activeEditor.state.tr.setSelection(TextSelection.between(activeEditor.state.doc.resolve(anchor), activeEditor.state.doc.resolve(head)))
+        .setMeta(markdownPresentationMeta, true).setMeta('addToHistory', false);
+      activeEditor.view.dispatch(transaction);
+      const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+      historyBookmark = canonical.bookmark;
+      documentHistory.project({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline! }, canonical.bookmark);
+      const pending = getPanePendingModeCursor(props.paneId);
+      if (pending?.targetMode === 'wysiwyg') setPanePendingModeCursor(props.paneId, null);
+      activeEditor.view.focus();
+    },
+    async prepareHistoryReplay(projection, exactSource, dirty) {
+      const markdown = await materializeHistoryRoot(projection.root, exactSource);
+      let nextDoc;
+      let bookmark;
+      if (projection.root.mode === 'wysiwyg') {
+        nextDoc = historyPmDocumentForSchema(projection.root.doc, activeEditor.state.schema);
+        bookmark = projection.bookmark;
+      } else {
+        const container = document.createElement('div');
+        container.innerHTML = renderMarkdownForEditorWithAssets(markdown);
+        nextDoc = ProseMirrorDOMParser.fromSchema(activeEditor.state.schema).parse(container);
+        bookmark = await historyPmBookmark(nextDoc, markdown, await historySourceBookmark(projection, markdown));
+      }
+      let transaction = activeEditor.state.tr.replaceWith(0, activeEditor.state.doc.content.size, nextDoc.content)
+        .setMeta(clearExposeMarkdownMeta, true).setMeta('addToHistory', false);
+      transaction = transaction.setSelection(TextSelection.between(transaction.doc.resolve(Math.min(transaction.doc.content.size, bookmark.anchor)), transaction.doc.resolve(Math.min(transaction.doc.content.size, bookmark.head)))).scrollIntoView();
+      return () => {
+        suppressWysiwygUpdate = true;
+        try { activeEditor.view.dispatch(transaction); }
+        finally { suppressWysiwygUpdate = false; }
+        historySourceBaseline = captureWysiwygSourceBaseline(markdown, activeEditor.state.doc);
+        preservationBaseline = capturePreservationBaseline(markdown);
+        historyBookmark = { anchor: activeEditor.state.selection.anchor, head: activeEditor.state.selection.head };
+        wysiwygRevision = advanceDocumentRevision(ownerTab.id, wysiwygRevision);
+        documentMutationTracker?.setRevision(wysiwygRevision);
+        snapshotCache?.invalidate();
+        setPaneContent(props.paneId, markdown, dirty, false);
+        publishDocumentDerivedState(ownerTab.id, { revision: wysiwygRevision, ...getWysiwygDerivedState(activeEditor.state) });
+        activeEditor.view.focus();
+      };
+    },
     get revision() {
       return wysiwygRevision;
     },
+    isComposing() { return activeEditor.view.composing || composingControls.size > 0; },
     hasPendingEdits() {
       const currentEditor = editor.value;
-      return currentEditor ? hasPendingMathEdits(currentEditor) : false;
+      return currentEditor === activeEditor && ownerTabStillExists()
+        ? (syncTrackedPendingMathInput(currentEditor), syncTrackedPendingLocalInput(currentEditor), hasPendingMathEdits(currentEditor) || hasPendingLocalEdits(currentEditor) || hasPendingEditorBuffers(currentEditor))
+        : false;
     },
     pendingEditVersion() {
       const currentEditor = editor.value;
-      return currentEditor ? getPendingMathEditVersion(currentEditor) : 0;
+      return currentEditor === activeEditor && ownerTabStillExists()
+        ? getCombinedPendingEditVersion(currentEditor) + pendingEditorInputVersion(currentEditor)
+        : 0;
     },
     mutationToken() {
       const currentEditor = editor.value;
-      if (currentEditor) syncTrackedPendingMathInput(currentEditor);
+      if (currentEditor !== activeEditor || !ownerTabStillExists()) {
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
+      syncTrackedPendingMathInput(currentEditor);
+      syncTrackedPendingLocalInput(currentEditor);
       if (!documentMutationTracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
       return documentMutationTracker.token();
     },
     async flushPendingEdits(_reason: SnapshotReason, options?: PendingFlushOptions) {
       const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      if (!currentEditor || currentEditor !== activeEditor || !ownerTabStillExists()) {
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
       const tracker = documentMutationTracker;
       if (!tracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
       syncTrackedPendingMathInput(currentEditor);
+      syncTrackedPendingLocalInput(currentEditor);
       const expectedToken = options?.expectedToken ?? tracker.token();
       if (!documentMutationTokensEqual(tracker.token(), expectedToken)) {
         throw new Error("公式或文档版本在 flush 开始前已变化。");
@@ -3926,19 +4800,29 @@ function registerWysiwygDocumentSession() {
         flush.fail();
         throw error;
       }
-      if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+      if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
         flush.fail();
         throw new Error("所见即所得编辑器会话已被替换。");
       }
       syncTrackedPendingMathInput(currentEditor);
+      syncTrackedPendingLocalInput(currentEditor);
       try {
         const request: PendingMathFlushRequest = { flushId: flush.id };
         await flushPendingMathEdits(currentEditor, request);
-        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
           flush.fail();
           throw new Error("所见即所得编辑器会话已被替换。");
         }
         syncTrackedPendingMathInput(currentEditor);
+        syncTrackedPendingLocalInput(currentEditor);
+        await flushPendingLocalEditors(currentEditor, request);
+        await flushPendingEditorBuffers(currentEditor, request);
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
+          flush.fail();
+          throw new Error("所见即所得编辑器会话已被替换。");
+        }
+        syncTrackedPendingMathInput(currentEditor);
+        syncTrackedPendingLocalInput(currentEditor);
         return flush.complete(tracker.token());
       } catch (error) {
         flush.fail();
@@ -3947,13 +4831,16 @@ function registerWysiwygDocumentSession() {
     },
     async finalizeClosePrompt(options?: PendingFlushOptions) {
       const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      if (!currentEditor || currentEditor !== activeEditor || !ownerTabStillExists()) {
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
       const tracker = documentMutationTracker;
       if (!tracker) throw new Error("所见即所得文档变更跟踪器已经关闭。");
       if (currentEditor.view.composing) {
         throw new Error("输入法组合尚未结束，已保留当前窗口。");
       }
       syncTrackedPendingMathInput(currentEditor);
+      syncTrackedPendingLocalInput(currentEditor);
       const expectedToken = options?.expectedToken ?? tracker.token();
       if (!documentMutationTokensEqual(tracker.token(), expectedToken)) {
         throw new Error("公式或文档版本在关闭提示准备开始前已变化。");
@@ -3962,20 +4849,29 @@ function registerWysiwygDocumentSession() {
       try {
         const request: PendingMathFlushRequest = { flushId: flush.id };
         await finalizeMarkdownExposure(currentEditor.view, flush.id);
-        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
           flush.fail();
           throw new Error("所见即所得编辑器会话已被替换。");
         }
         syncTrackedPendingMathInput(currentEditor);
         await finalizePendingMathForClosePrompt(currentEditor, request);
-        if (editor.value !== currentEditor || documentMutationTracker !== tracker) {
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
           flush.fail();
           throw new Error("所见即所得编辑器会话已被替换。");
         }
         syncTrackedPendingMathInput(currentEditor);
-        if (hasPendingMathEdits(currentEditor)) {
+        syncTrackedPendingLocalInput(currentEditor);
+        await flushPendingLocalEditors(currentEditor, request);
+        await flushPendingEditorBuffers(currentEditor, request);
+        if (editor.value !== currentEditor || documentMutationTracker !== tracker || !ownerTabStillExists()) {
           flush.fail();
-          throw new Error("公式编辑界面尚未安全收束，已保留当前窗口。");
+          throw new Error("所见即所得编辑器会话已被替换。");
+        }
+        syncTrackedPendingMathInput(currentEditor);
+        syncTrackedPendingLocalInput(currentEditor);
+        if (hasPendingMathEdits(currentEditor) || hasPendingLocalEdits(currentEditor) || hasPendingEditorBuffers(currentEditor)) {
+          flush.fail();
+          throw new Error("局部编辑界面尚未安全收束，已保留当前窗口。");
         }
         return flush.complete(tracker.token());
       } catch (error) {
@@ -3983,13 +4879,226 @@ function registerWysiwygDocumentSession() {
         throw error;
       }
     },
+    async captureRecoveryBundle() {
+      const currentEditor = editor.value;
+      if (!currentEditor || currentEditor !== activeEditor || !isCurrentOwnerTab()) {
+        throw new Error("所见即所得编辑器会话已被替换，无法捕获恢复文件。");
+      }
+      const beforeState = currentEditor.view.state;
+      const beforeDoc = beforeState.doc;
+      const sourceText = ownerTab.content;
+      const sourceBytes = new TextEncoder().encode(sourceText);
+      const tokenBefore = documentMutationTracker?.token() ?? null;
+      const localSnapshot = captureRecoveryLocalBuffersForOwner(currentEditor);
+      if (!localSnapshot.complete) {
+        const details = localSnapshot.failures.map((failure) => `${failure.kind}/${failure.id}: ${failure.message}`).join("; ");
+        recoveryRestoreNotice.value = `恢复捕获不完整，已保留当前编辑会话。${details ? ` ${details}` : ""}`;
+        throw new Error(recoveryRestoreNotice.value);
+      }
+      const countMismatches = recoveryCountsMismatch(beforeDoc, localSnapshot.buffers);
+      if (countMismatches.length) {
+        recoveryRestoreNotice.value = `恢复捕获不完整，特殊节点尚未全部绑定：${countMismatches.join("；")}`;
+        throw new Error(recoveryRestoreNotice.value);
+      }
+
+      let pendingMath: RecoveryPendingMath;
+      let capturedPendingMath: RecoveryPendingMath;
+      try {
+        capturedPendingMath = capturePendingMathRecovery(currentEditor);
+        pendingMath = mergeRecoveryPendingMath(capturedPendingMath, recoveryPendingMathRetention);
+      } catch (error) {
+        recoveryRestoreNotice.value = "恢复捕获不完整，公式本地状态无法验证或存在冲突；已保留当前编辑会话。";
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      const localComposing = localSnapshot.buffers.some((buffer) => {
+        const payload = buffer.payload as { ui?: { composing?: boolean } } | null;
+        return Boolean(buffer.ui?.composing || payload?.ui?.composing);
+      });
+      const exposedMarkdown = recoveryExposedMarkdownState(beforeState, wysiwygRevision);
+      const scroll = normalizeScrollSnapshot(
+        editorShell.value?.scrollTop ?? 0,
+        editorShell.value?.scrollHeight ?? 0,
+        editorShell.value?.clientHeight ?? 0,
+      );
+      const formatHistory = ownerTab.wysiwygFormatHistory ?? { undo: [], redo: [] };
+      const localState: RecoveryLocalStateV3 = {
+        schema: "lightmark.local-state",
+        revision: wysiwygRevision,
+        buffers: localSnapshot.buffers,
+        exposedMarkdown,
+        composition: {
+          active: Boolean(currentEditor.view.composing || localComposing),
+          source: currentEditor.view.composing ? "pm" : "node-view",
+          revision: wysiwygRevision,
+        },
+        history: {
+          sourceCheckpointId: `recovery-${wysiwygRevision}`,
+          format: {
+            undo: formatHistory.undo.map((entry) => ({ ...entry })),
+            redo: formatHistory.redo.map((entry) => ({ ...entry })),
+          },
+          pm: {
+            status: "unavailable",
+            reason: "ProseMirror history adapter is unavailable in this recovery slice.",
+          },
+          source: {
+            status: "unavailable",
+            reason: "CodeMirror history adapter is unavailable in this recovery slice.",
+          },
+        },
+      };
+      const capture: RecoveryCaptureV3 = {
+        sourceBytes,
+        doc: beforeDoc,
+        selection: beforeState.selection,
+        scroll,
+        pendingMath,
+        origin: {
+          path: ownerTab.path || null,
+          kind: ownerTab.kind,
+        },
+        localState,
+      };
+      const isStable = () => {
+        if (editor.value !== currentEditor || !isCurrentOwnerTab() || !ownerTabStillExists()) return false;
+        if (currentEditor.view.state !== beforeState || currentEditor.view.state.doc !== beforeDoc) return false;
+        if (ownerTab.content !== sourceText) return false;
+        if (!documentMutationTracker || !tokenBefore) return true;
+        return documentMutationTokensEqual(documentMutationTracker.token(), tokenBefore);
+      };
+      if (!isStable()) {
+        recoveryRestoreNotice.value = "恢复捕获期间编辑会话发生变化，已保留当前编辑会话。";
+        throw new Error(recoveryRestoreNotice.value);
+      }
+      let serialized: string;
+      try {
+        serialized = encodeRecoveryBundleV3(capture);
+      } catch (error) {
+        recoveryRestoreNotice.value = "恢复捕获不完整，恢复材料未生成；已保留当前编辑会话。";
+        throw error;
+      }
+      if (!isStable()) {
+        recoveryRestoreNotice.value = "恢复捕获期间编辑会话发生变化，已丢弃不一致恢复材料。";
+        throw new Error(recoveryRestoreNotice.value);
+      }
+      recoveryPendingMathRetention = subtractCapturedPendingMath(recoveryPendingMathRetention, capturedPendingMath);
+      recoveryRestoreNotice.value = "";
+      return serialized;
+    },
+    async restoreRecoveryBundle(serialized: string) {
+      const currentEditor = editor.value;
+      const currentTab = getPaneTab(props.paneId);
+      if (!currentEditor || currentEditor !== activeEditor || !currentTab || toRaw(currentTab) !== ownerTab || !isCurrentOwnerTab()) {
+        throw new Error("所见即所得编辑器会话已被替换，无法恢复。");
+      }
+      if (currentTab.kind !== "untitled" || currentTab.path) {
+        throw new Error("恢复文件只能导入新的未命名会话。");
+      }
+      const initialDoc = currentEditor.state.doc;
+      const initialParagraph = initialDoc.childCount === 1
+        && initialDoc.firstChild?.type.name === "paragraph"
+        && initialDoc.firstChild.content.size === 0;
+      if (currentTab.isDirty || currentTab.content.length > 0 || !initialParagraph) {
+        throw new Error("恢复文件只能导入内容为空且未发生编辑的新未命名会话，当前会话已有内容或编辑历史。");
+      }
+      // Decode and validate the complete bundle before changing the PM model,
+      // source projection, format history, or mounted local editors.
+      const decoded = decodeRecoveryBundleV3(serialized, currentEditor.state.schema);
+      if (editor.value !== currentEditor || !isCurrentOwnerTab()) {
+        throw new Error("所见即所得编辑器会话已被替换，无法恢复。");
+      }
+
+      const selectionJson = decoded.selection.toJSON();
+      const recoveredSourceText = decoded.sourceText;
+      const recoveredSourceBytes = new Uint8Array(decoded.sourceBytes);
+      const recoveredRevision = Math.max(wysiwygRevision + 1, decoded.localState.revision);
+
+      currentEditor.commands.setContent(decoded.doc.toJSON(), { emitUpdate: false });
+      if (editor.value !== currentEditor) {
+        throw new Error("恢复过程中所见即所得编辑器会话已被替换。");
+      }
+      let recoveredSelection: Selection;
+      try {
+        recoveredSelection = Selection.fromJSON(currentEditor.state.doc, selectionJson);
+      } catch (error) {
+        throw new Error(`恢复选择区无法绑定到恢复文档：${error instanceof Error ? error.message : String(error)}`);
+      }
+      let transaction = currentEditor.view.state.tr
+        .setSelection(recoveredSelection)
+        .setMeta("addToHistory", false);
+      const exposed = decoded.localState.exposedMarkdown;
+      transaction = exposed?.active
+        ? transaction.setMeta(exposeMarkdownMeta, exposed.range)
+        : transaction.setMeta(clearExposeMarkdownMeta, true);
+      currentEditor.view.dispatch(transaction);
+
+      // Keep the recovered source bytes as a separate baseline.  The PM model
+      // may include edits that have no proven source mapping; snapshot() will
+      // reject a source overwrite until a later piece/provenance layer proves
+      // that relation.
+      preservationBaseline = null;
+      recoverySourceBaseline = {
+        sourceText: recoveredSourceText,
+        sourceBytes: recoveredSourceBytes,
+        revision: recoveredRevision,
+        mappingProven: false,
+        reason: "Recovered source bytes and PM document have no proven mapping in this slice.",
+      };
+      recoveryPendingMathRetention = {
+        version: decoded.pendingMath.version,
+        entries: decoded.pendingMath.entries.map((entry) => ({
+          ...entry,
+          binding: { ...entry.binding },
+          accepted: { ...entry.accepted },
+          local: { ...entry.local },
+        })),
+      };
+      wysiwygRevision = recoveredRevision;
+      documentMutationTracker?.setRevision(wysiwygRevision);
+      snapshotCache?.invalidate();
+      currentTab.wysiwygFormatHistory = {
+        undo: decoded.localState.history.format.undo.map((entry) => ({ ...entry })),
+        redo: decoded.localState.history.format.redo.map((entry) => ({ ...entry })),
+      };
+      setPaneContent(props.paneId, recoveredSourceText, true, false);
+      restoreRecoveryLocalBuffersForOwner(currentEditor, decoded.localState.buffers);
+      recoveryRestoreIssues.value = [...recoveryLocalBufferRestoreIssuesForOwner(currentEditor).issues];
+      recoveryRestoreNotice.value = [
+        decoded.localState.history.pm.reason,
+        decoded.localState.history.source.reason,
+        recoverySourceBaseline.reason,
+      ].join(" ");
+      if (editorShell.value) {
+        const maxScrollTop = Math.max(0, editorShell.value.scrollHeight - editorShell.value.clientHeight);
+        editorShell.value.scrollTop = Math.max(0, Math.min(decoded.scroll.scrollTop, maxScrollTop));
+      }
+      outlineDecorationEpoch += 1;
+      void ensureInitialCodeLanguages(currentEditor.view);
+    },
     async snapshot(reason, options) {
       if (!snapshotCache) throw new Error("所见即所得快照会话已经关闭。");
+      if (editor.value !== activeEditor || !ownerTabStillExists()) {
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
+      if (recoverySourceBaseline) {
+        const currentModelText = editorHtmlToMarkdown(activeEditor.getHTML());
+        assertRecoverySourceMappingProven({
+          sourceText: recoverySourceBaseline.sourceText,
+          modelText: currentModelText,
+          mappingProven: recoverySourceBaseline.mappingProven,
+        });
+      }
+      await prepareFineSourcePreservation();
       const snapshot = await snapshotCache.snapshot(reason, options);
-      if (editor.value?.view && wysiwygRevision === snapshot.revision) {
+      if (activeEditor.view && wysiwygRevision === snapshot.revision) {
         preservationBaseline = capturePreservationBaseline(snapshot.markdown);
-        captureExactWysiwygPosition(editor.value.view, snapshot.markdown);
-        const derived = getWysiwygDerivedState(editor.value.view.state);
+        const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+        historySourceBaseline = captureWysiwygSourceBaseline(snapshot.markdown, canonical.doc);
+        documentHistory.checkpoint(snapshot.markdown);
+        documentHistory.project({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline }, canonical.bookmark);
+        await captureExactWysiwygPosition(activeEditor.view, snapshot.markdown, canonical, historySourceBaseline);
+        if (editor.value !== activeEditor || !ownerTabStillExists() || wysiwygRevision !== snapshot.revision) return snapshot;
+        const derived = getWysiwygDerivedState(activeEditor.view.state);
         publishDocumentDerivedState(tabId, {
           revision: wysiwygRevision,
           words: derived.words,
@@ -4006,8 +5115,8 @@ function registerWysiwygDocumentSession() {
       return snapshot;
     },
     derivedState() {
-      const currentEditor = editor.value;
-      if (!currentEditor) return { revision: wysiwygRevision };
+      const currentEditor = activeEditor;
+      if (!ownerTabStillExists()) return { revision: wysiwygRevision };
       const derived = getWysiwygDerivedState(currentEditor.state);
       return {
         revision: wysiwygRevision,
@@ -4019,12 +5128,78 @@ function registerWysiwygDocumentSession() {
         snapshotDiagnostics: snapshotCache?.diagnostics(),
       };
     },
+    initialCommandMarkdown: ownerTab.content,
+    captureAssetCommandAnchor(patch, markdown) { return captureAssetReferenceBookmark(activeEditor.state, markdown, patch); },
+    validateCommandAnchor(anchor) { return validateAssetReferenceBookmark(activeEditor.state.doc, anchor); },
+    async commandAnchorToSource(anchor, kind, markdown) {
+      if (kind === 'asset') return projectAssetReferenceBookmark(activeEditor.state, markdown, anchor);
+      const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+      const from = canonical.mapping.map(anchor.from, 1);
+      const to = anchor.from === anchor.to ? from : canonical.mapping.map(anchor.to, -1);
+      const bookmark = await historySourceBookmark({ root: { mode: 'wysiwyg', doc: canonical.doc, baseline: captureWysiwygSourceBaseline(markdown, canonical.doc) }, bookmark: { anchor: from, head: to } }, markdown);
+      return { from: Math.min(bookmark.anchor, bookmark.head), to: Math.max(bookmark.anchor, bookmark.head), expected: markdown.slice(Math.min(bookmark.anchor, bookmark.head), Math.max(bookmark.anchor, bookmark.head)) };
+    },
+    async commandAnchorFromSource(anchor, kind, markdown) {
+      if (kind === 'asset') return captureAssetReferenceBookmark(activeEditor.state, markdown, anchor);
+      const doc = activeEditor.state.doc;
+      const bookmark = await historyPmBookmark(doc, markdown, { anchor: anchor.from, head: anchor.to });
+      return { from: Math.min(bookmark.anchor, bookmark.head), to: Math.max(bookmark.anchor, bookmark.head) };
+    },
+    async applyPendingCommand(anchor, payload, expectedRevision, assertCurrent) {
+      assertCurrent();
+      if (payload.kind === 'image') {
+        const images = parseMarkdownImageSnippets(payload.markdown);
+        if (!images.length) throw new Error('图片引用解析失败，文件已保留在资源目录。');
+        const snapshot = await snapshotCache!.snapshot('externalDiff');
+        const [{ sourceBlockInsertionCandidates }, { sameSourceSemanticNode }] = await Promise.all([
+          import('../../editor/sourceBlockInsertionCandidates'), import('../../editor/fineSourcePreservation'),
+        ]);
+        assertCurrent();
+        const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+        const raw = await historySourceBookmark({ root: { mode: 'wysiwyg', doc: canonical.doc, baseline: captureWysiwygSourceBaseline(snapshot.markdown, canonical.doc) }, bookmark: { anchor: canonical.mapping.map(anchor.from, 1), head: canonical.mapping.map(anchor.to, anchor.from === anchor.to ? 1 : -1) } }, snapshot.markdown);
+        assertCurrent();
+        let staged: Transaction | null = null;
+        new CommandManager({ editor: activeEditor, state: activeEditor.state }).chain().insertContentAt({ from: anchor.from, to: anchor.to }, images.map(image => ({ type: 'image', attrs: { ...image, editing: true } })), { updateSelection: false }).command(({ tr }) => { staged = tr; return true; }).run();
+        if (!staged || !(staged as Transaction).docChanged) throw new Error('图片插入未能建立局部事务，文件已保留。');
+        const transaction = staged as Transaction;
+        const candidate = sourceBlockInsertionCandidates(snapshot.markdown, Math.min(raw.anchor, raw.head), Math.max(raw.anchor, raw.head), payload.markdown).find(candidate => {
+          const container = document.createElement('div'); container.innerHTML = renderMarkdownForEditorWithAssets(candidate.markdown);
+          const parsed = ProseMirrorDOMParser.fromSchema(activeEditor.state.schema).parse(container);
+          return sameSourceSemanticNode(parsed, transaction.doc);
+        });
+        if (!candidate) throw new Error('无法在该位置精确保留源码并插入图片；资源已保存，请在段落边界或源码模式插入。');
+        assertCurrent();
+        activeEditor.view.dispatch(transaction);
+        commitExactSourceCheckpoint(candidate.markdown);
+        return;
+      }
+      const snapshot = await snapshotCache!.snapshot('externalDiff');
+      assertCurrent();
+      if (wysiwygRevision !== expectedRevision) throw new Error('原文档已变化，请重试重链。');
+      const raw = projectAssetReferenceBookmark(activeEditor.state, snapshot.markdown, anchor);
+      const transaction = assetBookmarkTransaction(activeEditor.state, anchor, payload.insert, source => resolveMarkdownImageSource(source, ownerTab.path));
+      activeEditor.view.dispatch(transaction);
+      const markdown = snapshot.markdown.slice(0, raw.from) + payload.insert + snapshot.markdown.slice(raw.to);
+      commitExactSourceCheckpoint(markdown);
+    },
+    async applySourcePatch(patch, expectedRevision) {
+      if (editor.value !== activeEditor || !ownerTabStillExists() || wysiwygRevision !== expectedRevision || hasPendingLocalEdits(activeEditor) || hasPendingMathEdits(activeEditor)) {
+        throw new Error("资源重链目标已变化，已保留当前输入。");
+      }
+      const snapshot = await snapshotCache!.snapshot("externalDiff");
+      if (editor.value !== activeEditor || !ownerTabStillExists() || wysiwygRevision !== expectedRevision) throw new Error("资源重链期间文档已变化。");
+      activeEditor.view.dispatch(assetReferenceTransaction(activeEditor.state, snapshot.markdown, patch, source => resolveMarkdownImageSource(source, ownerTab.path)));
+      const markdown = snapshot.markdown.slice(0, patch.from) + patch.insert + snapshot.markdown.slice(patch.to);
+      commitExactSourceCheckpoint(markdown);
+    },
     async replaceMarkdown(markdown) {
-      const currentEditor = editor.value;
-      if (!currentEditor) throw new Error("所见即所得编辑器已经关闭。");
+      const currentEditor = activeEditor;
+      if (!currentEditor || !ownerTabStillExists()) {
+        throw new Error("所见即所得编辑器会话已被替换。");
+      }
       currentEditor.commands.setContent(renderMarkdownForEditorWithAssets(markdown), { emitUpdate: false });
       preservationBaseline = capturePreservationBaseline(markdown);
-      wysiwygRevision += 1;
+      wysiwygRevision = advanceDocumentRevision(editorOwnerTab!.id, wysiwygRevision);
       documentMutationTracker?.setRevision(wysiwygRevision);
       snapshotCache?.invalidate();
       outlineDecorationEpoch += 1;
@@ -4032,10 +5207,10 @@ function registerWysiwygDocumentSession() {
     },
     navigate(target) {
       const currentEditor = editor.value;
-      if (!currentEditor) return;
+      if (!currentEditor || currentEditor !== activeEditor || !ownerTabStillExists()) return;
       let requested = target.position;
       if (requested == null && target.offset != null) {
-        requested = markdownOffsetToDocPos(currentEditor.state, target.offset, getPaneContent(props.paneId));
+        requested = markdownOffsetToDocPos(currentEditor.state, target.offset, ownerTab.content);
       }
       if (requested == null && target.line != null) {
         const targetLine = target.line;
@@ -4047,11 +5222,14 @@ function registerWysiwygDocumentSession() {
     },
   };
   observedPendingMathInputVersion = 0;
+  observedPendingLocalInputVersion = 0;
   documentMutationTracker = createDocumentMutationTracker({
     sessionIdentity: sessionAdapter,
     initialRevision: wysiwygRevision,
   });
   unregisterDocumentSession = registerDocumentSession(sessionAdapter);
+  pendingCommandLease = documentCommandLease(ownerTab.id);
+  publishToolbarFormatState(activeEditor);
 }
 
 function handleWysiwygHeadingFoldsChanged(event: CustomEvent<{ paneId?: EditorPaneId }>) {
@@ -4112,21 +5290,6 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
     .setSelection(TextSelection.create(transaction.doc, anchor, head))
     .setMeta("addToHistory", false)
     .scrollIntoView();
-  const tab = getPaneTab(props.paneId);
-  if (tab) {
-    tab.wysiwygFormatHistory.undo.push({
-      before: event.detail.source,
-      after: event.detail.result.text,
-      beforeAnchor: anchorOffset,
-      beforeHead: headOffset,
-      afterAnchor: mappedAnchor,
-      afterHead: mappedHead,
-    });
-    if (tab.wysiwygFormatHistory.undo.length > WYSIWYG_FORMAT_HISTORY_LIMIT) {
-      tab.wysiwygFormatHistory.undo.splice(0, tab.wysiwygFormatHistory.undo.length - WYSIWYG_FORMAT_HISTORY_LIMIT);
-    }
-    tab.wysiwygFormatHistory.redo.splice(0);
-  }
   event.detail.handled = true;
   suppressWysiwygUpdate = true;
   activeEditor.view.dispatch(transaction);
@@ -4134,57 +5297,42 @@ function handleApplyMarkdownFormat(event: CustomEvent<{ paneId: EditorPaneId; so
   // The visual document is semantic HTML; retain the formatter's canonical
   // Markdown in the tab instead of immediately re-serializing table padding.
   setPaneContent(props.paneId, event.detail.result.text, true, false);
+  const canonical = canonicalMarkdownHistoryState(activeEditor.state, exposedMarkdownLifecycleKey.getState(activeEditor.state));
+  historySourceBaseline = captureWysiwygSourceBaseline(event.detail.result.text, canonical.doc);
+  if (editorOwnerTab) {
+    const history = documentHistoryForTab(editorOwnerTab.id);
+    history.record({ mode: 'wysiwyg', doc: canonical.doc, baseline: historySourceBaseline }, { kind: 'command', before: historyBookmark, after: canonical.bookmark, time: Date.now() });
+    history.checkpoint(event.detail.result.text);
+  }
+  historyBookmark = canonical.bookmark;
+  wysiwygRevision = advanceDocumentRevision(editorOwnerTab!.id, wysiwygRevision);
+  documentMutationTracker?.setRevision(wysiwygRevision);
+  if (primeExactWysiwygMarkdown) primeExactWysiwygMarkdown(event.detail.result.text);
+  else snapshotCache?.invalidate();
   activeEditor.view.focus();
 }
 
-function handleExactFormatHistoryKeydown(view: EditorView, event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
-  const key = event.key.toLowerCase();
-  const redo = key === "y" || (key === "z" && event.shiftKey);
-  const undo = key === "z" && !event.shiftKey;
-  if (!undo && !redo) return false;
-
-  const tab = getPaneTab(props.paneId);
-  if (!tab) return false;
-  const source = redo ? tab.wysiwygFormatHistory.redo : tab.wysiwygFormatHistory.undo;
-  const target = redo ? tab.wysiwygFormatHistory.undo : tab.wysiwygFormatHistory.redo;
-  const entry = source.at(-1);
-  if (!entry) return false;
-  const expected = redo ? entry.before : entry.after;
-  if (tab.content !== expected) return false;
-
-  event.preventDefault();
-  event.stopPropagation();
-  source.pop();
-  target.push(entry);
-  restoreExactMarkdownSnapshot(view, entry, redo);
-  return true;
+function handlePendingControlHistory(event: KeyboardEvent) {
+  const activeEditor = editor.value;
+  if (!activeEditor || !isCurrentWysiwygEditor(activeEditor) || !(event.target instanceof Element)) return;
+  const control = event.target.closest('input, textarea, [contenteditable]');
+  if (!control || control === activeEditor.view.dom || control.getAttribute('contenteditable') === 'false' || !editorShell.value?.contains(control)) return;
+  if (handleExactFormatHistoryKeydown(activeEditor.view, event)) event.stopImmediatePropagation();
 }
 
-function restoreExactMarkdownSnapshot(
-  view: EditorView,
-  entry: WysiwygFormatHistoryEntry,
-  redo: boolean,
-) {
-  const markdown = redo ? entry.after : entry.before;
-  const anchorOffset = redo ? entry.afterAnchor : entry.beforeAnchor;
-  const headOffset = redo ? entry.afterHead : entry.beforeHead;
-  const container = document.createElement("div");
-  container.innerHTML = renderMarkdownForEditorWithAssets(markdown);
-  const nextDoc = ProseMirrorDOMParser.fromSchema(view.state.schema).parse(container);
-  let transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, nextDoc.content);
-  const nextState = { doc: transaction.doc };
-  const anchor = markdownOffsetToDocPos(nextState, anchorOffset, markdown);
-  const head = markdownOffsetToDocPos(nextState, headOffset, markdown);
-  transaction = transaction
-    .setSelection(TextSelection.create(transaction.doc, anchor, head))
-    .setMeta("addToHistory", false)
-    .scrollIntoView();
-  suppressWysiwygUpdate = true;
-  view.dispatch(transaction);
-  suppressWysiwygUpdate = false;
-  setPaneContent(props.paneId, markdown, true, false);
-  view.focus();
+function handleExactFormatHistoryKeydown(view: EditorView, event: KeyboardEvent) {
+  if (event.isComposing || view.composing || composingControls.size) return false;
+  const undo = matchesShortcut('Mod+Z', event);
+  const redo = matchesShortcut('Mod+Shift+Z', event) || matchesShortcut('Mod+Y', event);
+  if (!undo && !redo) return false;
+  const tab = getPaneTab(props.paneId);
+  if (!tab) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  void moveDocumentHistory(tab.id, redo ? 1 : -1).catch(error => {
+    appStore.statusMessage = error instanceof Error ? error.message : String(error);
+  });
+  return true;
 }
 
 function captureWysiwygPosition(view = editor.value?.view) {
@@ -4207,15 +5355,28 @@ function captureWysiwygPosition(view = editor.value?.view) {
   });
 }
 
-function captureExactWysiwygPosition(view: EditorView, markdown: string) {
+async function captureExactWysiwygPosition(view: EditorView, markdown: string, canonical: ReturnType<typeof canonicalMarkdownHistoryState>, baseline: WysiwygSourceBaseline) {
+  const state = view.state;
+  let bookmark;
+  try {
+    // Map only the selected canonical blocks. Serializing the complete prefix
+    // here made an EOF selection after reset allocate a second 50k-block DOM.
+    bookmark = await historySourceBookmark({ root: { mode: 'wysiwyg', doc: canonical.doc, baseline }, bookmark: canonical.bookmark }, markdown);
+  } catch {
+    // Position persistence is optional. Unsupported source must not prevent a
+    // valid snapshot/save, or replace the last proven source offsets by guesses.
+    if (!view.isDestroyed && view.state === state) captureWysiwygPosition(view);
+    return;
+  }
+  if (view.isDestroyed || view.state !== state) return;
   const shell = editorShell.value;
-  const { anchor, head } = view.state.selection;
+  const { anchor, head } = state.selection;
   updatePanePosition(props.paneId, {
     ...buildEditorPositionSnapshot({
       editorMode: "wysiwyg",
       markdown,
-      markdownAnchor: docPosToMarkdownOffset(view.state, anchor, markdown),
-      markdownHead: docPosToMarkdownOffset(view.state, head, markdown),
+      markdownAnchor: bookmark.anchor,
+      markdownHead: bookmark.head,
       scrollTop: shell?.scrollTop ?? 0,
       scrollHeight: shell?.scrollHeight ?? 0,
       clientHeight: shell?.clientHeight ?? 0,
@@ -4226,6 +5387,7 @@ function captureExactWysiwygPosition(view: EditorView, markdown: string) {
 }
 
 function schedulePendingWysiwygPositionRestore() {
+  if (getPanePendingModeCursor(props.paneId)) return;
   const position = consumePanePendingEditorPosition(props.paneId, "wysiwyg");
   if (!position) return;
   window.setTimeout(() => restoreWysiwygPosition(position), 0);
@@ -4241,9 +5403,10 @@ function restoreWysiwygPosition(position: any) {
   const activeEditor = editor.value;
   const shell = editorShell.value;
   if (!activeEditor || !position || position.editorMode !== "wysiwyg") return;
+  const revision = wysiwygRevision, restoreEpoch = ++wysiwygSelectionRestoreEpoch;
   window.requestAnimationFrame(() => {
-    const view = editor.value?.view;
-    if (!view) return;
+    if (editor.value !== activeEditor || !isCurrentWysiwygEditor(activeEditor) || revision !== wysiwygRevision || restoreEpoch !== wysiwygSelectionRestoreEpoch) return;
+    const view = activeEditor.view;
     const docPos = typeof position.editorAnchor === "number"
       ? clampDocPos(position.editorAnchor, view.state.doc.content.size)
       : markdownOffsetToDocPos(view.state, position.markdownAnchor, paneContent.value);
@@ -4557,6 +5720,13 @@ function replaceAllWysiwygFind() {
   }
   view.dispatch(tr.scrollIntoView());
   appStore.statusMessage = `已替换 ${matches.items.length} 处`;
+}
+
+function publishToolbarFormatState(activeEditor: import('@tiptap/core').Editor | undefined | null = editor.value) {
+  if (!activeEditor || !editorOwnerTab) return;
+  const headingLevel = activeEditor.isActive('heading') ? Number(activeEditor.getAttributes('heading').level || 1) : 0;
+  const flags = Object.fromEntries(['bold', 'italic', 'code', 'link', 'blockquote', 'bulletList', 'orderedList', 'taskList'].map(name => [name, activeEditor.isActive(name)]));
+  window.dispatchEvent(new CustomEvent('lightmark:editor-format-state', { detail: { tabId: editorOwnerTab.id, headingLevel, ...flags } }));
 }
 
 function handleToolbarEditorCommand(event: CustomEvent<ToolbarEditorCommandDetail>) {
@@ -4977,7 +6147,7 @@ function insertGithubAlert(kind: string) {
 function setHeadingLevel(level: number | null) {
   const chain = (editor.value as any)?.chain().focus();
   if (!chain) return;
-  if (level === null) {
+  if (level === null || level === 0) {
     chain.setParagraph().run();
     return;
   }
@@ -5113,7 +6283,7 @@ function tableCellTextStart(doc: any, tablePos: number, rowIndex: number, column
 function copyCurrentTable() {
   const table = getCurrentTableElement();
   if (!table) return;
-  void writeClipboard(turndown.turndown(table.outerHTML).trim(), table.outerHTML);
+  void writeClipboard(editorHtmlToMarkdown(table.outerHTML).trim(), table.outerHTML);
 }
 
 function copyFormattedTableSource() {
@@ -5241,67 +6411,6 @@ function normalizeTableCell(value: string) {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
 
-function serializeTableCell(cell: HTMLTableCellElement) {
-  const markdown = turndown.turndown(cell.innerHTML).replace(/\r?\n+/g, " ").trim();
-  return escapeMarkdownTableCell(markdown);
-}
-
-function normalizeFootnoteSource(value: string) {
-  return value.replace(/\r\n?/g, "\n").trim();
-}
-
-function preserveMarkdownTerminalNewlines(markdown: string, previousMarkdown: string) {
-  const terminalNewlines = previousMarkdown.match(/(?:\r\n|\r|\n)+$/)?.[0] ?? "";
-  return `${markdown.replace(/(?:\r\n|\r|\n)+$/g, "")}${terminalNewlines}`;
-}
-
-function editorHtmlToMarkdown(html: string) {
-  const document = new DOMParser().parseFromString(html, "text/html");
-  const footnoteSources: string[] = [];
-  const frontMatterSources: string[] = [];
-  const htmlBlockSources: string[] = [];
-
-  document.querySelectorAll<HTMLElement>('[data-type="html-block"]').forEach((node) => {
-    const token = `@@LIGHTMARK_TURNDOWN_HTML_BLOCK_${htmlBlockSources.length}@@`;
-    htmlBlockSources.push(decodeHtmlEntities(node.getAttribute("data-html") || ""));
-    node.replaceWith(document.createTextNode(token));
-  });
-
-  document.querySelectorAll<HTMLElement>('section[data-type="front-matter"]').forEach((node) => {
-    const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${frontMatterSources.length}@@`;
-    frontMatterSources.push((node.dataset.yaml || node.textContent || "").replace(/\r\n?/g, "\n"));
-    node.replaceWith(document.createTextNode(token));
-  });
-
-  document.querySelectorAll<HTMLElement>('span[data-type="footnote-ref"], sup[data-footnote-ref]').forEach((node) => {
-    const id = node.dataset.footnoteRef || "";
-    node.replaceWith(document.createTextNode(id ? `[^${id}]` : ""));
-  });
-
-  document.querySelectorAll<HTMLElement>('section[data-type="footnotes"]').forEach((node) => {
-    const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${footnoteSources.length}@@`;
-    footnoteSources.push(normalizeFootnoteSource(node.dataset.markdown || ""));
-    node.replaceWith(document.createTextNode(token));
-  });
-
-  let markdown = turndown.turndown(document.body.innerHTML);
-  markdown = markdown.replace(/@@LIGHTMARK_PLAIN_TAB@@/g, "\t");
-  footnoteSources.forEach((source, index) => {
-    const token = `@@LIGHTMARK_TURNDOWN_FOOTNOTE_${index}@@`;
-    markdown = markdown.split(token).join(source ? `\n\n${source}\n\n` : "");
-  });
-  frontMatterSources.forEach((source, index) => {
-    const token = `@@LIGHTMARK_TURNDOWN_FRONT_MATTER_${index}@@`;
-    markdown = markdown.split(token).join(`---\n${source.replace(/^\n+|\n+$/g, "")}\n---\n\n`);
-  });
-  htmlBlockSources.forEach((source, index) => {
-    const token = `@@LIGHTMARK_TURNDOWN_HTML_BLOCK_${index}@@`;
-    markdown = markdown.split(token).join(source.replace(/^\n+|\n+$/g, ""));
-  });
-  markdown = markdown.replace(/^(\s*(?:[-*+]|\d+[.)]))[ \t]*\u00a0(?=\[[ xX]\])/gm, "$1 ");
-  return normalizeLeadingImageWhitespace(markdown);
-}
-
 function docPosToMarkdownOffset(state: any, pos: number, markdown: string) {
   const docSize = state.doc.content.size;
   const target = clampDocPos(pos, docSize);
@@ -5419,18 +6528,11 @@ function clampDocPos(value: number, docSize: number) {
   return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, docSize));
 }
 
-function normalizeLeadingImageWhitespace(markdown: string) {
-  return markdown
-    .replace(/^\n+(?=!\[[^\]\n]*\]\([^)\n]+\))/g, "")
-    .replace(/\n{3,}(?=!\[[^\]\n]*\]\([^)\n]+\))/g, "\n\n")
-    .replace(/(!\[[^\]\n]*\]\([^)\n]+\))\n{3,}/g, "$1\n\n");
-}
-
 function renderFootnotesView(dom: HTMLElement, markdown: string, fallbackHtml: string) {
   dom.innerHTML = "";
   const source = markdown.trim();
   if (!source) {
-    dom.innerHTML = fallbackHtml;
+    dom.innerHTML = renderInlineMarkdownInHtml(fallbackHtml);
     return;
   }
 
@@ -5708,13 +6810,7 @@ function buildOutlineHeadingDecorationState(state: any) {
 }
 
 function canMapOutlineHeadingDecorations(oldState: any, newState: any) {
-  const previous = getWysiwygDerivedState(oldState).headings;
-  const next = getWysiwygDerivedState(newState).headings;
-  if (previous.length !== next.length) return false;
-  for (let index = 0; index < previous.length; index += 1) {
-    if (previous[index].node !== next[index].node) return false;
-  }
-  return true;
+  return getWysiwygDerivedState(oldState).headingContentRevision === getWysiwygDerivedState(newState).headingContentRevision;
 }
 
 function wysiwygStructuredOutline(state: any) {
@@ -6095,104 +7191,6 @@ function createSourceMarker(text: string) {
   return marker;
 }
 
-function convertInlineMarkdownSyntax(
-  state: any,
-  options: { onlySelectionBlock?: boolean; targetBlockFrom?: number } = {},
-) {
-  const { onlySelectionBlock = false, targetBlockFrom } = options;
-  const linkMark = state.schema.marks.link;
-  const converters = [
-    {
-      mark: state.schema.marks.bold,
-      pattern: /(?<!\*)\*\*([^*\n]+)\*\*/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: state.schema.marks.italic,
-      pattern: /(?<!\*)\*([^*\n]+)\*(?!\*)/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: state.schema.marks.strike,
-      pattern: /(?<!~)~~([^~\n]+)~~/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: state.schema.marks.highlight,
-      pattern: /(?<!=)==([^=\n]+)==/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: state.schema.marks.superscript,
-      pattern: /(?<!\^)\^([^^\n]+)\^/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: state.schema.marks.subscript,
-      pattern: /(?<!~)~([^~\n]+)~(?!~)/g,
-      labelIndex: 1,
-      attrs: () => ({}),
-    },
-    {
-      mark: linkMark,
-      pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)/g,
-      labelIndex: 1,
-      attrs: (match: RegExpExecArray) => ({ href: match[2] }),
-    },
-  ];
-
-  let tr = state.tr;
-  let converted = false;
-  const selectionHasParentBlock = state.selection.$from.depth > 0;
-  if (onlySelectionBlock && !selectionHasParentBlock) return null;
-  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
-  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
-
-  state.doc.descendants((node: any, pos: number) => {
-    if (converted) return false;
-    if (!node.isTextblock || node.type.name === "codeBlock") return true;
-    if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
-    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
-
-    const text = node.textContent;
-    for (const converter of converters) {
-      if (!converter.mark) continue;
-      converter.pattern.lastIndex = 0;
-      const protectedRanges = plainPasteRanges(node);
-      let match: RegExpExecArray | null = null;
-      let candidate = converter.pattern.exec(text);
-      while (candidate) {
-        const candidateTo = candidate.index + candidate[0].length;
-        if (!protectedRanges.some((range) => range.from < candidateTo && range.to > candidate!.index)) {
-          match = candidate;
-          break;
-        }
-        candidate = converter.pattern.exec(text);
-      }
-      if (!match) continue;
-
-      const full = match[0];
-      const label = match[converter.labelIndex];
-      const from = pos + 1 + match.index;
-      const to = pos + 1 + match.index + full.length;
-
-      tr = tr.insertText(label, from, to);
-      tr = tr.addMark(from, from + label.length, converter.mark.create(converter.attrs(match)));
-      tr = finishInlineMarkdownConversion(tr, state, from, to, from + label.length, converter.mark);
-      converted = true;
-      return false;
-    }
-    return true;
-  });
-
-  return converted ? tr : null;
-}
-
 function convertPendingInlineMarkdown(view: any) {
   let converted = false;
   for (let index = 0; index < 12; index += 1) {
@@ -6202,77 +7200,6 @@ function convertPendingInlineMarkdown(view: any) {
     converted = true;
   }
   return converted;
-}
-
-function convertInlineCodeSyntax(
-  state: any,
-  options: { onlySelectionBlock?: boolean; targetBlockFrom?: number } = {},
-) {
-  const { onlySelectionBlock = false, targetBlockFrom } = options;
-  const codeMark = state.schema.marks.code;
-  if (!codeMark) return null;
-
-  let tr = state.tr;
-  let converted = false;
-  const inlineCodePattern = /`([^`\n]+)`/g;
-  const selectionHasParentBlock = state.selection.$from.depth > 0;
-  if (onlySelectionBlock && !selectionHasParentBlock) return null;
-  const selectionBlockFrom = onlySelectionBlock ? state.selection.$from.before() : null;
-  const selectionBlockTo = onlySelectionBlock ? state.selection.$from.after() : null;
-
-  state.doc.descendants((node: any, pos: number) => {
-    if (converted) return false;
-    if (!node.isTextblock) return true;
-    if (node.type.name === "codeBlock") return false;
-    if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
-    if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
-
-    const text = node.textContent;
-    inlineCodePattern.lastIndex = 0;
-    const protectedRanges = plainPasteRanges(node);
-    let match: RegExpExecArray | null = null;
-    let candidate = inlineCodePattern.exec(text);
-    while (candidate) {
-      const candidateTo = candidate.index + candidate[0].length;
-      if (!protectedRanges.some((range) => range.from < candidateTo && range.to > candidate!.index)) {
-        match = candidate;
-        break;
-      }
-      candidate = inlineCodePattern.exec(text);
-    }
-    if (!match) return true;
-
-    const full = match[0];
-    const code = match[1];
-    const from = pos + 1 + match.index;
-    const to = pos + 1 + match.index + full.length;
-    tr = tr.insertText(code, from, to);
-    tr = tr.addMark(from, from + code.length, codeMark.create());
-    tr = finishInlineMarkdownConversion(tr, state, from, to, from + code.length, codeMark);
-    converted = true;
-    return false;
-  });
-
-  return converted ? tr : null;
-}
-
-function plainPasteRanges(node: any) {
-  const ranges: Array<{ from: number; to: number }> = [];
-  node.descendants((child: any, pos: number) => {
-    if (child.isText && child.marks?.some((mark: any) => mark.type.name === "plainPaste")) {
-      ranges.push({ from: pos, to: pos + child.nodeSize });
-    }
-    return true;
-  });
-  return ranges;
-}
-
-function finishInlineMarkdownConversion(tr: any, state: any, from: number, to: number, selectionPos: number, markType: any) {
-  if (!state.selection.empty || state.selection.from < from || state.selection.from > to) return tr;
-
-  tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos));
-  if (markType) tr = tr.removeStoredMark(markType);
-  return tr.setStoredMarks([]);
 }
 
 function markdownShortcutEnabled() {
@@ -6578,13 +7505,13 @@ function convertMarkdownHeading(
     if (targetBlockFrom != null && pos !== targetBlockFrom) return true;
     if (onlySelectionBlock && (pos !== selectionBlockFrom || pos + node.nodeSize !== selectionBlockTo)) return true;
 
-    const match = node.textContent.match(/^(#{1,6})\s+(.+)$/);
+    const prefixText = node.firstChild?.isText ? node.firstChild.text : "";
+    const match = prefixText.match(/^(#{1,6})([ \t]+)/);
     if (!match) return true;
     if (!force && state.selection.from >= pos && state.selection.from <= pos + node.nodeSize) return true;
 
     const level = match[1].length;
-    const text = match[2];
-    const headingNode = heading.create({ level }, state.schema.text(text), node.marks);
+    const headingNode = heading.create({ ...node.attrs, level }, node.content.cut(match[0].length), node.marks);
     tr = tr.replaceWith(pos, pos + node.nodeSize, headingNode);
     if (insertParagraph) {
       const paragraph = state.schema.nodes.paragraph;
@@ -6731,20 +7658,27 @@ function continueTaskItem(view: any) {
   return false;
 }
 
-function replaceTocWithText(editor: any, getPos: (() => number | undefined) | boolean, value: string) {
-  if (typeof getPos !== "function") return;
+function replaceTocWithText(
+  editor: any,
+  getPos: (() => number | undefined) | boolean,
+  value: string,
+  flushRequest?: PendingMathFlushRequest,
+) {
+  if (typeof getPos !== "function") return false;
   const pos = getPos();
-  if (typeof pos !== "number") return;
+  if (typeof pos !== "number") return false;
   const { state } = editor.view;
   const node = state.doc.nodeAt(pos);
   const paragraph = state.schema.nodes.paragraph;
-  if (!node || !paragraph) return;
+  if (!node || !paragraph) return false;
 
   const text = value.trim();
   const replacement = text ? paragraph.create(null, state.schema.text(text)) : paragraph.create();
-  const tr = state.tr.replaceWith(pos, pos + node.nodeSize, replacement);
+  let tr = state.tr.replaceWith(pos, pos + node.nodeSize, replacement);
+  if (flushRequest) tr = tr.setMeta(DOCUMENT_FLUSH_META_KEY, flushRequest.flushId);
   editor.view.dispatch(tr.scrollIntoView());
   editor.view.focus();
+  return true;
 }
 
 function toggleTaskItem(view: any, element: HTMLElement) {
@@ -6861,6 +7795,20 @@ function selectHorizontalRule(editor: any, getPos: (() => number | undefined) | 
     @pointerdown="handleWysiwygScrollPointer"
     @keydown.capture="handleWysiwygScrollKey"
   >
+    <div
+      v-if="recoveryRestoreNotice || recoveryRestoreIssues.length"
+      class="mx-auto mt-3 max-w-[var(--lm-editor-width)] px-8"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
+        <p v-if="recoveryRestoreNotice" class="whitespace-pre-wrap">{{ recoveryRestoreNotice }}</p>
+        <details v-for="issue in recoveryRestoreIssues" :key="`${issue.id}:${issue.code}`" class="mt-1">
+          <summary class="cursor-pointer">恢复保留项：{{ issue.kind }} / {{ issue.status }}（{{ issue.message }}）</summary>
+          <pre class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{{ recoveryIssuePayloadText(issue) }}</pre>
+        </details>
+      </div>
+    </div>
     <EditorContent :editor="editor" />
     <div
       v-if="slashMenu.visible"

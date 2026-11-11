@@ -81,27 +81,30 @@ body {
   --lm-sidebar: #f1f3f5;
   --lm-ink: #1f2937;
   --lm-ink-soft: #475467;
-  --lm-ink-muted: #667085;
+  --lm-ink-muted: #626d82;
   --lm-border: rgba(71, 84, 103, 0.18);
   --lm-border-strong: rgba(71, 84, 103, 0.34);
   --lm-accent: #3f6f9f;
+  --lm-on-accent: #ffffff;
   --lm-accent-soft: rgba(63, 111, 159, 0.12);
   --lm-focus: rgba(63, 111, 159, 0.34);
   --lm-selection: rgba(63, 111, 159, 0.22);
   --lm-disabled: rgba(102, 112, 133, 0.58);
   --lm-error: #b42318;
+  --lm-on-error: #ffffff;
   --lm-error-soft: rgba(180, 35, 24, 0.1);
+  --lm-backdrop: rgb(54 42 29 / 22%);
   --lm-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 5px 16px rgba(15, 23, 42, 0.04);
   --lm-shadow-md: 0 18px 48px rgba(15, 23, 42, 0.14), 0 3px 10px rgba(15, 23, 42, 0.06);
   --lm-radius-sm: 7px;
   --lm-radius-md: 11px;
   --lm-radius-lg: 16px;
   --lm-transition: 170ms cubic-bezier(0.2, 0.75, 0.25, 1);
-  --lm-editor-width: 860px;
+  --lm-editor-width: 720px;
   --lm-ui-font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --lm-editor-font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --lm-editor-font-size: 16px;
-  --lm-editor-line-height: 1.6;
+  --lm-editor-font-size: 17px;
+  --lm-editor-line-height: 1.75;
   --lm-editor-paragraph-spacing: 0.8em;
   --lm-editor-code-font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
@@ -119,12 +122,15 @@ body {
   --lm-border: rgba(208, 213, 221, 0.14);
   --lm-border-strong: rgba(208, 213, 221, 0.28);
   --lm-accent: #78a6d3;
+  --lm-on-accent: #111318;
   --lm-accent-soft: rgba(120, 166, 211, 0.15);
   --lm-focus: rgba(120, 166, 211, 0.38);
   --lm-selection: rgba(120, 166, 211, 0.28);
   --lm-disabled: rgba(152, 162, 179, 0.58);
   --lm-error: #fda29b;
+  --lm-on-error: #111318;
   --lm-error-soft: rgba(253, 162, 155, 0.12);
+  --lm-backdrop: rgb(0 0 0 / 38%);
   --lm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 7px 20px rgba(0, 0, 0, 0.13);
   --lm-shadow-md: 0 20px 56px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.22);
 }
@@ -144,7 +150,7 @@ body {
     @apply rounded-md border px-2.5 py-1.5 text-sm transition-colors;
     background: var(--lm-accent);
     border-color: var(--lm-accent);
-    color: var(--lm-surface);
+    color: var(--lm-on-accent);
   }
 
   .btn-primary:hover {
@@ -188,7 +194,7 @@ body {
 
   .segmented button.active {
     background: var(--lm-accent);
-    color: var(--lm-surface);
+    color: var(--lm-on-accent);
   }
 
   .file-node {
@@ -850,7 +856,7 @@ sub {
 .front-matter-fence,
 .toc-node-label,
 .footnote-id {
-  color: #d0cbc2;
+  color: var(--lm-ink-muted);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
@@ -861,14 +867,14 @@ sub {
 }
 
 .front-matter-placeholder {
-  color: #a8a29a !important;
+  color: var(--lm-ink-muted) !important;
 }
 
 .toc-node {
   margin: 1rem 0;
-  border: 1px solid #e7e1d7;
+  border: 1px solid var(--lm-border);
   border-radius: 4px;
-  background: #fbfaf7;
+  background: var(--lm-surface-soft);
   padding: 0.8rem 1rem;
 }
 
@@ -885,7 +891,7 @@ sub {
   width: 100%;
   border: 0;
   background: transparent;
-  color: #8d867c;
+  color: var(--lm-ink-muted);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.92rem;
   outline: none;
@@ -893,7 +899,7 @@ sub {
 
 .toc-node-item {
   line-height: 1.65;
-  color: #4d4942;
+  color: var(--lm-ink-soft);
 }
 
 .toc-node-item-2 {
@@ -914,7 +920,7 @@ sub {
 
 .toc-node-item-6 {
   padding-left: 5rem;
-  color: #756f66;
+  color: var(--lm-ink-soft);
 }
 
 .footnotes {
@@ -981,8 +987,8 @@ sub {
 
 .dark .front-matter-node,
 .dark .toc-node {
-  border-color: #3b3833;
-  background: #1b1a18;
+  border-color: var(--lm-border);
+  background: var(--lm-surface-soft);
 }
 
 .dark .front-matter-node {
@@ -993,11 +999,11 @@ sub {
 }
 
 .dark .front-matter-fence {
-  color: #5c5850;
+  color: var(--lm-ink-muted);
 }
 
 .dark .front-matter-placeholder {
-  color: #777169 !important;
+  color: var(--lm-ink-muted) !important;
 }
 
 .dark .inline-html-node:hover {
@@ -1039,7 +1045,7 @@ sub {
 }
 
 .md-live-marker {
-  color: #b9b3a8;
+  color: var(--lm-ink-muted);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.92em;
   font-weight: 400;
@@ -1050,7 +1056,7 @@ sub {
 }
 
 .dark .md-live-marker {
-  color: #756f66;
+  color: var(--lm-ink-muted);
 }
 
 .math-render {
@@ -3317,7 +3323,7 @@ sub {
   padding: 0;
   border: 0;
   background: transparent;
-  color: #8f6b3d;
+  color: var(--lm-accent);
   font-size: 12px;
   cursor: pointer;
   text-decoration: underline;
@@ -3760,4 +3766,12 @@ textarea:focus-visible { outline: none; }
 @media (max-width: 900px) {
   .slash-command-menu { width: min(320px, calc(100vw - 32px)); }
   .slash-command-category { display: none; }
+}
+
+/* Resource states use the same semantic foreground/background pair in both themes. */
+.resources-pane .resource-tabs button.active,
+.dark .resources-pane .resource-tabs button.active {
+  color: var(--lm-ink);
+  background: var(--lm-accent-soft);
+  border-color: var(--lm-accent);
 }

@@ -88,6 +88,7 @@ pub struct WikiResolution {
 pub struct WorkspaceQueryResponse<T> {
     generation: u64,
     document_revision: Option<u64>,
+    document_epoch: Option<u64>,
     data: T,
 }
 
@@ -125,18 +126,18 @@ pub fn workspace_index_open(app: AppHandle, root: String) -> Result<WorkspaceInd
     fs::create_dir_all(&cache_dir).map_err(|err| err.to_string())?;
     let db_path = cache_dir.join(format!("{}.sqlite3", workspace_hash(&root)));
     let generation = {
+        let _write = write_lock()?;
+        prepare_database(&db_path)?;
         let mut state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
         state.root = root.clone();
         state.db_path = Some(db_path.clone());
         state.generation = state.generation.saturating_add(1);
         state.busy = true;
         state.error = None;
-        state.revisions.clear();
-        state.open_documents.clear();
+        state.documents.clear();
         state.pending_paths.clear();
         state.generation
     };
-    prepare_database(&db_path)?;
     let root_for_task = root.clone();
     let db_for_task = db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -164,46 +165,42 @@ pub fn workspace_index_status() -> Result<WorkspaceIndexStatus, String> {
 }
 
 #[tauri::command]
-pub async fn workspace_index_update_open_document(path: String, revision: u64, markdown: String) -> Result<WorkspaceIndexStatus, String> {
-    let (db_path, generation) = {
+pub async fn workspace_index_update_open_document(path: String, epoch: u64, revision: u64, markdown: String) -> Result<WorkspaceIndexStatus, String> {
+    let (db_path, generation, accepted) = {
+        // Claims and commits use the same lock order. A newer epoch cannot be accepted
+        // between a worker's version check and its SQLite transaction commit.
+        let _write = write_lock()?;
         let mut state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
-        if state.revisions.get(&path).is_some_and(|current| *current > revision) {
-            let db = state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?;
-            let root = state.root.clone();
-            let generation = state.generation;
-            let busy = state.busy;
-            let error = state.error.clone();
-            drop(state);
-            return status_from_path(&db, root, generation, busy, error);
-        }
-        state.revisions.insert(path.clone(), revision);
-        state.open_documents.insert(path.clone());
-        (state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?, state.generation)
+        let db = state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?;
+        let accepted = state.accept_update(&path, epoch, revision);
+        (db, state.generation, accepted)
     };
+    if !accepted { return workspace_index_status(); }
     let path_for_task = path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _write = write_lock()?;
         let current = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
-        if current.generation != generation || current.revisions.get(&path_for_task) != Some(&revision) { return Ok(()); }
+        if !current.matches(generation, &path_for_task, epoch, revision, true) { return Ok(()); }
         drop(current);
         index_document(&db_path, &path_for_task, &markdown, None)
-    })
-        .await.map_err(|err| err.to_string())??;
+    }).await.map_err(|err| err.to_string())??;
     workspace_index_status()
 }
 
 #[tauri::command]
-pub async fn workspace_index_release_open_document(path: String) -> Result<(), String> {
-    let (db_path, generation) = {
+pub async fn workspace_index_release_open_document(path: String, epoch: u64, revision: u64) -> Result<(), String> {
+    let (db_path, generation, accepted) = {
+        let _write = write_lock()?;
         let mut state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
-        state.open_documents.remove(&path);
-        state.revisions.remove(&path);
-        (state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?, state.generation)
+        let db = state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?;
+        let accepted = state.accept_release(&path, epoch, revision);
+        (db, state.generation, accepted)
     };
+    if !accepted { return Ok(()); }
     tauri::async_runtime::spawn_blocking(move || {
         let _write = write_lock()?;
         let state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
-        if state.generation != generation || state.open_documents.contains(&path) { return Ok(()); }
+        if !state.matches(generation, &path, epoch, revision, false) { return Ok(()); }
         drop(state);
         let path_buf = PathBuf::from(&path);
         if !path_buf.exists() { return open_database(&db_path).and_then(|connection| delete_document(&connection, &path)); }
@@ -248,11 +245,12 @@ struct QueryContext {
     db_path: PathBuf,
     generation: u64,
     document_revision: Option<u64>,
+    document_epoch: Option<u64>,
 }
 
 impl QueryContext {
     fn response<T>(&self, data: T) -> WorkspaceQueryResponse<T> {
-        WorkspaceQueryResponse { generation: self.generation, document_revision: self.document_revision, data }
+        WorkspaceQueryResponse { generation: self.generation, document_revision: self.document_revision, document_epoch: self.document_epoch, data }
     }
 }
 
@@ -261,7 +259,8 @@ fn active_query_context(path: Option<&str>) -> Result<QueryContext, String> {
     Ok(QueryContext {
         db_path: state.db_path.clone().ok_or_else(|| "Workspace index is not open.".to_string())?,
         generation: state.generation,
-        document_revision: path.and_then(|value| state.revisions.get(value).copied()),
+        document_revision: path.and_then(|value| state.version(value)).filter(|version| version.open).map(|version| version.revision),
+        document_epoch: path.and_then(|value| state.version(value)).map(|version| version.epoch),
     })
 }
 
@@ -345,7 +344,7 @@ pub fn queue_workspace_paths(paths: Vec<String>) {
         };
         let Ok(_write) = write_lock() else { return; };
         for path in paths {
-            if runtime().lock().map(|state| state.generation != generation || state.open_documents.contains(&path)).unwrap_or(true) { continue; }
+            if runtime().lock().map(|state| state.generation != generation || state.is_open(&path)).unwrap_or(true) { continue; }
             let path_buf = PathBuf::from(&path);
             if !path_buf.exists() {
                 if let Ok(connection) = open_database(&db_path) { let _ = delete_document(&connection, &path); }
@@ -378,7 +377,7 @@ fn rebuild_changed_files(db_path: &Path, root: &str, generation: u64) -> Result<
         let _write = write_lock()?;
         let state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
         if state.generation != generation { return Ok(()); }
-        if state.open_documents.contains(&path) { continue; }
+        if state.is_open(&path) { continue; }
         drop(state);
         delete_document(&connection, &path)?;
     }
@@ -390,7 +389,7 @@ fn rebuild_changed_files(db_path: &Path, root: &str, generation: u64) -> Result<
         let _write = write_lock()?;
         let state = runtime().lock().map_err(|_| "Workspace index lock was poisoned.".to_string())?;
         if state.generation != generation { return Ok(()); }
-        if state.open_documents.contains(&path_string) { continue; }
+        if state.is_open(&path_string) { continue; }
         drop(state);
         let connection = open_database(db_path)?;
         let existing = connection.query_row(

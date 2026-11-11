@@ -1,29 +1,51 @@
 import { computed, nextTick, reactive, toRaw } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { invokeLargeSource, readLargeSourceRange, runLargeSourceJob, assertLargeStateReceipt, type LargeRangeRequest } from "../editor/largeSourceClient";
+import { throwIfLargeSearchAborted } from '../editor/largeSearchCoordinator';
 import {
+  captureDocumentCommandTarget,
+  advanceDocumentRevision,
+  applyMountedPendingDocumentCommand,
+  pendingCommandTabId,
+  preparePendingDocumentCommand,
+  type PendingCommandPayload,
+  documentCommandTargetIsCurrent,
+  documentHistoryForTab,
+  documentRuntimeIdentity,
   clearDocumentRuntimeState,
   documentSessionForTab,
+  flushDocumentSessionPendingEdits,
   publishDocumentDerivedPatch,
   rebindDocumentSession,
   snapshotDocumentTab,
   waitForDocumentSession,
+  waitForDocumentComposition,
   type DocumentSessionAdapter,
+  type DocumentSessionFlushResult,
   type MarkdownSnapshot,
   type SnapshotReason,
 } from "../editor/documentRuntime";
+import { mapInactivePendingCommands, pendingCommand, type PendingCommandHandle } from '../editor/pendingDocumentCommands';
+import { DocumentDiskWriteFence } from '../editor/documentDiskWriteFence';
+import type { ImageAssetTarget } from '../utils/imageAssets';
+import type { ImageSettings } from '../types';
 import {
   documentMutationTokensEqual,
   type DocumentFlushReceipt,
   type DocumentMutationToken,
 } from "../editor/documentMutationTracker";
 import { DocumentSnapshotCoordinator } from "../editor/documentSnapshotCoordinator";
+import {
+  LargeOperationQueue,
+  LargeSessionStaleError,
+  type LargeSessionIdentity,
+} from "../editor/largeOperationQueue";
 import { installRuntimeProjection, type RuntimeDerivedProjection } from "./runtimeProjection";
 import { workspaceIndexClient, type WorkspaceIndexStatus } from "./workspaceIndexClient";
 import {
   captureDraftCleanupContext,
   captureDraftCleanupReceipt,
   checkDraftForOpenedFile,
-  clearActiveDraft,
   clearCapturedDraft,
   flushCurrentDraft,
 } from "./draftStore";
@@ -37,6 +59,7 @@ import {
   type SaveVersion,
 } from "./saveTransaction";
 import { alertDialog, showDialog } from "./dialogStore";
+import { LARGE_COORDINATE_SPACE } from "../types";
 import type {
   AppConfig,
   AppSettings,
@@ -58,6 +81,14 @@ import type {
   FileSnapshot,
   LargeFileSession,
   LargeFileState,
+  LargeFileFingerprint,
+  LargeFindMatch,
+  LargeFindOptions,
+  LargeFindResult,
+  LargeSaveReceipt,
+  LargeCloseReceipt,
+  LargeDraftCaptureReceipt,
+  LargeDraftOpenReceipt,
   NavigationLocation,
   PendingModeCursor,
   QuickOpenCandidate,
@@ -66,6 +97,8 @@ import type {
   SessionTabState,
   SimilarFileCandidate,
   SplitLayoutState,
+  TextFileSnapshot,
+  TextFileWriteReceipt,
   TextEdit,
   ThemeMode,
 } from "../types";
@@ -170,6 +203,8 @@ export const appStore = reactive({
 const EXTERNAL_FILE_CHECK_INTERVAL_MS = 10_000;
 let externalFileFallbackTimer = 0;
 let externalFileCheckInFlight = false;
+let externalFileCheckQueued = false;
+const fileWriteFence = new DocumentDiskWriteFence(normalizePathKey);
 let externalFileWatcherRunning = false;
 let externalFileWatcherAvailable = true;
 let backlinkRefreshTimer = 0;
@@ -185,6 +220,17 @@ const documentRuntimeMetadata = new Map<string, {
 const workspaceKnowledgePendingPaths = new Set<string>();
 const watchedFilePaths = new Map<string, string>();
 const saveTransactionQueue = new SaveTransactionQueue();
+const largeQueues = new WeakMap<DocumentTab, LargeOperationQueue>();
+type LargeOutboxBatch = {
+  id: string;
+  edits: TextEdit[];
+  /** Revision whose line/column coordinates produced this batch. */
+  expectedRevision: number;
+  sessionId: string;
+  failed?: unknown;
+};
+const largeOutboxes = new WeakMap<DocumentTab, LargeOutboxBatch[]>();
+const largeRemotePendingCounts = new WeakMap<DocumentTab, number>();
 
 type SaveContext = {
   tab: DocumentTab;
@@ -277,8 +323,8 @@ export async function formatCurrentMarkdown() {
     appStore.statusMessage = "大文件模式暂不支持 Markdown 格式化。";
     return false;
   }
-  await flushDocumentSnapshot(tab.id, "externalDiff");
-  const source = getPaneContent(paneId);
+  const commandTarget = await captureDocumentCommandTarget(tab.id, "externalDiff");
+  const source = commandTarget.markdown;
   const result = formatMarkdown(source);
   if (!result.changed) {
     appStore.statusMessage = "当前文档已经符合保守格式规范。";
@@ -297,6 +343,11 @@ export async function formatCurrentMarkdown() {
   });
   if (decision !== "apply") {
     appStore.statusMessage = "已取消格式化。";
+    return false;
+  }
+  if (getPaneTab(paneId) !== tab || !documentCommandTargetIsCurrent(commandTarget)) {
+    appStore.statusMessage = "格式化预览已过期，当前输入已保留。";
+    if (getPaneTab(paneId) === tab && appStore.splitLayout.activePaneId === paneId) return formatCurrentMarkdown();
     return false;
   }
   const detail: { paneId: EditorPaneId; source: string; result: MarkdownFormatResult; handled: boolean } = {
@@ -371,6 +422,83 @@ export async function flushDocumentSnapshot(tabId: string, reason: SnapshotReaso
   return result.markdown;
 }
 
+async function applyPendingCommandToDocument(handle: PendingCommandHandle, payload: PendingCommandPayload, expectedPath?: string) {
+  const originalTabId = pendingCommandTabId(handle);
+  const assertPath = () => { if (expectedPath != null && appStore.tabs.find(tab => tab.id === pendingCommandTabId(handle))?.path !== expectedPath) throw new Error('原文档路径已变化，资源已保留，请重试。'); };
+  assertPath();
+  if (await applyMountedPendingDocumentCommand(handle, payload, assertPath)) {
+    await flushDocumentSnapshot(originalTabId, 'externalDiff');
+    return;
+  }
+  const { tabId, command } = await preparePendingDocumentCommand(handle);
+  const tab = appStore.tabs.find(item => item.id === tabId);
+  if (!tab) throw new Error('原文档已关闭，已保留资源。');
+  if (appStore.splitLayout.mainTabId === tabId || appStore.splitLayout.secondaryTabId === tabId) {
+    await waitForDocumentSession(tabId);
+    if (await applyMountedPendingDocumentCommand(handle, payload, assertPath)) {
+      await flushDocumentSnapshot(tabId, 'externalDiff');
+      return;
+    }
+    throw new Error('原文档编辑器尚未就绪，已保留资源，请重试。');
+  }
+  const raw = command.raw, sequence = command.sequence;
+  if (!raw || raw.markdown !== tab.content || command.native) throw new Error('原文档定位已变化，已保留当前内容。');
+  const { inactiveDocumentPatch, blockSpacedMarkdown, inactiveHistorySelection } = await import('../editor/inactiveDocumentPatch');
+  const history = documentHistoryForTab(tabId), historyVersion = history.version;
+  const oldBookmark = history.current ? await inactiveHistorySelection(history.projection(history.current, 'source'), raw.markdown) : { anchor: raw.from, head: raw.to };
+  const current = pendingCommand(handle);
+  assertPath();
+  const becameVisible = appStore.splitLayout.mainTabId === tabId || appStore.splitLayout.secondaryTabId === tabId;
+  if (becameVisible) {
+    await waitForDocumentSession(tabId);
+    if (await applyMountedPendingDocumentCommand(handle, payload, assertPath)) { await flushDocumentSnapshot(tabId, 'externalDiff'); return; }
+    throw new Error('原文档编辑器尚未就绪，已保留资源，请重试。');
+  }
+  if (pendingCommandTabId(handle) !== tabId || !appStore.tabs.includes(tab) || documentSessionForTab(tabId)
+    || current.sequence !== sequence || current.raw !== raw || tab.content !== raw.markdown
+    || documentRuntimeIdentity(tabId).revision !== raw.revision || history.version !== historyVersion) throw new Error('原文档已变化，请重试资源操作。');
+  let from = raw.from, to = raw.to;
+  if (payload.kind === 'image' && from === 0 && to === 0 && tab.content.startsWith('\uFEFF')) from = to = 1;
+  const insert = payload.kind === 'asset' ? payload.insert : blockSpacedMarkdown(tab.content, from, to, payload.markdown);
+  const before = tab.content;
+  const result = inactiveDocumentPatch(before, { from, to, expected: before.slice(from, to), insert });
+  history.project(result.before, oldBookmark);
+  history.record(result.after, { kind: 'command', before: oldBookmark, after: result.bookmark, time: Date.now() });
+  history.checkpoint(result.markdown);
+  tab.content = result.markdown;
+  const revision = advanceDocumentRevision(tabId);
+  mapInactivePendingCommands(handle.documentId, before, result.markdown, revision, [{ from, to, inserted: result.markdown.length - before.length + to - from }]);
+  markDocumentChanged(tabId, revision);
+}
+
+export async function completePendingImageCommand(handle: PendingCommandHandle, markdown: string, target: ImageAssetTarget) {
+  const { rebasePendingImagePaths } = await import('../editor/pendingAssetPaths');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tabId = pendingCommandTabId(handle), tab = appStore.tabs.find(item => item.id === tabId);
+    if (!tab) throw new Error('原文档已关闭，图片已保存在原资源目录。');
+    const path = tab.path;
+    const rebased = await rebasePendingImagePaths(markdown, target.markdownPath, path, target.settings);
+    if (pendingCommandTabId(handle) !== tabId || tab.path !== path) continue;
+    await applyPendingCommandToDocument(handle, { kind: 'image', markdown: rebased }, path);
+    return;
+  }
+  throw new Error('原文档路径正在变化，图片已保留，请重试。');
+}
+
+export async function completePendingAssetRelink(handle: PendingCommandHandle, absolutePath: string, settings: Readonly<ImageSettings>) {
+  const { assetReferenceForDocument } = await import('../editor/pendingAssetPaths');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tabId = pendingCommandTabId(handle), tab = appStore.tabs.find(item => item.id === tabId);
+    if (!tab) throw new Error('原文档已关闭，未修改其他文档。');
+    const path = tab.path;
+    const insert = await assetReferenceForDocument(path, absolutePath, settings);
+    if (pendingCommandTabId(handle) !== tabId || tab.path !== path) continue;
+    await applyPendingCommandToDocument(handle, { kind: 'asset', insert }, path);
+    return;
+  }
+  throw new Error('原文档路径正在变化，请重试重链。');
+}
+
 export async function flushDocumentSnapshotWithReceipt(
   tabId: string,
   reason: SnapshotReason,
@@ -379,6 +507,18 @@ export async function flushDocumentSnapshotWithReceipt(
   const expectedTab = appStore.tabs.find((item) => item.id === tabId);
   if (!expectedTab) throw new Error("快照对应的标签页已不存在。");
   const expectedSession = documentSessionForTab(tabId);
+  if (expectedTab.documentMode === "large") {
+    await flushLargePendingInputForTab(toRaw(expectedTab) as DocumentTab, reason);
+    if (!appStore.tabs.includes(expectedTab)
+      || expectedTab.id !== tabId
+      || documentSessionForTab(tabId) !== expectedSession) {
+      throw new Error("大文件输入 flush 后标签页或编辑器会话已被替换。");
+    }
+    // Large documents deliberately do not materialize their remote view in
+    // JavaScript. Callers that need content must use a dedicated large-file
+    // API rather than treating this empty marker as Markdown.
+    return { markdown: "" };
+  }
   documentSnapshotCoordinator.prepare(tabId, reason);
   const snapshot = await snapshotDocumentTab(tabId, reason, { signal });
   if (!snapshot) {
@@ -435,6 +575,7 @@ function commitDocumentSnapshot(snapshot: MarkdownSnapshot, expectedTab: Documen
   if (tab.path && appStore.workspaceIndexReady) {
     void workspaceIndexClient.updateOpenDocument(
       tab.path,
+      documentRuntimeIdentity(tab.id).epoch,
       runtime?.revision ?? snapshot.revision,
       snapshot.markdown,
     ).then((status) => applyRustWorkspaceIndexStatus(status)).catch((error) => {
@@ -454,9 +595,137 @@ export function getPaneTab(paneId: EditorPaneId) {
   return appStore.tabs.find((tab) => tab.id === id) ?? null;
 }
 
+/** Capture the raw tab/pane/session tuple used by every large-file IPC call. */
+export function captureLargeSessionIdentity(paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+  const candidate = getPaneTab(paneId);
+  const tab = candidate ? toRaw(candidate) as DocumentTab : null;
+  const largeFile = tab?.largeFile ? toRaw(tab.largeFile) as LargeFileState : null;
+  if (!tab || tab.documentMode !== "large" || !largeFile) return null;
+  return {
+    tab,
+    tabId: tab.id,
+    paneId,
+    sessionId: largeFile.sessionId,
+    sessionIdentity: largeFile,
+    editorIdentity: documentSessionForTab(tab.id),
+    revision: largeFile.revision,
+    coordinateSpace: largeFile.coordinateSpace,
+  } satisfies LargeSessionIdentity;
+}
+
+function currentLargeSessionIdentity(identity: LargeSessionIdentity) {
+  const paneCurrent = captureLargeSessionIdentity(identity.paneId);
+  if (paneCurrent?.tab === identity.tab
+    && paneCurrent.tabId === identity.tabId
+    && paneCurrent.sessionId === identity.sessionId) {
+    return { ...paneCurrent, paneId: identity.paneId };
+  }
+  const tabCurrent = appStore.tabs
+    .map((item) => toRaw(item) as DocumentTab)
+    .find((item) => item === identity.tab);
+  const largeFile = tabCurrent?.largeFile ? toRaw(tabCurrent.largeFile) as LargeFileState : null;
+  if (!tabCurrent || tabCurrent.documentMode !== "large" || !largeFile) return null;
+  if (tabCurrent.id !== identity.tabId || largeFile.sessionId !== identity.sessionId) return null;
+  return {
+    tab: tabCurrent,
+    tabId: tabCurrent.id,
+    paneId: identity.paneId,
+    sessionId: largeFile.sessionId,
+    sessionIdentity: largeFile,
+    editorIdentity: documentSessionForTab(tabCurrent.id),
+    revision: largeFile.revision,
+    coordinateSpace: largeFile.coordinateSpace,
+  } satisfies LargeSessionIdentity;
+}
+
+function largeTabObjectStillCurrent(identity: LargeSessionIdentity) {
+  const current = currentLargeSessionIdentity(identity);
+  return current
+    && current.tab === identity.tab
+    && current.sessionId === identity.sessionId
+    && current.sessionIdentity === identity.sessionIdentity
+    ? current
+    : null;
+}
+
+function largeViewIdentityStillCurrent(identity: LargeSessionIdentity) {
+  const current = captureLargeSessionIdentity(identity.paneId);
+  return current
+    && current.tab === identity.tab
+    && current.tabId === identity.tabId
+    && current.sessionId === identity.sessionId
+    && current.sessionIdentity === identity.sessionIdentity
+    && current.editorIdentity === identity.editorIdentity
+    ? current
+    : null;
+}
+
+function largeQueueFor(tab: DocumentTab) {
+  let queue = largeQueues.get(tab);
+  if (!queue) {
+    queue = new LargeOperationQueue();
+    largeQueues.set(tab, queue);
+  }
+  return queue;
+}
+
+function initializeLargeSession(tab: DocumentTab) {
+  if (!tab.largeFile) return;
+  largeOutboxes.set(tab, []);
+  largeRemotePendingCounts.set(tab, tab.largeFile.pendingEditCount);
+  largeQueueFor(tab);
+  syncLargeOutboxProjection(tab);
+}
+
+function largeOutboxFor(tab: DocumentTab) {
+  let outbox = largeOutboxes.get(tab);
+  if (!outbox) {
+    outbox = [];
+    largeOutboxes.set(tab, outbox);
+  }
+  return outbox;
+}
+
+function largeBackendPendingCount(tab: DocumentTab) {
+  return largeRemotePendingCounts.get(tab) ?? tab.largeFile?.pendingEditCount ?? 0;
+}
+
+function syncLargeOutboxProjection(tab: DocumentTab) {
+  // IPC identities and outbox keys stay raw; UI writes use Vue's canonical
+  // proxy for that same object, including when a captured tab is inactive.
+  const projection = reactive(tab);
+  const largeFile = projection.largeFile;
+  if (!largeFile) return;
+  const outbox = largeOutboxFor(tab);
+  largeFile.pendingEdits = outbox.flatMap((batch) => batch.edits.map((edit) => ({ ...edit })));
+  largeFile.pendingEditCount = largeBackendPendingCount(tab) + largeFile.pendingEdits.length;
+  largeFile.targetPath = largeFile.targetPath === undefined ? tab.path || null : largeFile.targetPath;
+  projection.isDirty = largeFile.targetPath === null
+    || largeFile.pendingEditCount > 0
+    || largeFile.revision !== largeFile.savedRevision
+    || documentSessionForTab(tab.id)?.hasPendingEdits?.() === true;
+  if (tab.id === appStore.activeTabId && toRaw(appStore.largeFile) === toRaw(largeFile)) {
+    appStore.isDirty = tab.isDirty;
+    appStore.saveState = tab.isDirty ? "dirty" : "saved";
+  }
+}
+
+function setLargeBackendState(tab: DocumentTab, state: DirtyState) {
+  const largeFile = reactive(tab).largeFile;
+  if (!largeFile) return;
+  assertLargeStateReceipt(state, largeFile);
+  largeRemotePendingCounts.set(tab, state.pendingEditCount);
+  largeFile.revision = state.revision;
+  largeFile.savedRevision = state.savedRevision;
+  largeFile.coordinateSpace = state.coordinateSpace;
+  const totalLines = (state as DirtyState & { totalLines?: number }).totalLines;
+  if (totalLines !== undefined) largeFile.totalLines = totalLines;
+  syncLargeOutboxProjection(tab);
+}
+
 export function getPaneEditorMode(paneId: EditorPaneId) {
   const tab = getPaneTab(paneId);
-  return tab?.documentMode === "large" ? "wysiwyg" : tab?.editorMode ?? appStore.editorMode;
+  return tab?.documentMode === "large" ? "source" : tab?.editorMode ?? appStore.editorMode;
 }
 
 export function getPaneDocumentMode(paneId: EditorPaneId) {
@@ -658,7 +927,14 @@ export function consumePendingEditorPosition(mode: EditorMode) {
   return position;
 }
 
-export async function loadConfig() {
+let configLoadPromise: Promise<void> | null = null;
+export function loadConfig() {
+  // Bootstrap is a single application generation. A second caller must not
+  // reset tabs after an early file-open command has already created one.
+  return configLoadPromise ??= readConfigState().finally(ensureDefaultTab);
+}
+
+async function readConfigState() {
   const config = await invoke<AppConfig>("read_app_config");
   appStore.recentFiles = config.recentFiles ?? [];
   appStore.settings = normalizeSettings(config);
@@ -828,14 +1104,27 @@ async function refreshChangedKnowledgePaths(_paths: string[], expectedWorkspace:
 }
 
 export async function openFile(path?: string, options: { recordNavigation?: boolean; paneId?: EditorPaneId } = {}) {
+  const requestedPaneId = options.paneId ?? appStore.splitLayout.activePaneId;
+  if (typeof document !== 'undefined') {
+    // An OS/file command can precede App.onMounted. Start, rather than merely
+    // observe, the shared bootstrap before capturing a pane activation fence.
+    await loadConfig().catch(error => { appStore.statusMessage = String(error); });
+    await nextTick();
+  }
   const selected = path ?? (await invoke<string | null>("open_file_dialog"));
   if (!selected) return;
-  const paneId = options.paneId ?? appStore.splitLayout.activePaneId;
+  const paneId = requestedPaneId;
+  const activation = await preparePaneActivation(paneId, "tabSwitch");
+  if (!activation) return false;
   const shouldRecordNavigation = options.recordNavigation !== false;
   if (shouldRecordNavigation) {
     recordCurrentNavigationBeforeOpening(selected);
   }
   await flushCurrentDraft();
+  if (!paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+    appStore.statusMessage = "打开文件期间当前标签页或编辑器会话发生了变化，已保留当前输入。";
+    return false;
+  }
   syncActiveTabFromProjection();
   const existing = findFileTab(selected);
   if (existing) {
@@ -846,29 +1135,53 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
     return;
   }
   const info = await invoke<FileInfo>("get_file_info", { path: selected });
+  if (!paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+    appStore.statusMessage = "打开文件期间当前标签页或编辑器会话发生了变化，已保留当前输入。";
+    return false;
+  }
   let tab: DocumentTab;
   if (info.isLarge) {
     const session = await invoke<LargeFileSession>("open_large_file", { path: selected });
+    if (!paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+      await releaseOpenedLargeSession(session);
+      appStore.statusMessage = "打开大文件期间当前标签页或编辑器会话发生了变化，已保留当前输入。";
+      return false;
+    }
     tab = createTab({
       path: selected,
       kind: "large",
       content: "",
       documentMode: "large",
-      editorMode: "wysiwyg",
+      editorMode: "source",
       largeFile: {
-      sessionId: session.sessionId,
-      sizeBytes: session.sizeBytes,
-      totalLines: session.totalLines,
-      loadedRanges: [],
-      pendingEdits: [],
-      outline: session.outline,
+        sessionId: session.sessionId,
+        sizeBytes: session.sizeBytes,
+        totalLines: session.totalLines,
+        loadedRanges: [],
+        pendingEdits: [],
+        outline: session.outline,
+        revision: session.revision,
+        savedRevision: session.savedRevision,
+        pendingEditCount: session.pendingEditCount,
+        baseFingerprint: session.baseFingerprint,
+        diskFingerprint: session.diskFingerprint,
+        coordinateSpace: session.coordinateSpace,
+        targetPath: session.targetPath !== undefined ? session.targetPath : session.path,
+        originPath: session.originPath ?? session.path,
+        recoveryDraftId: session.recoveryDraftId,
       },
       isDirty: false,
     });
+    initializeLargeSession(tab);
     appStore.statusMessage = `大文件模式：${formatBytes(session.sizeBytes)}，${session.totalLines} 行`;
   } else {
-    const content = await invoke<string>("read_text_file", { path: selected });
-    const fileSnapshot = await getFileSnapshot(selected);
+    const snapshot = await readTextFileSnapshot(selected);
+    if (!paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+      appStore.statusMessage = "打开文件期间当前标签页或编辑器会话发生了变化，已保留当前输入。";
+      return false;
+    }
+    const content = snapshot.content;
+    const fileSnapshot = fileSnapshotFromTextSnapshot(snapshot);
     tab = createTab({
       path: selected,
       kind: "normal",
@@ -888,6 +1201,28 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
   void syncExternalFileWatches();
   void refreshBacklinks();
   await persistConfig();
+}
+
+/** Close a native large-file session that was opened before pane fencing failed. */
+async function releaseOpenedLargeSession(session: LargeFileSession) {
+  try {
+    const receipt = await invoke<LargeCloseReceipt>("close_large_file", {
+      sessionId: session.sessionId,
+      expectedRevision: session.revision,
+      coordinateSpace: session.coordinateSpace,
+      disposition: "discard",
+    });
+    if (!receipt.closed) throw new Error("原生大文件会话未确认关闭。");
+    if (receipt.cleanupWarning || receipt.recoveryArtifact) {
+      appStore.statusMessage = formatTransactionNotice(
+        "已释放未接入视图的大文件会话，但清理需处理",
+        receipt.cleanupWarning,
+        receipt.recoveryArtifact,
+      );
+    }
+  } catch (error) {
+    appStore.statusMessage = `释放未接入的大文件会话失败：${formatLargeTransactionEvidence(error)}`;
+  }
 }
 
 export async function navigateToFilePath(path: string) {
@@ -964,8 +1299,14 @@ function dispatchKnowledgeOccurrence(path: string, line: number, from?: number, 
 
 export async function openFileInOtherPane(path?: string) {
   const sourcePaneId = appStore.splitLayout.activePaneId;
+  const sourceActivation = await preparePaneActivation(sourcePaneId, "tabSwitch");
+  if (!sourceActivation) return false;
   if (!appStore.splitLayout.enabled) {
     appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
+  }
+  if (!paneActivationFenceStillCurrent(sourceActivation.fence, sourceActivation.flushed)) {
+    appStore.statusMessage = "打开到另一栏期间当前文档或编辑器会话发生了变化，已保留当前输入。";
+    return false;
   }
   const paneId = otherPaneId(sourcePaneId);
   await openFile(path, { paneId });
@@ -973,8 +1314,14 @@ export async function openFileInOtherPane(path?: string) {
 
 export async function activateTabInOtherPane(tabId: string) {
   const sourcePaneId = appStore.splitLayout.activePaneId;
+  const sourceActivation = await preparePaneActivation(sourcePaneId, "tabSwitch");
+  if (!sourceActivation) return false;
   if (!appStore.splitLayout.enabled) {
     appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
+  }
+  if (!paneActivationFenceStillCurrent(sourceActivation.fence, sourceActivation.flushed)) {
+    appStore.statusMessage = "打开到另一栏期间当前文档或编辑器会话发生了变化，已保留当前输入。";
+    return false;
   }
   await activateTabInPane(otherPaneId(sourcePaneId), tabId);
 }
@@ -1212,7 +1559,10 @@ export async function saveCurrentFile() {
   syncActiveTabFromProjection();
   const context = captureSaveContext();
   if (!context) return false;
-  if (context.kind === "large") return await saveCurrentLargeFileLegacy();
+  if (context.kind === "large") {
+    const paneId = appStore.splitLayout.activePaneId;
+    return await saveLargeFileForTab(context.tab, paneId);
+  }
   return saveTransactionQueue.enqueue(context.tab, () => runSaveTransaction(context));
 }
 
@@ -1227,36 +1577,320 @@ async function runSaveTransaction(context: SaveContext) {
     }
     return saved;
   } catch (error) {
+    publishSaveNotice(context.tabId, "failure", formatLargeTransactionEvidence(error));
     if (isCapturedTabActive(context)) appStore.saveState = "failed";
     throw error;
   }
 }
 
-async function saveCurrentLargeFileLegacy() {
-  appStore.saveState = "saving";
+async function flushLargePendingInputForTab(tab: DocumentTab, reason: SnapshotReason) {
+  const session = documentSessionForTab(tab.id);
+  if (!session) return null;
+  const expectedSession = session;
+  const result = await flushDocumentSessionPendingEdits(tab.id, reason);
+  if (!result || result.session !== expectedSession || !isTabRegistered(tab)) {
+    throw new LargeSessionStaleError("大文件输入 flush 期间编辑器会话已变化。");
+  }
+  return result;
+}
+
+/** Flush the editor mounted in a pane before that pane is projected to a new tab. */
+export type PaneFlushResult = Pick<DocumentSessionFlushResult, "session" | "afterRevision" | "afterToken">;
+
+async function flushPanePendingEdits(paneId: EditorPaneId, reason: SnapshotReason): Promise<PaneFlushResult | null> {
+  const tab = getPaneTab(paneId);
+  if (!tab) return null;
+  if (tab.documentMode === "large") {
+    return await flushLargePendingInputForTab(toRaw(tab) as DocumentTab, reason);
+  }
+  const result = await flushDocumentSnapshotWithReceipt(tab.id, reason);
+  const session = documentSessionForTab(tab.id);
+  if (!session) return null;
+  return {
+    session,
+    afterRevision: session.revision,
+    afterToken: result.flushReceipt?.after ?? session.mutationToken?.() ?? null,
+  };
+}
+
+export function largePaneForTab(tab: DocumentTab): EditorPaneId {
+  const raw = toRaw(tab) as DocumentTab;
+  for (const paneId of ["main", "secondary"] as const) {
+    const paneTab = getPaneTab(paneId);
+    if (paneTab && toRaw(paneTab) === raw) return paneId;
+  }
+  return appStore.splitLayout.activePaneId;
+}
+
+async function saveLargeFileForTab(tab: DocumentTab, paneId: EditorPaneId) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured || captured.tab !== toRaw(tab)) return false;
+  const largeFile = captured.tab.largeFile;
+  if (!largeFile) return false;
+  if (captured.tab.id === appStore.activeTabId) appStore.saveState = "saving";
+  let committedReceipt: LargeSaveReceipt | null = null;
   try {
-    if (appStore.documentMode === "large" && appStore.largeFile) {
-      appStore.statusMessage = "正在保存大文件...";
-      const state = await invoke<DirtyState>("save_large_file", {
-        sessionId: appStore.largeFile.sessionId,
-      });
-      appStore.largeFile.pendingEdits = [];
-      appStore.isDirty = state.isDirty;
-      appStore.saveState = state.isDirty ? "dirty" : "saved";
-      appStore.statusMessage = "大文件已保存";
-      await clearActiveDraft();
-      rememberRecentFile(appStore.currentFilePath);
-      syncActiveTabFromProjection();
-      await refreshFileTree();
-      await persistConfig();
-      return true;
+    appStore.statusMessage = "正在保存大文件...";
+    await flushLargePendingInputForTab(captured.tab, "save");
+    const queue = largeQueueFor(captured.tab);
+    await queue.idle();
+    if (!largeTabObjectStillCurrent(captured)) return false;
+    const outbox = largeOutboxFor(captured.tab);
+    if (outbox.length > 0) {
+      if (captured.tab.id === appStore.activeTabId) {
+        appStore.isDirty = true;
+        appStore.saveState = "failed";
+        appStore.statusMessage = "大文件仍有未提交输入，请显式重试后再保存。";
+      }
+      return false;
     }
-    appStore.saveState = "saved";
-    return false;
+    let current = currentLargeSessionIdentity(captured);
+    if (!current?.tab.largeFile) return false;
+    let saveAsTarget: LargeSaveAsTarget | null = null;
+    const targetPath = current.tab.largeFile.targetPath !== undefined
+      ? current.tab.largeFile.targetPath
+      : current.tab.path || null;
+    if (!targetPath) {
+      saveAsTarget = await chooseLargeSaveAsTarget(captured);
+      if (!saveAsTarget) return false;
+      await flushLargePendingInputForTab(captured.tab, "saveAs");
+      await queue.idle();
+      if (!largeTabObjectStillCurrent(captured)) return false;
+      current = currentLargeSessionIdentity(captured);
+      if (!current?.tab.largeFile || largeOutboxFor(captured.tab).length > 0) return false;
+    }
+    // Capture the draft owner after the final input flush.  This context is
+    // tied to the raw tab and is deliberately kept across pane switches.
+    const draftCleanup = captureDraftCleanupContext(captured.tab);
+    const receipt = await queue.enqueue(
+      saveAsTarget ? "saveAs" : "save",
+      captured,
+      () => currentLargeSessionIdentity(captured),
+      async (_captured, queuedCurrent) => {
+        if (largeOutboxFor(queuedCurrent.tab).some((item) => item.failed)) {
+          throw new Error("大文件存在失败的待处理编辑，已阻止保存时隐式重放。");
+        }
+        const queuedTarget = queuedCurrent.tab.largeFile?.targetPath !== undefined
+          ? queuedCurrent.tab.largeFile.targetPath
+          : queuedCurrent.tab.path || null;
+        if (saveAsTarget) {
+          const nextReceipt = await invoke<LargeSaveReceipt>("save_large_file_as", {
+            sessionId: queuedCurrent.sessionId,
+            targetPath: saveAsTarget.path,
+            expectedRevision: queuedCurrent.revision,
+            coordinateSpace: LARGE_COORDINATE_SPACE,
+            expectedTargetFingerprint: saveAsTarget.expectedTargetFingerprint,
+          });
+          // Validate and project the backend acknowledgement while the
+          // operation still owns this queue slot.  Retargeting the UI tab is
+          // deferred until after the queue's identity fence has completed.
+          applyLargeSaveReceipt(queuedCurrent, nextReceipt);
+          return nextReceipt;
+        }
+        if (!queuedTarget) throw new LargeSessionStaleError("恢复的大文件必须先另存为。");
+        const nextReceipt = await invoke<LargeSaveReceipt>("save_large_file", {
+          sessionId: queuedCurrent.sessionId,
+          expectedRevision: queuedCurrent.revision,
+          coordinateSpace: LARGE_COORDINATE_SPACE,
+        });
+        applyLargeSaveReceipt(queuedCurrent, nextReceipt);
+        return nextReceipt;
+      },
+    );
+    // Keep the native acknowledgement outside the queue scope so failures in
+    // the post-commit tree/config synchronization can still distinguish a
+    // written disk version from a failed write.  The queue task has already
+    // applied the receipt to the captured raw session before it resolves.
+    committedReceipt = receipt;
+    // The queue task has already acknowledged the receipt against the raw
+    // session.  This second call only accepts that projected receipt and
+    // performs the optional UI retarget after the queue fence.
+    commitLargeSaveReceipt(captured, receipt, { retarget: false });
+    let hasNewUnsavedWork = tabHasUnsavedWork(captured.tab) || largeOutboxFor(captured.tab).length > 0;
+    let cleanupFailed = false;
+    if (!hasNewUnsavedWork) {
+      const cleanupReceipt = captureDraftCleanupReceipt(captured.tab);
+      if (draftCleanup && !await clearCapturedDraft(draftCleanup, { receipt: cleanupReceipt })) {
+        cleanupFailed = true;
+      }
+      // Clearing a recovery record waits on its own transaction.  Input can
+      // arrive during that await, so never reuse the pre-cleanup snapshot to
+      // decide whether this save may mark the tab clean.
+      hasNewUnsavedWork = largeSaveHasUnsavedWork(captured.tab);
+    }
+    if (saveAsTarget && receipt.path && captured.tab.path !== receipt.path) {
+      retargetLargeTabForSaveAs(captured.tab, receipt.path);
+    }
+    hasNewUnsavedWork = largeSaveHasUnsavedWork(captured.tab);
+    if (receipt.isDirty || hasNewUnsavedWork) {
+      if (captured.tab.id === appStore.activeTabId) {
+        appStore.isDirty = true;
+        appStore.saveState = "dirty";
+        appStore.statusMessage = "大文件仍有未保存修改。";
+      }
+      return false;
+    }
+    if (cleanupFailed) {
+      if (captured.tab.id === appStore.activeTabId) {
+        appStore.isDirty = false;
+        appStore.saveState = "saved";
+        appStore.statusMessage = formatTransactionNotice(
+          "大文件已保存，但草稿清理失败，请稍后重试。",
+          receipt.cleanupWarning,
+          receipt.recoveryArtifact,
+        );
+      }
+      return false;
+    }
+    if (captured.tab.id === appStore.activeTabId) {
+      appStore.isDirty = false;
+      appStore.saveState = "saved";
+      appStore.statusMessage = formatTransactionNotice(
+        "大文件已保存",
+        receipt.cleanupWarning,
+        receipt.recoveryArtifact,
+      );
+    }
+    rememberRecentFile(receipt.path);
+    await refreshFileTree();
+    if (!largeSaveTargetStillCurrent(captured, receipt)) return false;
+    hasNewUnsavedWork = largeSaveHasUnsavedWork(captured.tab);
+    if (hasNewUnsavedWork) {
+      markLargeSaveNewInput(captured.tab);
+      return false;
+    }
+    await persistConfig();
+    // Config persistence is another asynchronous boundary.  Recheck the
+    // captured raw tab after it returns so input that arrived during either
+    // synchronization step cannot be reported as part of the saved version.
+    if (!largeSaveTargetStillCurrent(captured, receipt)) return false;
+    hasNewUnsavedWork = largeSaveHasUnsavedWork(captured.tab);
+    if (hasNewUnsavedWork) {
+      markLargeSaveNewInput(captured.tab);
+      return false;
+    }
+    return true;
   } catch (error) {
-    appStore.saveState = "failed";
+    if (committedReceipt && largeSaveCommitKnown(captured, committedReceipt)) {
+      const hasNewUnsavedWork = tabHasUnsavedWork(captured.tab) || largeOutboxFor(captured.tab).length > 0;
+      if (captured.tab.id === appStore.activeTabId) {
+        appStore.isDirty = hasNewUnsavedWork;
+        appStore.saveState = hasNewUnsavedWork ? "dirty" : "saved";
+        appStore.statusMessage = formatTransactionNotice(
+          hasNewUnsavedWork
+            ? "大文件已写入，但仍有新的未保存修改；保存后状态同步失败"
+            : "大文件已写入，但保存后状态同步失败",
+          committedReceipt.cleanupWarning,
+          committedReceipt.recoveryArtifact,
+        ) + `：${formatLargeTransactionEvidence(error)}`;
+      }
+    } else if (captured.tab.id === appStore.activeTabId) {
+      appStore.saveState = "failed";
+      appStore.isDirty = true;
+      appStore.statusMessage = formatLargeTransactionEvidence(error);
+    }
     throw error;
   }
+}
+
+type LargeSaveAsTarget = {
+  path: string;
+  expectedTargetFingerprint: LargeFileFingerprint | null;
+};
+
+async function chooseLargeSaveAsTarget(captured: LargeSessionIdentity) {
+  if (!currentLargeSessionIdentity(captured)?.tab.largeFile) return null;
+  const targetPath = await invoke<string | null>("save_markdown_file_dialog", {
+    defaultFileName: defaultMarkdownFileName(captured.tab.name),
+  });
+  if (!targetPath || !currentLargeSessionIdentity(captured)) return null;
+  const expectedTargetFingerprint = await invoke<LargeFileFingerprint | null>("get_large_file_fingerprint", {
+    path: targetPath,
+  });
+  if (!currentLargeSessionIdentity(captured)) return null;
+  return { path: targetPath, expectedTargetFingerprint } satisfies LargeSaveAsTarget;
+}
+
+function applyLargeSaveReceipt(current: LargeSessionIdentity, receipt: LargeSaveReceipt) {
+  if (receipt.outcome !== "committed" || receipt.diskWritten !== "yes") {
+    throw new Error(formatLargeSaveReceiptFailure(receipt));
+  }
+  if (receipt.sessionId !== current.sessionId
+    || receipt.coordinateSpace !== LARGE_COORDINATE_SPACE
+    || receipt.currentRevision !== receipt.requestedRevision
+    || (receipt.requestedRevision !== current.revision && receipt.currentRevision !== current.revision)) {
+    throw new LargeSessionStaleError("大文件保存回执与当前会话版本不一致。");
+  }
+  const largeFile = reactive(current.tab).largeFile;
+  if (!largeFile) throw new LargeSessionStaleError();
+  largeRemotePendingCounts.set(current.tab, receipt.pendingEditCount);
+  largeFile.revision = receipt.currentRevision;
+  largeFile.savedRevision = receipt.savedRevision;
+  largeFile.baseFingerprint = receipt.baseFingerprint;
+  largeFile.diskFingerprint = receipt.diskFingerprint;
+  largeFile.coordinateSpace = receipt.coordinateSpace;
+  largeFile.sizeBytes = receipt.baseFingerprint.sizeBytes;
+  largeFile.targetPath = receipt.path || null;
+  syncLargeOutboxProjection(current.tab);
+}
+
+function commitLargeSaveReceipt(
+  captured: LargeSessionIdentity,
+  receipt: LargeSaveReceipt,
+  options: { retarget?: boolean } = {},
+) {
+  const current = currentLargeSessionIdentity(captured);
+  if (!current?.tab.largeFile) throw new LargeSessionStaleError();
+  if (receipt.outcome !== "committed" || receipt.diskWritten !== "yes"
+    || current.revision < receipt.currentRevision
+    || current.tab.largeFile.revision < receipt.currentRevision) {
+    throw new Error(formatLargeSaveReceiptFailure(receipt));
+  }
+  if (current.revision === receipt.currentRevision
+    && (current.tab.largeFile.savedRevision !== receipt.savedRevision
+      || current.tab.largeFile.baseFingerprint.sha256 !== receipt.baseFingerprint.sha256)) {
+    throw new LargeSessionStaleError("大文件保存回执已经被后续版本取代。");
+  }
+  if (options.retarget !== false && receipt.path && current.tab.path !== receipt.path) {
+    retargetLargeTabForSaveAs(current.tab, receipt.path);
+  }
+  syncLargeOutboxProjection(current.tab);
+  if (current.tab.id === appStore.activeTabId) {
+    appStore.isDirty = current.tab.isDirty;
+    appStore.saveState = current.tab.isDirty ? "dirty" : "saved";
+  }
+}
+
+function largeSaveTargetStillCurrent(captured: LargeSessionIdentity, receipt: LargeSaveReceipt) {
+  const tab = captured.tab;
+  return isTabRegistered(tab)
+    && tab.documentMode === "large"
+    && tab.largeFile?.sessionId === captured.sessionId
+    && tab.path === receipt.path;
+}
+
+function largeSaveCommitKnown(captured: LargeSessionIdentity, receipt: LargeSaveReceipt) {
+  const largeFile = captured.tab.largeFile;
+  return isTabRegistered(captured.tab)
+    && captured.tab.documentMode === "large"
+    && largeFile?.sessionId === captured.sessionId
+    && receipt.sessionId === captured.sessionId
+    && receipt.coordinateSpace === LARGE_COORDINATE_SPACE
+    && receipt.outcome === "committed"
+    && receipt.diskWritten === "yes"
+    && largeFile.revision >= receipt.currentRevision
+    && largeFile.savedRevision >= receipt.savedRevision;
+}
+
+function largeSaveHasUnsavedWork(tab: DocumentTab) {
+  return tabHasUnsavedWork(tab) || largeOutboxFor(tab).length > 0;
+}
+
+function markLargeSaveNewInput(tab: DocumentTab) {
+  if (tab.id !== appStore.activeTabId) return;
+  appStore.isDirty = true;
+  appStore.saveState = "dirty";
+  appStore.statusMessage = "大文件已保存，但保存期间又发生了新输入，仍有未保存修改。";
 }
 
 async function saveNormalFileForContext(context: SaveContext) {
@@ -1288,7 +1922,7 @@ async function prepareNormalFileSave(
 ) {
   const baseline = context.tab.fileSnapshot ?? context.fileSnapshot;
   if (!baseline?.exists) return { target: context.path, retarget: false };
-  const currentSnapshot = await getFileSnapshot(context.path);
+  const currentSnapshot = await getFileSnapshotWithFingerprint(context.path);
   if (snapshotsMatch(baseline, currentSnapshot)) {
     return { target: context.path, retarget: false };
   }
@@ -1345,7 +1979,7 @@ async function resolveChangedFileBeforeSave(context: SaveContext, version: Froze
 }
 
 async function conflictDiffDetails(path: string, markdown: string) {
-  const disk = await invoke<string>("read_text_file", { path }).catch(() => "");
+  const disk = await readTextFileSnapshot(path).then((snapshot) => snapshot.content).catch(() => "");
   return buildTextDiffSummary(markdown, disk);
 }
 
@@ -1388,47 +2022,160 @@ async function writeCapturedVersion(
       return false;
     }
   }
+  const expectedTargetFingerprint = await expectedFingerprintForWriteTarget(
+    targetPath,
+    retarget ? undefined : context.fileSnapshot?.fingerprint,
+  );
+  if (!isFrozenSaveVersionCurrent(version)) return staleSaveResult(context);
   let committed: { tab: DocumentTab; epoch: number; session: DocumentSessionAdapter | null } | null = null;
-  const outcome = await runVersionedSave({
-    isCurrent: () => isFrozenSaveVersionCurrent(version),
-    write: async () => {
-      await invoke("write_text_file", {
-        path: targetPath,
-        content: version.markdown,
-      });
-    },
-    stat: () => getFileSnapshot(targetPath),
-    commit: (fileSnapshot) => {
-      committed = retarget
-        ? commitCapturedSaveAs(context, version, targetPath, fileSnapshot)
-        : commitCapturedSave(context, version, targetPath, fileSnapshot);
-      return committed !== null;
-    },
-    afterCommit: async () => {
-      await refreshFileTree();
-      void syncExternalFileWatches();
-      await persistConfig();
-    },
-    isStable: () => {
-      if (!committed) return false;
-      const currentSession = documentSessionForTab(committed.tab.id);
-      const sessionStable = retarget
-        ? currentSession?.hasPendingEdits?.() !== true
-        : currentSession === committed.session && currentSession?.hasPendingEdits?.() !== true;
-      return committed.tab.id === (retarget ? tabIdForPath(targetPath) : context.tabId)
-        && committed.tab.path === targetPath
-        && !committed.tab.isDirty
-        && appStore.tabs.includes(committed.tab)
-        && mutationEpoch(committed.tab) === committed.epoch
-        && sessionStable;
-    },
-  });
-  if (outcome.saved) return true;
+  const savedHistory = documentHistoryForTab(context.tabId);
+  let writeReceipt: TextFileWriteReceipt | null = null;
+  let ownWriteLease: ReturnType<DocumentDiskWriteFence['begin']> | null = null;
+  let outcome: Awaited<ReturnType<typeof runVersionedSave<FileSnapshot>>>;
+  try {
+    outcome = await runVersionedSave({
+      isCurrent: () => isFrozenSaveVersionCurrent(version),
+      write: async () => {
+        ownWriteLease = fileWriteFence.begin(targetPath);
+        writeReceipt = await invoke<TextFileWriteReceipt>("write_text_file", {
+          path: targetPath,
+          content: version.markdown,
+          expectedTargetFingerprint,
+        });
+        assertCommittedTextWrite(writeReceipt);
+        if (!retarget && targetPath === context.path) savedHistory.markSaved(version.markdown);
+      },
+      stat: async () => {
+        const fileSnapshot = await getFileSnapshot(targetPath);
+        return writeReceipt?.targetFingerprint ? fileSnapshotFromFingerprint(writeReceipt.targetFingerprint) : fileSnapshot;
+      },
+      commit: (fileSnapshot) => {
+        committed = retarget
+          ? commitCapturedSaveAs(context, version, targetPath, fileSnapshot)
+          : commitCapturedSave(context, version, targetPath, fileSnapshot);
+        return committed !== null;
+      },
+      afterCommit: async () => {
+        await refreshFileTree();
+        void syncExternalFileWatches();
+        await persistConfig();
+      },
+      isStable: () => {
+        if (!committed) return false;
+        const currentSession = documentSessionForTab(committed.tab.id);
+        const sessionStable = retarget
+          ? currentSession?.hasPendingEdits?.() !== true
+          : currentSession === committed.session && currentSession?.hasPendingEdits?.() !== true;
+        return committed.tab.id === (retarget ? tabIdForPath(targetPath) : context.tabId)
+          && committed.tab.path === targetPath
+          && !committed.tab.isDirty
+          && appStore.tabs.includes(committed.tab)
+          && mutationEpoch(committed.tab) === committed.epoch
+          && sessionStable;
+      },
+    });
+  } catch (error) {
+    publishSaveNotice(context.tabId, "failure", formatLargeTransactionEvidence(error));
+    const completedReceipt = writeReceipt as TextFileWriteReceipt | null;
+    const diskWasWritten = completedReceipt?.outcome === "committed"
+      && completedReceipt.diskWritten === "yes";
+    if (diskWasWritten && completedReceipt) {
+      // A post-write stat, tree refresh, or config sync may fail after the
+      // native transaction has committed. Keep the installed target as the
+      // captured tab's baseline so the next save compares against what was
+      // actually written instead of manufacturing a self-conflict.
+      rememberWrittenDiskBaseline(context, targetPath, completedReceipt);
+      if (completedReceipt.targetFingerprint && isFrozenSaveVersionCurrent(version)) {
+        const writtenSnapshot = fileSnapshotFromFingerprint(completedReceipt.targetFingerprint);
+        if (retarget) {
+          commitCapturedSaveAs(context, version, targetPath, writtenSnapshot);
+        } else {
+          commitCapturedSave(context, version, targetPath, writtenSnapshot);
+        }
+      }
+    }
+    if (isCapturedTabActive(context)) {
+      appStore.saveState = "failed";
+      appStore.isDirty = tabHasUnsavedWork(context.tab);
+      appStore.statusMessage = diskWasWritten && completedReceipt
+        ? formatTransactionNotice(
+          `文件已写入，但保存状态同步失败：${formatLargeTransactionEvidence(error)}`,
+          completedReceipt.cleanupWarning,
+          completedReceipt.recoveryArtifact,
+        )
+        : formatLargeTransactionEvidence(error);
+    }
+    throw error;
+  } finally {
+    if (ownWriteLease) {
+      fileWriteFence.finish(ownWriteLease);
+      void checkOpenFileSnapshots();
+    }
+  }
+  if (outcome.saved) {
+    const completedReceipt = writeReceipt as TextFileWriteReceipt | null;
+    if (completedReceipt && isCapturedTabActive(context)) {
+      appStore.statusMessage = formatTransactionNotice(
+        "文件已保存",
+        completedReceipt.cleanupWarning,
+        completedReceipt.recoveryArtifact,
+      );
+    }
+    return true;
+  }
+  if (outcome.phase === "after-write" && writeReceipt) {
+    // The old captured version may already be on disk while newer input is
+    // dirty in the editor. Record only the backend's installed-target fingerprint as
+    // the new disk baseline; never run the normal commit path, which would
+    // clear that newer input.  A later save can then compare against the
+    // actual version we wrote and still detect an external write after it.
+    rememberWrittenDiskBaseline(context, targetPath, writeReceipt);
+  }
+  const staleWriteReceipt = writeReceipt as TextFileWriteReceipt | null;
+  const staleMessage = formatTransactionNotice(
+    outcome.phase === "before-write"
+      ? ""
+      : retarget
+        ? "旧版本已写入副本，当前仍有未保存修改。"
+        : "文件已保存，但当前文档在保存期间又发生了修改。",
+    staleWriteReceipt?.cleanupWarning,
+    staleWriteReceipt?.recoveryArtifact,
+  );
   return staleSaveResult(context, outcome.phase === "before-write"
     ? undefined
-    : retarget
-      ? "旧版本已写入副本，当前仍有未保存修改。"
-      : "文件已保存，但当前文档在保存期间又发生了修改。");
+    : staleMessage);
+}
+
+function rememberWrittenDiskBaseline(
+  context: SaveContext,
+  targetPath: string,
+  receipt: TextFileWriteReceipt,
+) {
+  // targetFingerprint observes the installed file after the OS replacement.
+  // outputFingerprint belongs to an independent recovery copy and can have a
+  // different mtime despite identical content; it is never a disk baseline.
+  const fingerprint = receipt.targetFingerprint;
+  if (receipt.path !== targetPath
+    || receipt.outcome !== "committed"
+    || receipt.diskWritten !== "yes"
+    || !fingerprint
+    || !isTabRegistered(context.tab)
+    || context.tab.path !== targetPath) return;
+  context.tab.fileSnapshot = {
+    exists: true,
+    mtime: fingerprint.modifiedMillis ?? undefined,
+    size: fingerprint.sizeBytes,
+    fingerprint,
+  };
+}
+
+function fileSnapshotFromFingerprint(fingerprint: LargeFileFingerprint): FileSnapshot {
+  return {
+    exists: true,
+    mtime: fingerprint.modifiedMillis ?? undefined,
+    size: fingerprint.sizeBytes,
+    fingerprint,
+  };
 }
 
 function captureSaveContext(tab = getActiveTab()): SaveContext | null {
@@ -1442,7 +2189,9 @@ function captureSaveContext(tab = getActiveTab()): SaveContext | null {
     kind: tab.kind,
     session,
     epoch: mutationEpoch(tab),
-    revision: documentRuntimeMetadata.get(tab.id)?.revision ?? session?.revision ?? null,
+    revision: documentRuntimeMetadata.get(tab.id)?.revision
+      ?? session?.revision
+      ?? (tab.documentMode === "large" ? tab.largeFile?.revision ?? null : null),
     pendingVersion: pendingEditVersion(session),
     mutationToken: session?.mutationToken?.() ?? null,
     content: tab.content,
@@ -1585,7 +2334,9 @@ function captureCloseAuthorization(tab: DocumentTab): CloseAuthorization {
     kind: tab.kind,
     documentMode: tab.documentMode,
     epoch: mutationEpoch(tab),
-    revision: documentRuntimeMetadata.get(tab.id)?.revision ?? session?.revision ?? null,
+    revision: documentRuntimeMetadata.get(tab.id)?.revision
+      ?? session?.revision
+      ?? (tab.documentMode === "large" ? tab.largeFile?.revision ?? null : null),
     pendingVersion: pendingEditVersion(session),
     session,
     mutationToken: session?.mutationToken?.() ?? null,
@@ -1614,7 +2365,9 @@ function isCloseAuthorizationCurrent(version: CloseAuthorization) {
       || (version.mutationToken != null
         && session?.mutationToken?.() != null
         && documentMutationTokensEqual(version.mutationToken, session.mutationToken())))
-    && (documentRuntimeMetadata.get(version.tabId)?.revision ?? session?.revision ?? null) === version.revision
+    && (documentRuntimeMetadata.get(version.tabId)?.revision
+      ?? session?.revision
+      ?? (version.tab.documentMode === "large" ? version.tab.largeFile?.revision ?? null : null)) === version.revision
     && pendingEditVersion(session) === version.pendingVersion
     && (session?.hasPendingEdits?.() === true) === version.pending;
 }
@@ -1665,6 +2418,14 @@ export function captureWindowCloseAuthorization(): WindowCloseAuthorization {
  * captured; a concurrent edit therefore keeps the window open.
  */
 export async function prepareWindowClosePrompt() {
+  const composingTargets = appStore.tabs.map(item => {
+    const tab = toRaw(item) as DocumentTab;
+    return { tab, id: tab.id, path: tab.path, session: documentSessionForTab(tab.id) };
+  });
+  for (const target of composingTargets) if (target.session) await waitForDocumentComposition(target.id, target.session);
+  if (appStore.tabs.length !== composingTargets.length || composingTargets.some(target =>
+    !isTabRegistered(target.tab) || target.tab.id !== target.id || target.tab.path !== target.path
+      || documentSessionForTab(target.id) !== target.session)) throw new Error('等待输入法组合期间文档集合发生变化，已保留窗口。');
   syncActiveTabFromProjection();
   const expectedTabs = appStore.tabs.map((tab) => toRaw(tab) as DocumentTab);
   const records: Array<{
@@ -1792,13 +2553,21 @@ export function isWindowCloseAuthorizationCurrent(
         || current.dirty !== draftReceipt.dirty) {
         return false;
       }
-      if (expected.pending && !draftReceipt.flushReceipt) return false;
+      if (expected.pending && !draftReceipt.flushReceipt && !draftReceipt.largeFlush) return false;
       if (draftReceipt.flushReceipt
         && (!draftReceipt.beforeMutationToken
           || !draftReceipt.afterMutationToken
           || draftReceipt.flushReceipt.sessionIdentity !== draftReceipt.session
           || !documentMutationTokensEqual(draftReceipt.flushReceipt.before, draftReceipt.beforeMutationToken)
           || !documentMutationTokensEqual(draftReceipt.flushReceipt.after, draftReceipt.afterMutationToken))) {
+        return false;
+      }
+      if (draftReceipt.largeFlush
+        && (draftReceipt.largeFlush.session !== expected.session
+          || draftReceipt.largeFlush.beforeRevision !== expected.revision
+          || draftReceipt.largeFlush.afterRevision !== current.revision
+          || !mutationTokensMatch(draftReceipt.largeFlush.beforeToken, expected.mutationToken)
+          || !mutationTokensMatch(draftReceipt.largeFlush.afterToken, current.mutationToken))) {
         return false;
       }
       continue;
@@ -1831,55 +2600,8 @@ async function saveTabForWindowClose(tab: DocumentTab, expected: CloseAuthorizat
 }
 
 async function saveLargeTabForClose(tab: DocumentTab) {
-  const largeFile = tab.largeFile;
-  if (!largeFile || tab.documentMode !== "large") return false;
-  const tabId = tab.id;
-  const path = tab.path;
-  const epoch = mutationEpoch(tab);
-  const sessionId = largeFile.sessionId;
-  const pendingEdits = JSON.stringify(largeFile.pendingEdits);
-  const isIdentityCurrent = () => isTabRegistered(tab)
-    && tab.id === tabId
-    && tab.path === path
-    && toRaw(tab.largeFile) === toRaw(largeFile)
-    && mutationEpoch(tab) === epoch
-    && (appStore.activeTabId !== tabId || toRaw(appStore.largeFile) === toRaw(largeFile));
-  const isCurrent = () => isIdentityCurrent() && JSON.stringify(largeFile.pendingEdits) === pendingEdits;
-  if (appStore.activeTabId === tabId) appStore.saveState = "saving";
-  try {
-    const state = await invoke<DirtyState>("save_large_file", { sessionId });
-    if (!isCurrent()) {
-      if (appStore.activeTabId === tabId) {
-        appStore.isDirty = true;
-        appStore.saveState = "dirty";
-      }
-      return false;
-    }
-    if (state.isDirty) {
-      if (appStore.activeTabId === tabId) {
-        appStore.isDirty = true;
-        appStore.saveState = "dirty";
-        appStore.statusMessage = "大文件仍有未保存修改。";
-      }
-      return false;
-    }
-    largeFile.pendingEdits = [];
-    tab.isDirty = false;
-    if (appStore.activeTabId === tabId && toRaw(appStore.largeFile) === toRaw(largeFile)) {
-      appStore.isDirty = false;
-      appStore.saveState = "saved";
-      appStore.statusMessage = "大文件已保存";
-    }
-    rememberRecentFile(path);
-    await refreshFileTree();
-    if (!isIdentityCurrent()) return false;
-    await persistConfig();
-    if (!isIdentityCurrent()) return false;
-    return true;
-  } catch (error) {
-    if (appStore.activeTabId === tabId) appStore.saveState = "failed";
-    throw error;
-  }
+  if (!tab.largeFile || tab.documentMode !== "large") return false;
+  return saveLargeFileForTab(toRaw(tab) as DocumentTab, largePaneForTab(tab));
 }
 
 function pendingEditVersion(session: DocumentSessionAdapter | null) {
@@ -1895,6 +2617,12 @@ function setCapturedSaveState(context: SaveContext, state: "dirty" | "saving" | 
   if (isCapturedTabActive(context)) appStore.saveState = state;
 }
 
+function publishSaveNotice(tabId: string, state: 'failure' | 'success', message = '') {
+  if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(`lightmark:save-${state}`, { detail: { tabId, message } }));
+  }
+}
+
 function commitCapturedSave(
   context: SaveContext,
   version: FrozenSaveVersion,
@@ -1902,9 +2630,11 @@ function commitCapturedSave(
   fileSnapshot: FileSnapshot,
 ) {
   if (!isFrozenSaveVersionCurrent(version) || targetPath !== context.path) return null;
-  const tab = context.tab;
+  const tab = reactive(context.tab);
   tab.content = version.markdown;
   tab.isDirty = false;
+  documentHistoryForTab(tab.id).markSaved(version.markdown);
+  publishSaveNotice(tab.id, 'success');
   tab.fileSnapshot = fileSnapshot;
   clearTabExternalState(tab);
   if (isCapturedTabActive(context)) {
@@ -1915,8 +2645,8 @@ function commitCapturedSave(
   }
   rememberRecentFile(targetPath);
   return {
-    tab,
-    epoch: mutationEpoch(tab),
+    tab: context.tab,
+    epoch: mutationEpoch(context.tab),
     session: documentSessionForTab(tab.id),
   };
 }
@@ -1928,14 +2658,17 @@ function commitCapturedSaveAs(
   fileSnapshot: FileSnapshot,
 ) {
   if (!isFrozenSaveVersionCurrent(version)) return null;
-  const tab = context.tab;
+  const tab = reactive(context.tab);
   const previousTabId = tab.id;
   const wasActive = isCapturedTabActive(context);
   tab.content = version.markdown;
   tab.isDirty = false;
-  advanceMutationEpoch(tab);
+  advanceMutationEpoch(context.tab);
   tab.id = tabIdForPath(targetPath);
   rebindDocumentRuntime(previousTabId, tab.id);
+  documentHistoryForTab(tab.id).markSaved(version.markdown);
+  publishSaveNotice(previousTabId, 'success');
+  publishSaveNotice(tab.id, 'success');
   tab.kind = "normal";
   tab.path = targetPath;
   tab.name = fileNameFromPath(targetPath);
@@ -1951,8 +2684,8 @@ function commitCapturedSaveAs(
   }
   rememberRecentFile(targetPath);
   return {
-    tab,
-    epoch: mutationEpoch(tab),
+    tab: context.tab,
+    epoch: mutationEpoch(context.tab),
     session: documentSessionForTab(tab.id),
   };
 }
@@ -1988,8 +2721,9 @@ function tabHasUnsavedWork(tab: DocumentTab) {
 
 async function reloadCapturedFileFromDisk(context: SaveContext, version: FrozenSaveVersion) {
   if (!isFrozenSaveVersionCurrent(version)) return false;
-  const content = await invoke<string>("read_text_file", { path: context.path });
-  const snapshot = await getFileSnapshot(context.path);
+  const textSnapshot = await readTextFileSnapshot(context.path);
+  const content = textSnapshot.content;
+  const snapshot = fileSnapshotFromTextSnapshot(textSnapshot);
   if (!isFrozenSaveVersionCurrent(version)) {
     staleSaveResult(context, "当前文档在重载期间发生了修改，已保留新输入。");
     return false;
@@ -2023,7 +2757,14 @@ async function replaceCapturedTabContent(tab: DocumentTab, content: string, dirt
 async function saveConflictCopyForContext(context: SaveContext, version: FrozenSaveVersion) {
   if (!isFrozenSaveVersionCurrent(version)) return false;
   const target = conflictCopyPath(context.path);
-  await invoke("write_text_file", { path: target, content: version.markdown });
+  const expectedTargetFingerprint = await expectedFingerprintForWriteTarget(target);
+  if (!isFrozenSaveVersionCurrent(version)) return false;
+  const receipt = await invoke<TextFileWriteReceipt>("write_text_file", {
+    path: target,
+    content: version.markdown,
+    expectedTargetFingerprint,
+  });
+  assertCommittedTextWrite(receipt);
   if (!isFrozenSaveVersionCurrent(version)) {
     staleSaveResult(context, "旧版本已写入冲突副本，当前仍有未保存修改。");
     return false;
@@ -2035,7 +2776,13 @@ async function saveConflictCopyForContext(context: SaveContext, version: FrozenS
     staleSaveResult(context, "旧版本已写入冲突副本，当前仍有未保存修改。");
     return false;
   }
-  if (isCapturedTabActive(context)) appStore.statusMessage = `已保存冲突副本：${fileNameFromPath(target)}`;
+  if (isCapturedTabActive(context)) {
+    appStore.statusMessage = formatTransactionNotice(
+      `已保存冲突副本：${fileNameFromPath(target)}`,
+      receipt.cleanupWarning,
+      receipt.recoveryArtifact,
+    );
+  }
   return true;
 }
 
@@ -2043,7 +2790,68 @@ function getFileSnapshot(path: string) {
   return invoke<FileSnapshot>("get_file_snapshot", { path });
 }
 
+async function readTextFileSnapshot(path: string) {
+  return invoke<TextFileSnapshot>("read_text_file_snapshot", { path });
+}
+
+function fileSnapshotFromTextSnapshot(snapshot: TextFileSnapshot): FileSnapshot {
+  return {
+    exists: true,
+    mtime: snapshot.fingerprint.modifiedMillis ?? undefined,
+    size: snapshot.fingerprint.sizeBytes,
+    fingerprint: snapshot.fingerprint,
+  };
+}
+
+async function expectedFingerprintForWriteTarget(
+  path: string,
+  captured?: LargeFileFingerprint,
+) {
+  if (captured) return captured;
+  return await invoke<LargeFileFingerprint | null>("get_large_file_fingerprint", { path });
+}
+
+async function getFileSnapshotWithFingerprint(path: string) {
+  const snapshot = await getFileSnapshot(path);
+  if (snapshot.exists) {
+    const fingerprint = await invoke<LargeFileFingerprint | null>("get_large_file_fingerprint", { path });
+    if (!fingerprint) {
+      throw new Error("无法取得目标文件 fingerprint，已阻止覆盖。");
+    }
+    snapshot.fingerprint = fingerprint;
+  }
+  return snapshot;
+}
+
+function assertCommittedTextWrite(receipt: TextFileWriteReceipt) {
+  if (receipt.outcome === "committed" && receipt.diskWritten === "yes") return;
+  throw new Error(formatTextWriteReceiptFailure(receipt));
+}
+
+function formatTextWriteReceiptFailure(receipt: TextFileWriteReceipt) {
+  const details = [
+    `outcome=${receipt.outcome}`,
+    `diskWritten=${receipt.diskWritten}`,
+    receipt.recoveryArtifact ? `recoveryArtifact=${receipt.recoveryArtifact}` : "",
+    receipt.cleanupWarning ? `cleanupWarning=${receipt.cleanupWarning}` : "",
+  ].filter(Boolean).join(", ");
+  return `文件保存未确认：${details}`;
+}
+
+function formatTransactionNotice(prefix: string, cleanupWarning?: string, recoveryArtifact?: string) {
+  const details = [
+    cleanupWarning ? `清理提示：${cleanupWarning}` : "",
+    recoveryArtifact ? `恢复材料：${recoveryArtifact}` : "",
+  ].filter(Boolean).join("；");
+  return details ? `${prefix}；${details}` : prefix;
+}
+
 function snapshotsMatch(left: FileSnapshot, right: FileSnapshot) {
+  if (left.fingerprint && right.fingerprint) {
+    return left.fingerprint.sha256 === right.fingerprint.sha256
+      && left.fingerprint.sizeBytes === right.fingerprint.sizeBytes
+      && left.fingerprint.modifiedMillis === right.fingerprint.modifiedMillis;
+  }
   return left.exists === right.exists && left.mtime === right.mtime && left.size === right.size;
 }
 
@@ -2070,12 +2878,18 @@ export function stopExternalFileMonitor() {
 }
 
 export async function checkOpenFileSnapshots() {
-  if (externalFileCheckInFlight) return;
+  if (externalFileCheckInFlight) { externalFileCheckQueued = true; return; }
   externalFileCheckInFlight = true;
   try {
     for (const tab of appStore.tabs) {
       if (tab.kind !== "normal" || !tab.path || !tab.fileSnapshot?.exists) continue;
-      const snapshot = await getFileSnapshot(tab.path).catch((): FileSnapshot => ({ exists: false }));
+      const path = tab.path, baseline = tab.fileSnapshot, readFence = fileWriteFence.capture(path);
+      if (readFence.active) continue;
+      const snapshot = await getFileSnapshot(path).catch((): FileSnapshot => ({ exists: false }));
+      if (!appStore.tabs.includes(tab) || tab.path !== path || tab.fileSnapshot !== baseline || !fileWriteFence.canPublish(readFence)) {
+        externalFileCheckQueued = true;
+        continue;
+      }
       updateTabExternalState(tab, snapshot);
       if (tab.externalState === "deleted") {
         tab.relocationCandidates = await findSimilarFileCandidates(tab);
@@ -2083,6 +2897,10 @@ export async function checkOpenFileSnapshots() {
     }
   } finally {
     externalFileCheckInFlight = false;
+    if (externalFileCheckQueued) {
+      externalFileCheckQueued = false;
+      queueMicrotask(() => { void checkOpenFileSnapshots(); });
+    }
   }
 }
 
@@ -2134,14 +2952,20 @@ export async function reloadCurrentFileFromDisk() {
 export async function saveCurrentFileAsExternalCopy() {
   syncActiveTabFromProjection();
   const tab = getActiveTab();
-  const context = tab && tab.kind === "normal" && tab.path ? captureSaveContext(tab) : null;
+  const context = tab && tab.documentMode === "normal" ? captureSaveContext(tab) : null;
   if (!context) return false;
   return saveTransactionQueue.enqueue(context.tab, async () => {
     const target = await chooseSaveAsTargetForContext(context, context.path);
     if (!target) return false;
     const version = await captureSaveVersion(context, "saveAs");
     if (!version) return staleSaveResult(context);
-    return writeCapturedVersion(context, version, target, true);
+    const expectedTargetFingerprint = await expectedFingerprintForWriteTarget(target);
+    if (!isFrozenSaveVersionCurrent(version)) return staleSaveResult(context);
+    const receipt = await invoke<TextFileWriteReceipt>('write_text_file', { path: target, content: version.markdown, expectedTargetFingerprint });
+    assertCommittedTextWrite(receipt);
+    rememberRecentFile(target);
+    if (isCapturedTabActive(context)) appStore.statusMessage = `已保存副本：${fileNameFromPath(target)}`;
+    return true;
   });
 }
 
@@ -2269,7 +3093,11 @@ function dismissTabExternalState(tab: DocumentTab) {
   tab.externalDetectedAt = undefined;
 }
 
-export function createUntitledTab(content = "", dirty = false, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+export function createUntitledTab(
+  content = "",
+  dirty = false,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
   syncActiveTabFromProjection();
   const tab = createTab({
     path: "",
@@ -2286,9 +3114,171 @@ export function createUntitledTab(content = "", dirty = false, paneId: EditorPan
   return tab;
 }
 
+/**
+ * User initiated new-tab creation.  The synchronous primitive above remains
+ * available for startup/bootstrap callers; UI entry points must first settle
+ * the pane's mounted editor and then verify that the same raw tab/session is
+ * still mapped to that pane before replacing it with a new document.
+ */
+export async function createUntitledTabAfterFlush(
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+  content = "",
+  dirty = false,
+) {
+  if (!await setActivePane(paneId)) return null;
+  const activation = await preparePaneActivation(paneId, "tabSwitch");
+  // Keep the post-flush fence at the consumer boundary as well as inside the
+  // helper.  This closes the microtask gap before the synchronous projection
+  // replaces the pane with the new tab.
+  if (!activation || !paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+    appStore.statusMessage = "新标签页创建期间当前文档或编辑器会话发生了变化，已保留当前输入。";
+    return null;
+  }
+  return createUntitledTab(content, dirty, paneId);
+}
+
+/** Open a dedicated untitled target for a future Rust-owned large draft. */
+export function createRecoveredLargeTab(
+  receipt: LargeDraftOpenReceipt,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  syncActiveTabFromProjection();
+  const session = receipt.session;
+  const tab = createTab({
+    path: "",
+    kind: "large",
+    content: "",
+    documentMode: "large",
+    editorMode: "source",
+    largeFile: {
+      sessionId: session.sessionId,
+      sizeBytes: session.sizeBytes,
+      totalLines: session.totalLines,
+      loadedRanges: [],
+      pendingEdits: [],
+      outline: session.outline,
+      revision: session.revision,
+      savedRevision: session.savedRevision,
+      pendingEditCount: session.pendingEditCount,
+      baseFingerprint: session.baseFingerprint,
+      diskFingerprint: session.diskFingerprint,
+      coordinateSpace: session.coordinateSpace,
+      targetPath: null,
+      originPath: receipt.originPath,
+      recoveryDraftId: receipt.recoveryDraftId,
+    },
+    // The recovered remote view is intentionally dirty until the user saves
+    // it to a new target path, even if the snapshot opened with no edit batch.
+    isDirty: true,
+  });
+  initializeLargeSession(tab);
+  appStore.tabs.push(tab);
+  projectTabInPane(tab, paneId);
+  appStore.isDirty = true;
+  appStore.saveState = "dirty";
+  appStore.statusMessage = `已恢复大文件草稿${receipt.originPath ? `：${fileNameFromPath(receipt.originPath)}` : ""}，请另存为。`;
+  void persistConfig();
+  return tab;
+}
+
 export function ensureDefaultTab() {
   if (appStore.tabs.length > 0) return;
   createUntitledTab("", false);
+}
+
+export type PaneActivationFence = {
+  paneId: EditorPaneId;
+  tab: DocumentTab | null;
+  tabId: string;
+  session: DocumentSessionAdapter | null;
+  revision: number | null;
+  mutationToken: DocumentMutationToken | null;
+  documentMode: DocumentTab["documentMode"] | null;
+  content: string | null;
+  dirty: boolean | null;
+};
+
+export function capturePaneActivationFence(paneId: EditorPaneId): PaneActivationFence {
+  const candidate = getPaneTab(paneId);
+  const tab = candidate ? toRaw(candidate) as DocumentTab : null;
+  const session = tab ? documentSessionForTab(tab.id) : null;
+  return {
+    paneId,
+    tab,
+    tabId: tab?.id ?? "",
+    session,
+    revision: session?.revision ?? null,
+    mutationToken: session?.mutationToken?.() ?? null,
+    documentMode: tab?.documentMode ?? null,
+    // A pane without a mounted adapter has no flush receipt to authorize an
+    // intervening projection update, so retain its visible bytes as a small
+    // fallback fence. Adapter backed panes validate their own mutation token.
+    content: tab && !session ? tab.content : null,
+    dirty: tab && !session ? tab.isDirty : null,
+  };
+}
+
+function paneOwnsRawTab(paneId: EditorPaneId, expected: DocumentTab) {
+  const current = getPaneTab(paneId);
+  return Boolean(current && toRaw(current) === expected && isTabRegistered(expected));
+}
+
+export function paneActivationFenceStillCurrent(fence: PaneActivationFence, flushed: PaneFlushResult | null = null) {
+  const candidate = getPaneTab(fence.paneId);
+  const tab = candidate ? toRaw(candidate) as DocumentTab : null;
+  if (tab !== fence.tab || (tab?.id ?? "") !== fence.tabId) return false;
+  if (!tab) return true;
+  const session = documentSessionForTab(tab.id);
+  const capturedSession = fence.session;
+  if (session !== capturedSession) return false;
+  if (fence.documentMode !== tab.documentMode) return false;
+  if (capturedSession) {
+    const currentSession = capturedSession;
+    const authorized = flushed?.session === capturedSession;
+    const expectedRevision = authorized ? flushed.afterRevision : fence.revision;
+    if (expectedRevision !== null && currentSession.revision !== expectedRevision) return false;
+    const currentToken = currentSession.mutationToken?.() ?? null;
+    const expectedToken = authorized ? flushed.afterToken : fence.mutationToken;
+    if (expectedToken || currentToken) {
+      return Boolean(expectedToken && currentToken && documentMutationTokensEqual(currentToken, expectedToken));
+    }
+    return true;
+  }
+  return tab.content === fence.content && tab.isDirty === fence.dirty;
+}
+
+export type PaneActivationBoundary = {
+  fence: PaneActivationFence;
+  flushed: PaneFlushResult | null;
+};
+
+/** Flush a pane and return a post-flush token that authorizes its projection. */
+export async function preparePaneActivation(
+  paneId: EditorPaneId,
+  reason: SnapshotReason,
+): Promise<PaneActivationBoundary | null> {
+  // An async editor can mount while its first open command is flushing. Wait
+  // before capturing the session fence, while still rejecting intervening input.
+  const initial = getPaneTab(paneId);
+  if (initial && !documentSessionForTab(initial.id)
+    && typeof document !== "undefined") {
+    const owner = toRaw(initial) as DocumentTab;
+    const content = owner.content; const dirty = owner.isDirty; const mode = owner.editorMode;
+    const ownerId = owner.id; const ownerPath = owner.path; const ownerEpoch = mutationEpoch(owner);
+    try { await waitForDocumentSession(ownerId, mode, 30000); }
+    catch (error) { appStore.statusMessage = `编辑器尚未就绪，已保留当前文档：${String(error)}`; return null; }
+    if (!paneOwnsRawTab(paneId, owner) || owner.id !== ownerId || owner.path !== ownerPath || mutationEpoch(owner) !== ownerEpoch
+      || owner.content !== content || owner.isDirty !== dirty || owner.editorMode !== mode) {
+      appStore.statusMessage = "等待编辑器期间文档发生了变化，已保留当前输入。"; return null;
+    }
+  }
+  const fence = capturePaneActivationFence(paneId);
+  const flushed = fence.tab ? await flushPanePendingEdits(paneId, reason) : null;
+  if (!paneActivationFenceStillCurrent(fence, flushed)) {
+    appStore.statusMessage = "文档或编辑器会话在切换期间发生了变化，已保留当前输入。";
+    return null;
+  }
+  return { fence, flushed };
 }
 
 export async function activateTab(tabId: string) {
@@ -2297,20 +3287,64 @@ export async function activateTab(tabId: string) {
 
 export async function activateTabInPane(paneId: EditorPaneId, tabId: string) {
   if (tabId === appStore.activeTabId && paneId === appStore.splitLayout.activePaneId) return;
-  const previous = getPaneTab(paneId);
-  if (previous && previous.documentMode === "normal") await flushDocumentSnapshot(previous.id, "tabSwitch");
+  const activation = await preparePaneActivation(paneId, "tabSwitch");
+  if (!activation || !paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+    appStore.statusMessage = "切换标签页期间当前文档或编辑器会话发生了变化，已保留当前输入。";
+    return false;
+  }
   syncActiveTabFromProjection();
-  const tab = appStore.tabs.find((item) => item.id === tabId);
-  if (!tab) return;
+  const candidate = appStore.tabs.find((item) => item.id === tabId);
+  const tab = candidate ? toRaw(candidate) as DocumentTab : null;
+  if (!tab || !isTabRegistered(tab)) return false;
+  if (!paneActivationFenceStillCurrent(activation.fence, activation.flushed)) {
+    appStore.statusMessage = "切换标签页期间当前文档或编辑器会话发生了变化，已保留当前输入。";
+    return false;
+  }
   projectTabInPane(tab, paneId);
   await nextTick();
-  if (tab.documentMode === "normal") await waitForDocumentSession(tab.id, tab.editorMode);
+  if (!paneOwnsRawTab(paneId, tab)) {
+    appStore.statusMessage = "标签页切换完成前目标栏位已变化，已保留当前输入。";
+    return false;
+  }
+  let targetSession: DocumentSessionAdapter | null = null;
+  if (tab.documentMode === "normal") {
+    targetSession = await waitForDocumentSession(tab.id, tab.editorMode);
+    if (!paneOwnsRawTab(paneId, tab) || documentSessionForTab(tab.id) !== targetSession) {
+      appStore.statusMessage = "标签页编辑器初始化期间文档或会话已变化，已保留当前输入。";
+      return false;
+    }
+  }
   void refreshBacklinks();
   await persistConfig();
+  if (!paneOwnsRawTab(paneId, tab)) {
+    appStore.statusMessage = "标签页切换期间目标栏位已变化，已保留当前输入。";
+    return false;
+  }
+  return true;
 }
 
 export async function setActivePane(paneId: EditorPaneId) {
-  if (paneId === appStore.splitLayout.activePaneId) return;
+  const previousActivePaneId = appStore.splitLayout.activePaneId;
+  if (paneId === previousActivePaneId) {
+    // Pointer activation of the already active split pane is a focus action,
+    // not a document transition.  The explicit new-tab/recovery wrappers own
+    // their required flush so this hot path cannot submit a local buffer.
+    syncActiveTabFromProjection();
+    return true;
+  }
+  const previousActive = capturePaneActivationFence(previousActivePaneId);
+  const previousTarget = capturePaneActivationFence(paneId);
+  const flushed = previousActive.tab ? await flushPanePendingEdits(previousActivePaneId, "tabSwitch") : null;
+  if (appStore.splitLayout.activePaneId !== previousActivePaneId
+    || !paneActivationFenceStillCurrent(previousActive, flushed)
+    || !paneActivationFenceStillCurrent(previousTarget)) {
+    appStore.statusMessage = "切换栏位期间文档或编辑器会话发生了变化，已保留当前输入。";
+    return false;
+  }
+  if (paneId === previousActivePaneId) {
+    syncActiveTabFromProjection();
+    return true;
+  }
   syncActiveTabFromProjection();
   const nextTabId = paneTabId(appStore.splitLayout, paneId) || appStore.activeTabId;
   const tab = appStore.tabs.find((item) => item.id === nextTabId) ?? getActiveTab();
@@ -2318,11 +3352,28 @@ export async function setActivePane(paneId: EditorPaneId) {
   if (tab) projectTab(tab);
   dispatchWritingModesChanged();
   await persistConfig();
+  return true;
 }
 
 export async function toggleSplitLayout() {
-  syncActiveTabFromProjection();
   if (appStore.splitLayout.enabled) {
+    const mainFence = capturePaneActivationFence("main");
+    const secondaryFence = capturePaneActivationFence("secondary");
+    const mainFlushed = mainFence.tab ? await flushPanePendingEdits("main", "tabSwitch") : null;
+    if (!paneActivationFenceStillCurrent(mainFence, mainFlushed)) {
+      appStore.statusMessage = "关闭分屏期间主栏文档或编辑器会话发生了变化，已保留当前输入。";
+      return false;
+    }
+    const secondaryFlushed = secondaryFence.tab ? await flushPanePendingEdits("secondary", "tabSwitch") : null;
+    // The first pane is checked again after the second await: a new input
+    // event can arrive while the other editor is flushing, and disabling the
+    // split must not unload that newer buffer.
+    if (appStore.splitLayout.enabled !== true
+      || !paneActivationFenceStillCurrent(mainFence, mainFlushed)
+      || !paneActivationFenceStillCurrent(secondaryFence, secondaryFlushed)) {
+      appStore.statusMessage = "关闭分屏期间文档或编辑器会话发生了变化，已保留当前输入。";
+      return false;
+    }
     appStore.splitLayout = disableSplitLayout(appStore.splitLayout);
   } else {
     appStore.splitLayout = enableSplitLayout(appStore.splitLayout, tabIds());
@@ -2504,12 +3555,22 @@ export async function switchMode(mode: EditorMode, paneId: EditorPaneId = appSto
   const tab = getPaneTab(paneId);
   if (!tab) return;
   if (tab.documentMode === "large") {
-    tab.editorMode = "wysiwyg";
-    if (paneId === appStore.splitLayout.activePaneId) appStore.editorMode = "wysiwyg";
+    tab.editorMode = "source";
+    if (paneId === appStore.splitLayout.activePaneId) appStore.editorMode = "source";
     return;
   }
   if (mode === tab.editorMode) return;
-  await flushDocumentSnapshot(tab.id, "modeSwitch");
+  const owner = toRaw(tab), originalMode = tab.editorMode;
+  const markdown = await flushDocumentSnapshot(tab.id, 'modeSwitch');
+  if (toRaw(getPaneTab(paneId)) !== owner || tab.editorMode !== originalMode || !appStore.tabs.some(candidate => toRaw(candidate) === owner)) return;
+  const originalSession = documentSessionForTab(tab.id);
+  const originalRevision = originalSession?.revision;
+  let sourceBookmark: { anchor: number; head: number } | null = null;
+  if (originalSession?.captureHistoryRoot && originalSession.captureHistoryBookmark) {
+    const { historySourceBookmark } = await import('../editor/historySource');
+    sourceBookmark = await historySourceBookmark({ root: originalSession.captureHistoryRoot(), bookmark: originalSession.captureHistoryBookmark() }, markdown);
+    if (toRaw(getPaneTab(paneId)) !== owner || documentSessionForTab(tab.id) !== originalSession || originalSession.revision !== originalRevision || originalSession.hasPendingEdits?.()) return;
+  }
   if (typeof window !== "undefined") {
     window.dispatchEvent(
       new CustomEvent("lightmark:capture-mode-cursor", {
@@ -2517,6 +3578,7 @@ export async function switchMode(mode: EditorMode, paneId: EditorPaneId = appSto
       }),
     );
   }
+  if (sourceBookmark) setPanePendingModeCursor(paneId, { targetMode: mode, markdownAnchor: sourceBookmark.anchor, markdownHead: sourceBookmark.head, reason: 'mode-switch' });
   tab.editorMode = mode;
   if (paneId === appStore.splitLayout.activePaneId || tab.id === appStore.activeTabId) {
     appStore.editorMode = mode;
@@ -2524,7 +3586,8 @@ export async function switchMode(mode: EditorMode, paneId: EditorPaneId = appSto
   }
   dispatchWritingModesChanged();
   await nextTick();
-  await waitForDocumentSession(tab.id, mode);
+  const nextSession = await waitForDocumentSession(tab.id, mode);
+  if (sourceBookmark && toRaw(getPaneTab(paneId)) === owner) await nextSession.restoreSourceBookmark?.(markdown, sourceBookmark);
 }
 
 function dispatchWritingModesChanged() {
@@ -2577,30 +3640,341 @@ export function toggleDistractionFreeMode(force?: boolean) {
   return enabled;
 }
 
-export async function readLargeFileChunk(startLine: number, lineCount: number) {
-  if (!appStore.largeFile) throw new Error("未打开大文件。");
-  const chunk = await invoke<FileChunk>("read_file_chunk", {
-    sessionId: appStore.largeFile.sessionId,
-    startLine,
-    lineCount,
-  });
-  appStore.largeFile.loadedRanges = mergeLoadedRanges(appStore.largeFile.loadedRanges, {
-    startLine: chunk.startLine,
-    endLine: chunk.endLine,
-  });
-  return chunk;
+class LargeOutboxBlockedError extends Error {
+  readonly code = "large-outbox-blocked" as const;
+
+  constructor() {
+    super("前一个大文件编辑尚未成功，已保留后续输入等待显式重试。");
+    this.name = "LargeOutboxBlockedError";
+  }
 }
 
-export async function applyLargeFileEdits(edits: TextEdit[]) {
-  if (!appStore.largeFile || edits.length === 0) return;
-  const state = await invoke<DirtyState>("apply_file_edits", {
-    sessionId: appStore.largeFile.sessionId,
-    edits,
-  });
-  appStore.largeFile.pendingEdits.push(...edits);
-  appStore.isDirty = state.isDirty;
-  appStore.statusMessage = `待保存编辑：${state.pendingEditCount}`;
-  syncActiveTabFromProjection();
+export async function readLargeFileChunk(
+  startLine: number,
+  lineCount: number,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  return largeQueueFor(captured.tab).enqueue(
+    "read",
+    captured,
+    () => currentLargeSessionIdentity(captured),
+    async (_captured, current) => {
+      const chunk = await invoke<FileChunk>("read_file_chunk", {
+        sessionId: current.sessionId,
+        startLine,
+        lineCount,
+        expectedRevision: current.revision,
+        coordinateSpace: LARGE_COORDINATE_SPACE,
+      });
+      if (chunk.sessionId !== current.sessionId || chunk.coordinateSpace !== LARGE_COORDINATE_SPACE) {
+        throw new LargeSessionStaleError("大文件读取返回了错误的会话或坐标空间。");
+      }
+      const largeFile = reactive(current.tab).largeFile;
+      if (!largeFile) throw new LargeSessionStaleError();
+      largeFile.revision = chunk.revision;
+      largeFile.coordinateSpace = chunk.coordinateSpace;
+      largeFile.loadedRanges = mergeLoadedRanges(largeFile.loadedRanges, {
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+      });
+      return chunk;
+    },
+  );
+}
+
+/** Bounded UTF-8 range reads share the edit/save session queue. */
+export async function readLargeFileRange(range: LargeRangeRequest, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  return largeQueueFor(captured.tab).enqueue("range-read", captured,
+    () => currentLargeSessionIdentity(captured),
+    async (_captured, current) => readLargeSourceRange(current, range));
+}
+
+const largeHistoryOutbox = new WeakMap<DocumentTab, { operationId: string; direction: "undo" | "redo"; revision: number }>();
+export async function moveLargeFileHistory(direction: "undo" | "redo", paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  let operation = largeHistoryOutbox.get(captured.tab);
+  if (operation && operation.direction !== direction) throw new Error("前一次撤销或重做尚未确认，请先重试相同操作。");
+  if (!operation) {
+    operation = { operationId: crypto.randomUUID(), direction, revision: captured.revision };
+    largeHistoryOutbox.set(captured.tab, operation);
+  }
+  const { operationId, revision } = operation;
+  return largeQueueFor(captured.tab).enqueue("history", captured,
+    () => currentLargeSessionIdentity(captured), async (_captured, current) => {
+      if (largeOutboxFor(current.tab).length) throw new LargeOutboxBlockedError();
+      const state = await invokeLargeSource<DirtyState & { operationId: string; totalLines?: number }>("move_large_history", {
+        sessionId: current.sessionId, expectedRevision: revision,
+        coordinateSpace: LARGE_COORDINATE_SPACE, direction, operationId,
+      });
+      if (state.operationId !== operationId || state.coordinateSpace !== LARGE_COORDINATE_SPACE
+        || state.revision < current.revision) throw new LargeSessionStaleError("大文件历史回执不匹配。");
+      setLargeBackendState(current.tab, state);
+      if (state.totalLines != null && current.tab.largeFile) current.tab.largeFile.totalLines = state.totalLines;
+      syncLargeOutboxProjection(current.tab);
+      largeHistoryOutbox.delete(captured.tab);
+      return state;
+    });
+}
+
+export async function exportLargeFileRange(range: LargeRangeRequest, path: string, paneId: EditorPaneId = appStore.splitLayout.activePaneId) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  return largeQueueFor(captured.tab).enqueue("range-export", captured,
+    () => currentLargeSessionIdentity(captured), async (_captured, current) => {
+      const receipt = await invokeLargeSource<{ sessionId: string; revision: number; path: string; byteLength: number }>("export_large_range", {
+        sessionId: current.sessionId, expectedRevision: current.revision, coordinateSpace: LARGE_COORDINATE_SPACE,
+        startLine: range.start.line, startColumn: range.start.column,
+        endLine: range.end?.line, endColumn: range.end?.column, path,
+      });
+      if (receipt.sessionId !== current.sessionId || receipt.revision !== current.revision || receipt.path !== path) {
+        throw new LargeSessionStaleError("选区导出回执不匹配。");
+      }
+      return receipt;
+    });
+}
+
+/** Capture a full large-file draft through the same per-tab queue as edits. */
+export async function captureLargeFileDraftSnapshot(
+  draftId: string,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  return largeQueueFor(captured.tab).enqueue(
+    "draft",
+    captured,
+    () => currentLargeSessionIdentity(captured),
+    async (_captured, current) => {
+      const receipt = await invoke<LargeDraftCaptureReceipt>("capture_large_file_draft", {
+        sessionId: current.sessionId,
+        draftId,
+        expectedRevision: current.revision,
+        coordinateSpace: LARGE_COORDINATE_SPACE,
+      });
+      if (receipt.sessionId !== current.sessionId
+        || receipt.requestedRevision !== current.revision
+        || receipt.currentRevision !== receipt.requestedRevision
+        || receipt.snapshot.coordinateSpace !== LARGE_COORDINATE_SPACE
+        || receipt.snapshot.draftId !== draftId) {
+        throw new LargeSessionStaleError("大文件草稿回执与当前会话版本不一致。");
+      }
+      return receipt;
+    },
+  );
+}
+
+export async function applyLargeFileEdits(
+  edits: TextEdit[],
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  if (edits.length === 0) return;
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  if (largeHistoryOutbox.has(captured.tab)) throw new Error("前一次历史操作尚未确认，请先重试相同撤销或重做。");
+  const batch: LargeOutboxBatch = {
+    id: `large-edit-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    edits: edits.map((edit) => ({ ...edit })),
+    expectedRevision: captured.revision,
+    sessionId: captured.sessionId,
+  };
+  const outbox = largeOutboxFor(captured.tab);
+  outbox.push(batch);
+  syncLargeOutboxProjection(captured.tab);
+  const queue = largeQueueFor(captured.tab);
+  try {
+    const state = await queue.enqueue(
+      "apply",
+      captured,
+      () => currentLargeSessionIdentity(captured),
+      async (_captured, current) => {
+        const index = outbox.indexOf(batch);
+        if (index < 0) throw new LargeSessionStaleError("大文件编辑已从待处理队列移除。");
+        if (outbox.slice(0, index).some((item) => item.failed)) throw new LargeOutboxBlockedError();
+        if (batch.sessionId !== current.sessionId || batch.expectedRevision !== current.revision) {
+          throw new LargeOutboxStaleError();
+        }
+        const nextState = await invokeLargeSource<DirtyState & { operationId: string }>("apply_file_operation", {
+          sessionId: current.sessionId,
+          edits: batch.edits,
+          expectedRevision: current.revision,
+          coordinateSpace: LARGE_COORDINATE_SPACE,
+          operationId: batch.id,
+        });
+        if (nextState.operationId !== batch.id || nextState.coordinateSpace !== LARGE_COORDINATE_SPACE
+          || nextState.revision < current.revision) {
+          throw new LargeSessionStaleError("大文件编辑回执缺少有效的会话版本，已保留输入。");
+        }
+        setLargeBackendState(current.tab, nextState);
+        outbox.splice(index, 1);
+        syncLargeOutboxProjection(current.tab);
+        return nextState;
+      },
+    );
+    appStore.statusMessage = `待保存编辑：${currentLargeSessionIdentity(captured)?.tab.largeFile?.pendingEditCount ?? 0}`;
+    return state;
+  } catch (error) {
+    if (!(error instanceof LargeOutboxBlockedError)) batch.failed = error;
+    syncLargeOutboxProjection(captured.tab);
+    if (captured.tab.id === appStore.activeTabId) {
+      appStore.isDirty = true;
+      appStore.saveState = "failed";
+      appStore.statusMessage = `大文件编辑未提交，输入已保留：${formatLargeTransactionEvidence(error)}`;
+    }
+    throw error;
+  }
+}
+
+export function formatLargeTransactionEvidence(value: unknown) {
+  if (value instanceof Error) return value.message;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const message = typeof record.message === "string" ? record.message : "大文件事务失败";
+    const details = [
+      typeof record.code === "string" ? `code=${record.code}` : "",
+      typeof record.outcome === "string" ? `outcome=${record.outcome}` : "",
+      typeof record.diskWritten === "string" ? `diskWritten=${record.diskWritten}` : "",
+      typeof record.recoveryArtifact === "string" ? `recoveryArtifact=${record.recoveryArtifact}` : "",
+      typeof record.cleanupWarning === "string" ? `cleanupWarning=${record.cleanupWarning}` : "",
+    ].filter(Boolean).join(", ");
+    return details ? `${message}（${details}）` : message;
+  }
+  return String(value);
+}
+
+function formatLargeSaveReceiptFailure(receipt: LargeSaveReceipt) {
+  const details = [
+    `outcome=${receipt.outcome}`,
+    `diskWritten=${receipt.diskWritten}`,
+    receipt.recoveryArtifact ? `recoveryArtifact=${receipt.recoveryArtifact}` : "",
+    receipt.cleanupWarning ? `cleanupWarning=${receipt.cleanupWarning}` : "",
+  ].filter(Boolean).join(", ");
+  return `大文件保存未确认：${details}`;
+}
+
+class LargeOutboxStaleError extends Error {
+  readonly code = "large-outbox-stale" as const;
+
+  constructor() {
+    super("大文件编辑坐标对应的版本已变化，已保留输入，请显式重试。");
+    this.name = "LargeOutboxStaleError";
+  }
+}
+
+/**
+ * Explicitly rebase one failed outbox batch to the caller's current view.
+ * The caller must provide fresh coordinates; the old batch is never replayed
+ * automatically after a revision change.
+ */
+export async function retryLargeFileEdits(
+  edits: TextEdit[],
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  if (edits.length === 0) return;
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  const outbox = largeOutboxFor(captured.tab);
+  const failed = outbox.find((item) => item.failed !== undefined);
+  if (!failed) throw new Error("没有可显式重试的大文件编辑。");
+  if (failed.sessionId !== captured.sessionId) throw new LargeSessionStaleError();
+  if (JSON.stringify(edits) !== JSON.stringify(failed.edits)) {
+    throw new LargeSessionStaleError('重试必须使用原 operationId 的相同输入；当前输入已保留。');
+  }
+  failed.failed = undefined;
+  syncLargeOutboxProjection(captured.tab);
+  try {
+    return await largeQueueFor(captured.tab).enqueue(
+      "retry-apply",
+      captured,
+      () => currentLargeSessionIdentity(captured),
+      async (_captured, current) => {
+        const index = outbox.indexOf(failed);
+        if (index < 0 || index !== outbox.findIndex((item) => item === failed)) throw new LargeSessionStaleError();
+        if (outbox.slice(0, index).some((item) => item.failed)) throw new LargeOutboxBlockedError();
+        if (failed.sessionId !== current.sessionId) {
+          throw new LargeOutboxStaleError();
+        }
+        const state = await invokeLargeSource<DirtyState & { operationId: string }>("apply_file_operation", {
+          sessionId: current.sessionId,
+          edits: failed.edits,
+          expectedRevision: failed.expectedRevision,
+          coordinateSpace: LARGE_COORDINATE_SPACE,
+          operationId: failed.id,
+        });
+        if (state.operationId !== failed.id || state.coordinateSpace !== LARGE_COORDINATE_SPACE
+          || state.revision < current.revision) {
+          throw new LargeSessionStaleError("大文件编辑回执缺少有效的会话版本，已保留输入。");
+        }
+        setLargeBackendState(current.tab, state);
+        outbox.splice(index, 1);
+        syncLargeOutboxProjection(current.tab);
+        return state;
+      },
+    );
+  } catch (error) {
+    failed.failed = error;
+    syncLargeOutboxProjection(captured.tab);
+    throw error;
+  }
+}
+
+export async function searchLargeFile(
+  query: string,
+  options: LargeFindOptions,
+  startLine = 0,
+  limit = 5000,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+  signal?: AbortSignal,
+) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  return largeQueueFor(captured.tab).enqueue(
+    "search",
+    captured,
+    () => currentLargeSessionIdentity(captured),
+    async (_captured, current) => {
+      throwIfLargeSearchAborted(signal);
+      if (largeOutboxFor(current.tab).some((item) => item.failed)) throw new LargeOutboxBlockedError();
+      const result = await runLargeSourceJob<LargeFindResult>(current, "search", {
+        query,
+        options,
+        startLine,
+        limit,
+      }, signal);
+      if (result.revision !== current.revision || result.coordinateSpace !== LARGE_COORDINATE_SPACE) {
+        throw new LargeSessionStaleError("大文件查找返回了错误的版本或坐标空间。");
+      }
+      return result;
+    },
+  );
+}
+
+export async function replaceLargeFileMatches(
+  query: string,
+  replacement: string,
+  options: LargeFindOptions,
+  currentMatch: LargeFindMatch | null,
+  paneId: EditorPaneId = appStore.splitLayout.activePaneId,
+) {
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured) throw new Error("未打开大文件。");
+  if (largeHistoryOutbox.has(captured.tab)) throw new Error("前一次历史操作尚未确认，请先重试相同撤销或重做。");
+  return largeQueueFor(captured.tab).enqueue(
+    "replace",
+    captured,
+    () => currentLargeSessionIdentity(captured),
+    async (_captured, current) => {
+      if (largeOutboxFor(current.tab).some((item) => item.failed)) throw new LargeOutboxBlockedError();
+      const state = await runLargeSourceJob<DirtyState>(current, "replace", { query, replacement, options, currentMatch });
+      setLargeBackendState(current.tab, state);
+      syncLargeOutboxProjection(current.tab);
+      return state;
+    },
+  );
 }
 
 async function closeTabInternal(
@@ -2614,21 +3988,51 @@ async function closeTabInternal(
     syncActiveTabFromProjection();
   }
   if (!isTabRegistered(target)) return false;
+  // Finish local editor presentation before the dialog moves focus. Otherwise
+  // a normal textarea blur can invalidate the authorization being confirmed.
+  const promptSession = documentSessionForTab(target.id);
+  let closePreparationError = '';
+  if (promptSession) await waitForDocumentComposition(target.id, promptSession);
+  if (promptSession?.finalizeClosePrompt) {
+    const promptIdentity = { id: target.id, path: target.path, session: promptSession };
+    try {
+      await waitForDocumentComposition(target.id, promptSession);
+      const before = promptSession.mutationToken?.();
+      const receipt = await promptSession.finalizeClosePrompt({ expectedToken: before });
+      const after = promptSession.mutationToken?.();
+      if (!isTabRegistered(target) || target.id !== promptIdentity.id || target.path !== promptIdentity.path
+        || documentSessionForTab(target.id) !== promptSession
+        || receipt && (receipt.sessionIdentity !== promptSession
+          || before && !documentMutationTokensEqual(before, receipt.before)
+          || after && !documentMutationTokensEqual(after, receipt.after))) {
+        appStore.statusMessage = "关闭提示准备期间文档身份发生了变化，未关闭。";
+        return false;
+      }
+    } catch (error) {
+      if (!isTabRegistered(target) || target.id !== promptIdentity.id || target.path !== promptIdentity.path
+        || documentSessionForTab(target.id) !== promptSession) return false;
+      closePreparationError = error instanceof Error ? error.message : String(error);
+      appStore.statusMessage = closePreparationError;
+    }
+  }
   const authorization = captureCloseAuthorization(target);
   const draftAtPrompt = captureDraftCleanupContext(target);
   let finalAuthorization: CloseAuthorization | null = null;
-  if (tabHasUnsavedWork(target)) {
+  let closeDisposition: "saved" | "discard" = "discard";
+  if (tabHasUnsavedWork(target) || closePreparationError) {
     const action = await requestSaveDiscardCancel({
       title: "关闭未保存的标签页？",
       message: `“${target.name}”有未保存的修改。`,
       saveLabel: "保存并关闭",
       discardLabel: "不保存",
+      details: closePreparationError ? [closePreparationError, '选择“不保存”将丢弃此标签页的未确认输入。'] : undefined,
     });
     if (action === "cancel") return false;
     if (action === "save") {
       try {
         const saved = await saveTabForClose(target);
         if (!saved) return false;
+        closeDisposition = "saved";
         const savedAuthorization = captureCloseAuthorization(target);
         if (savedAuthorization.dirty || savedAuthorization.pending) {
           appStore.statusMessage = "保存后文档仍有未保存修改，未关闭。";
@@ -2642,7 +4046,7 @@ async function closeTabInternal(
         }
         finalAuthorization = savedAuthorization;
       } catch (error) {
-        appStore.statusMessage = String(error);
+        appStore.statusMessage = formatLargeTransactionEvidence(error);
         await showSaveFailure(error);
         return false;
       }
@@ -2665,29 +4069,39 @@ async function closeTabInternal(
     appStore.statusMessage = "关闭期间文档发生了变化，未关闭。";
     return false;
   }
-  if (target.path && target.documentMode === "normal" && appStore.workspaceIndexReady) {
-    await workspaceIndexClient.releaseOpenDocument(target.path).catch((error) => {
-      appStore.wikiIndexError = `释放工作区文档索引失败：${error}`;
-    });
-  }
+  const closingIndexLease = target.path && target.documentMode === 'normal' && appStore.workspaceIndexReady
+    ? { path: target.path, epoch: documentRuntimeIdentity(target.id).epoch, revision: documentSessionForTab(target.id)?.revision ?? documentRuntimeMetadata.get(target.id)?.revision ?? 0 }
+    : null;
   if (!isCloseAuthorizationCurrent(finalAuthorization)) {
     appStore.statusMessage = "关闭期间文档发生了变化，未关闭。";
     return false;
   }
-  if (target.documentMode === "large") await closeLargeFileSessionForTab(target);
-  if (!isCloseAuthorizationCurrent(finalAuthorization)) {
+  let largeSessionClosed = false;
+  if (target.documentMode === "large") {
+    if (!await closeLargeFileSessionForTab(target, closeDisposition)) return false;
+    // closeLargeFileSessionForTab has already performed the final pane/session
+    // fence and clears the native session projection on success.  The close
+    // authorization's largeFile identity therefore cannot be rechecked after
+    // that deliberate cleanup; the tab object is removed synchronously below.
+    largeSessionClosed = true;
+  } else if (!isCloseAuthorizationCurrent(finalAuthorization)) {
     appStore.statusMessage = "关闭期间文档发生了变化，未关闭。";
     return false;
   }
   const closingTabId = target.id;
   const index = appStore.tabs.findIndex((item) => toRaw(item) === target);
-  if (index < 0 || !isCloseAuthorizationCurrent(finalAuthorization)) return false;
+  if (index < 0 || (!largeSessionClosed && !isCloseAuthorizationCurrent(finalAuthorization))) return false;
   rememberClosedTab(target);
   appStore.tabs.splice(index, 1);
   documentSnapshotCoordinator.cancel(closingTabId);
   documentRuntimeMetadata.delete(closingTabId);
   delete appStore.runtimeDerivedByTab[closingTabId];
   clearDocumentRuntimeState(closingTabId);
+  if (closingIndexLease) {
+    void workspaceIndexClient.releaseOpenDocument(closingIndexLease.path, closingIndexLease.epoch, closingIndexLease.revision).catch(error => {
+      appStore.wikiIndexError = `释放工作区文档索引失败：${error}`;
+    });
+  }
   appStore.splitLayout = resolveClosedTabSplitLayout(appStore.splitLayout, closingTabId, tabIds());
 
   if (appStore.tabs.length === 0) {
@@ -2848,13 +4262,14 @@ export function defaultSettings(): AppSettings {
     },
     appearance: {
       theme: "system",
-      editorWidth: 860,
-      fontFamily: `"Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`,
-      fontSize: 16,
-      lineHeight: 1.6,
+      editorWidth: 720,
+      fontFamily: `"Microsoft YaHei", "PingFang SC", system-ui, sans-serif`,
+      fontSize: 17,
+      lineHeight: 1.75,
       paragraphSpacing: 0.8,
       codeFontFamily: `"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace`,
       showSidebar: true,
+      sidebarPreference: "auto",
       showOutline: true,
     },
     export: {
@@ -2948,6 +4363,9 @@ function normalizeSettings(config: AppConfig) {
       ...defaults.appearance,
       ...source.appearance,
       theme: normalizeThemeValue(migratedTheme) ?? defaults.appearance.theme,
+      sidebarPreference: source.appearance?.sidebarPreference === "auto" || source.appearance?.sidebarPreference === "shown" || source.appearance?.sidebarPreference === "hidden"
+        ? source.appearance.sidebarPreference
+        : typeof source.appearance?.showSidebar === "boolean" ? (source.appearance.showSidebar ? "shown" : "hidden") : "auto",
       editorWidth: clampNumber(source.appearance?.editorWidth, 560, 1200, defaults.appearance.editorWidth),
       fontSize: clampNumber(source.appearance?.fontSize, 12, 24, defaults.appearance.fontSize),
       lineHeight: clampNumber(source.appearance?.lineHeight, 1.2, 2.4, defaults.appearance.lineHeight),
@@ -3020,7 +4438,7 @@ async function restoreSession(session: SessionRestoreState | undefined) {
             kind: "large",
             content: "",
             documentMode: "large",
-            editorMode: "wysiwyg",
+            editorMode: "source",
             largeFile: {
               sessionId: largeSession.sessionId,
               sizeBytes: largeSession.sizeBytes,
@@ -3028,6 +4446,15 @@ async function restoreSession(session: SessionRestoreState | undefined) {
               loadedRanges: [],
               pendingEdits: [],
               outline: largeSession.outline,
+              revision: largeSession.revision,
+              savedRevision: largeSession.savedRevision,
+              pendingEditCount: largeSession.pendingEditCount,
+              baseFingerprint: largeSession.baseFingerprint,
+              diskFingerprint: largeSession.diskFingerprint,
+              coordinateSpace: largeSession.coordinateSpace,
+              targetPath: largeSession.targetPath !== undefined ? largeSession.targetPath : largeSession.path,
+              originPath: largeSession.originPath ?? largeSession.path,
+              recoveryDraftId: largeSession.recoveryDraftId,
             },
             isDirty: false,
             lastActiveAt: item.lastActiveAt,
@@ -3037,8 +4464,9 @@ async function restoreSession(session: SessionRestoreState | undefined) {
           }),
         );
       } else {
-        const content = await invoke<string>("read_text_file", { path: item.path });
-        const fileSnapshot = await getFileSnapshot(item.path);
+        const snapshot = await readTextFileSnapshot(item.path);
+        const content = snapshot.content;
+        const fileSnapshot = fileSnapshotFromTextSnapshot(snapshot);
         restored.push(
           createTab({
             path: item.path,
@@ -3061,6 +4489,9 @@ async function restoreSession(session: SessionRestoreState | undefined) {
     }
   }
   if (restored.length === 0) return;
+  for (const tab of restored) {
+    if (tab.documentMode === "large") initializeLargeSession(tab);
+  }
   appStore.tabs = restored;
   appStore.splitLayout = restoreSplitLayout(session.splitLayout, restored);
   const active =
@@ -3212,7 +4643,7 @@ function projectTab(tab: DocumentTab) {
   appStore.largeFile = tab.largeFile;
   appStore.isDirty = tab.isDirty;
   appStore.saveState = tab.isDirty ? "dirty" : "saved";
-  appStore.editorMode = tab.documentMode === "large" ? "wysiwyg" : tab.editorMode;
+  appStore.editorMode = tab.documentMode === "large" ? "source" : tab.editorMode;
   appStore.pendingModeCursor = tab.pendingModeCursor;
   requestEditorPositionRestore(tab.position);
   appStore.statusMessage =
@@ -3252,6 +4683,28 @@ function retargetActiveTab(path: string) {
   clearTabExternalState(tab);
   appStore.activeTabId = tab.id;
   appStore.splitLayout = splitLayoutForPaneActivation(appStore.splitLayout, appStore.splitLayout.activePaneId, tab.id, tabIds());
+}
+
+function retargetLargeTabForSaveAs(tab: DocumentTab, path: string) {
+  tab = reactive(tab);
+  const previousTabId = tab.id;
+  if (tab.path === path && tab.largeFile) {
+    tab.largeFile.targetPath = path;
+    return;
+  }
+  advanceMutationEpoch(tab);
+  tab.id = tabIdForPath(path);
+  rebindDocumentRuntime(previousTabId, tab.id);
+  tab.path = path;
+  tab.name = fileNameFromPath(path);
+  tab.kind = "large";
+  if (tab.largeFile) tab.largeFile.targetPath = path;
+  clearTabExternalState(tab);
+  appStore.splitLayout = replaceTabIdInSplitLayout(appStore.splitLayout, previousTabId, tab.id, tabIds());
+  if (appStore.activeTabId === previousTabId) {
+    appStore.activeTabId = tab.id;
+    appStore.currentFilePath = path;
+  }
 }
 
 function getActiveTab() {
@@ -3563,26 +5016,66 @@ async function requestSaveDiscardCancel(options: {
 export async function showSaveFailure(error: unknown) {
   await alertDialog({
     title: "保存失败",
-    message: error instanceof Error ? error.message : String(error),
+    message: formatLargeTransactionEvidence(error),
     tone: "danger",
   });
 }
 
-async function closeLargeFileSession() {
-  if (!appStore.largeFile) return;
-  const sessionId = appStore.largeFile.sessionId;
-  appStore.largeFile = null;
-  await invoke("close_large_file", { sessionId }).catch(() => {});
-}
-
-async function closeLargeFileSessionForTab(tab: DocumentTab) {
-  const largeFile = tab.largeFile;
-  if (!largeFile) return;
-  if (toRaw(appStore.largeFile) === toRaw(largeFile)) {
-    await closeLargeFileSession();
-    return;
+async function closeLargeFileSessionForTab(tab: DocumentTab, disposition: "saved" | "discard") {
+  const rawTab = toRaw(tab) as DocumentTab;
+  if (!rawTab.largeFile || rawTab.documentMode !== "large") return true;
+  const paneId = largePaneForTab(rawTab);
+  const captured = captureLargeSessionIdentity(paneId);
+  if (!captured || captured.tab !== rawTab) return false;
+  const currentView = largeViewIdentityStillCurrent(captured);
+  if (!currentView?.tab.largeFile) {
+    appStore.statusMessage = "大文件会话已变化，未关闭。";
+    return false;
   }
-  await invoke("close_large_file", { sessionId: largeFile.sessionId }).catch(() => {});
+  let receipt: LargeCloseReceipt;
+  try {
+    receipt = await largeQueueFor(rawTab).enqueue(
+      "close",
+      captured,
+      () => largeViewIdentityStillCurrent(captured),
+      async (_captured, current) => await invoke<LargeCloseReceipt>("close_large_file", {
+        sessionId: current.sessionId,
+        expectedRevision: current.revision,
+        coordinateSpace: LARGE_COORDINATE_SPACE,
+        disposition,
+      }),
+      (_captured, current) => Boolean(
+        current
+          && current.paneId === captured.paneId
+          && current.editorIdentity === captured.editorIdentity
+          && current.revision === captured.revision,
+      ),
+    );
+  } catch (error) {
+    appStore.statusMessage = `大文件关闭失败：${formatLargeTransactionEvidence(error)}`;
+    return false;
+  }
+  if (receipt.sessionId !== captured.sessionId || !receipt.closed) {
+    appStore.statusMessage = "大文件关闭回执无效，未关闭。";
+    return false;
+  }
+  if (receipt.cleanupWarning || receipt.recoveryArtifact) {
+    appStore.statusMessage = formatTransactionNotice(
+      "大文件会话已关闭，但快照清理需处理",
+      receipt.cleanupWarning,
+      receipt.recoveryArtifact,
+    );
+  }
+  if (!isTabRegistered(rawTab) || documentSessionForTab(rawTab.id) !== captured.editorIdentity) {
+    appStore.statusMessage = "大文件关闭期间标签页或会话发生了变化。";
+    return false;
+  }
+  largeOutboxes.delete(rawTab);
+  largeRemotePendingCounts.delete(rawTab);
+  largeQueues.delete(rawTab);
+  rawTab.largeFile = null;
+  if (rawTab.id === appStore.activeTabId) appStore.largeFile = null;
+  return true;
 }
 
 function resetOpenDocument() {

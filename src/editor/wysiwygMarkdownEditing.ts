@@ -16,6 +16,27 @@ export interface ExposedMarkdownRange {
   headingInvalid?: boolean;
 }
 
+/** Remove presentation-only syntax from an immutable history root, without dispatch. */
+export function canonicalMarkdownHistoryState(state: EditorState, exposed: ExposedMarkdownRange | null | undefined) {
+  let tr = state.tr;
+  if (exposed?.kind === 'heading') {
+    const node = state.doc.nodeAt(exposed.blockFrom);
+    const prefix = node?.firstChild?.isText ? /^(#{1,6})([ \t]+)/.exec(node.firstChild.text || '') : null;
+    if (node && prefix && state.schema.nodes.heading) {
+      tr = tr.delete(exposed.blockFrom + 1, exposed.blockFrom + 1 + prefix[0].length)
+        .setNodeMarkup(exposed.blockFrom, state.schema.nodes.heading, { ...node.attrs, level: prefix[1].length });
+    }
+  } else if (exposed?.kind === 'inline') {
+    const closeFrom = exposed.to - exposed.close.length;
+    if (state.doc.textBetween(exposed.from, exposed.from + exposed.open.length) === exposed.open
+      && state.doc.textBetween(closeFrom, exposed.to) === exposed.close) {
+      if (exposed.close.length) tr = tr.delete(closeFrom, exposed.to);
+      if (exposed.open.length) tr = tr.delete(exposed.from, exposed.from + exposed.open.length);
+    }
+  }
+  return { doc: tr.doc, bookmark: { anchor: tr.selection.anchor, head: tr.selection.head }, mapping: tr.mapping };
+}
+
 function presentationTransaction(tr: Transaction) {
   return tr.setMeta(markdownPresentationMeta, true).setMeta("addToHistory", false);
 }
@@ -124,7 +145,8 @@ export function reconcileExposedHeading(state: EditorState, exposed: ExposedMark
   if (exposed.kind !== "heading") return null;
   const node = state.doc.nodeAt(exposed.blockFrom);
   if (!node?.isTextblock) return null;
-  const match = node.textContent.match(/^(#{1,6})(\s+)(.+)$/);
+  const prefixText = node.firstChild?.isText ? node.firstChild.text! : "";
+  const match = prefixText.match(/^(#{1,6})([ \t]+)/);
 
   if (node.type.name === "heading" && !match) {
     const paragraph = state.schema.nodes.paragraph;
@@ -149,7 +171,7 @@ export function reconcileExposedHeading(state: EditorState, exposed: ExposedMark
   const markerLength = match[1].length + match[2].length;
   const oldCaret = state.selection.from;
   const textOffset = Math.max(0, oldCaret - (exposed.blockFrom + 1) - markerLength);
-  const headingNode = heading.create({ level: match[1].length }, state.schema.text(match[3]), node.marks);
+  const headingNode = heading.create({ ...node.attrs, level: match[1].length }, node.content.cut(markerLength), node.marks);
   let tr = state.tr.replaceWith(exposed.blockFrom, exposed.blockFrom + node.nodeSize, headingNode);
   const caret = Math.max(0, Math.min(exposed.blockFrom + 1 + textOffset, tr.doc.content.size));
   tr = tr

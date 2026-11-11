@@ -10,10 +10,19 @@
  */
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  AddMarkStep,
+  AddNodeMarkStep,
+  RemoveMarkStep,
+  RemoveNodeMarkStep,
+  ReplaceAroundStep,
+  ReplaceStep,
+} from "@tiptap/pm/transform";
 import type { Transaction } from "@tiptap/pm/state";
 import {
   applySourcePiecePatchBatch,
   createSourcePieceState,
+  getSourcePieceBlockSlice,
   materializeSourcePiece,
   materializeSourcePieceCheckpoint,
   type SourcePieceBlockInput,
@@ -32,7 +41,8 @@ export type SourcePieceAdapterFailureCode =
   | SourceProvenanceFailureCode
   | "transaction-before-mismatch"
   | "piece-state-conflict"
-  | "checkpoint-validation-failed";
+  | "checkpoint-validation-failed"
+  | "unsupported-step";
 
 export type SourcePieceAdapterFailureDetails = {
   blockIndex?: number;
@@ -76,6 +86,7 @@ export type SourcePieceAdapterLeaf = {
   readonly pmFrom: number;
   readonly pmTo: number;
   readonly pmRevision: number;
+  /** Baseline leaf text; public leaf getters read current text from the piece root. */
   readonly text: string;
   readonly rawText: string;
   readonly marks: readonly string[];
@@ -100,6 +111,7 @@ export type SourcePieceAdapterBlock = {
   readonly contentTo: number;
   readonly separatorFrom: number;
   readonly separatorTo: number;
+  /** Persistent baseline leaf metadata; current lengths come from leafDeltaRoot. */
   readonly leafRoot: LeafRecordTree | null;
   readonly leafCount: number;
   /** Length deltas at local leaf-order boundaries for the current piece. */
@@ -177,6 +189,7 @@ export function createSourcePieceAdapter(
     source,
     blockValues: blocks.map((block) => makeBlockMetadata(block, baseline, source.revision)),
     leafDeltaRoot: null,
+    structure: baseline.structure,
     validation: {
       status: "validated",
       validatedRevision: source.revision,
@@ -204,78 +217,17 @@ export function applySourcePieceAdapterTransaction(
   }
   if (!transaction.docChanged) return state;
 
-  const affectedIndices = collectAffectedLeafIndices(state, transaction);
-  if (affectedIndices.size === 0) {
+  const stepChanges = collectStepChanges(state, transaction);
+  if (stepChanges.length === 0) {
     throw new SourcePieceAdapterError(
       "unsupported-inline",
       "The document changed without a captured source text leaf covering the change.",
     );
   }
 
-  const changed = new Map<number, ChangedLeaf>();
-  for (const leafIndex of affectedIndices) {
-    const leaf = getLeaf(state, leafIndex);
-    if (!leaf) {
-      throw new SourcePieceAdapterError("source-leaf-not-found", `Missing current source leaf ${leafIndex}.`, { leafIndex });
-    }
-    const oldRange = getCurrentLeafRange(state, leafIndex);
-    const fromResult = transaction.mapping.mapResult(oldRange.from, -1);
-    const toResult = transaction.mapping.mapResult(oldRange.to, 1);
-    if (fromResult.deletedAcross || toResult.deletedAcross) {
-      throw new SourcePieceAdapterError(
-        "deleted-source-span",
-        `Transaction deleted source leaf ${leafIndex}.`,
-        { leafIndex, pmFrom: oldRange.from, pmTo: oldRange.to },
-      );
-    }
-    const pmFrom = fromResult.pos;
-    const pmTo = Math.max(pmFrom, toResult.pos);
-    const text = transaction.doc.textBetween(pmFrom, pmTo, "\n", "\uFFFC");
-    if (text.includes("\n") || text.includes("\uFFFC")) {
-      throw new SourcePieceAdapterError(
-        "structure-changed",
-        `Transaction range for source leaf ${leafIndex} crosses a block boundary.`,
-        { leafIndex, pmFrom, pmTo },
-      );
-    }
-    assertLocalStructureUnchanged(state.doc, transaction.doc, oldRange, { from: pmFrom, to: pmTo }, leafIndex);
-    const marks = collectMarks(transaction.doc, pmFrom, pmTo);
-    if (!sameMarks(leaf.marks, marks)) {
-      throw new SourcePieceAdapterError(
-        "marks-changed",
-        `Transaction changed marks for source leaf ${leafIndex}.`,
-        { leafIndex, pmFrom, pmTo, expected: leaf.marks.join("|"), actual: marks.join("|") },
-      );
-    }
-    if (text === leaf.text) continue;
-    const expected = `${leaf.leadingPadding}${leaf.text}${leaf.trailingPadding}`;
-    const insert = `${leaf.leadingPadding}${text}${leaf.trailingPadding}`;
-    changed.set(leafIndex, {
-      leaf,
-      pmFrom,
-      pmTo,
-      text,
-      marks,
-      expected,
-      insert,
-    });
-  }
-
-  if (changed.size === 0) {
-    throw new SourcePieceAdapterError(
-      "unsupported-inline",
-      "The transaction touched a captured range but produced no supported text patch.",
-    );
-  }
-
+  const changed = buildChangedLeafPatches(state, transaction, stepChanges);
   const patches = [...changed.values()]
-    .map(({ leaf, expected, insert }) => ({
-      blockId: blockIdForIndex(leaf.blockIndex),
-      pieceFrom: leaf.spanFrom,
-      pieceTo: leaf.spanFrom + expected.length,
-      expected,
-      insert,
-    } satisfies SourcePiecePatch))
+    .flatMap(({ patches: leafPatches }) => leafPatches)
     .sort((left, right) => left.blockId.localeCompare(right.blockId) || left.pieceFrom - right.pieceFrom);
 
   let nextSource: SourcePieceState;
@@ -297,7 +249,7 @@ export function applySourcePieceAdapterTransaction(
   const nextRevision = nextSource.revision;
   let leafDeltaRoot = state.leafDeltaRoot;
   for (const entry of changed.values()) {
-    const delta = entry.insert.length - entry.expected.length;
+    const delta = entry.patches.reduce((sum, patch) => sum + patch.insert.length - patch.expected.length, 0);
     if (delta !== 0) leafDeltaRoot = addLeafDelta(leafDeltaRoot, entry.leaf.index + 1, delta, 0, state.leafLocators.length + 1);
   }
   const nextValues = {
@@ -349,6 +301,7 @@ export function checkpointSourcePieceAdapter(state: SourcePieceAdapterState): So
     source: materialization.state,
     blockValues,
     leafDeltaRoot: null,
+    structure: baseline.structure,
     validation: {
       status: "validated",
       validatedRevision: materialization.state.revision,
@@ -378,12 +331,13 @@ export function getSourcePieceAdapterBlock(state: SourcePieceAdapterState, index
   return getBlock(state.blockRoot, index, 0, state.blockCount);
 }
 
+/** Explicit inspection helper; current text is materialized only for this leaf. */
 export function getSourcePieceAdapterLeaf(state: SourcePieceAdapterState, leafIndex: number): SourcePieceAdapterLeaf | undefined {
   const locator = state.leafLocators[leafIndex];
   if (!locator) return undefined;
   const block = getSourcePieceAdapterBlock(state, locator.blockIndex);
   const leaf = block ? getLeafRecord(block.leafRoot, locator.localIndex, 0, block.leafCount) : undefined;
-  return leaf && block ? materializeCurrentLeaf(block, leaf, locator.localIndex) : undefined;
+  return leaf && block ? materializePublicLeaf(state, block, leaf, locator.localIndex) : undefined;
 }
 
 /** Explicit inspection helper; not used by the transaction hot path. */
@@ -393,7 +347,7 @@ export function getSourcePieceAdapterBlockLeaves(state: SourcePieceAdapterState,
   const leaves: SourcePieceAdapterLeaf[] = [];
   for (let localIndex = 0; localIndex < block.leafCount; localIndex += 1) {
     const leaf = getLeafRecord(block.leafRoot, localIndex, 0, block.leafCount);
-    if (leaf) leaves.push(materializeCurrentLeaf(block, leaf, localIndex));
+    if (leaf) leaves.push(materializePublicLeaf(state, block, leaf, localIndex));
   }
   return Object.freeze(leaves);
 }
@@ -408,12 +362,20 @@ export function getSourcePieceAdapterLeafRange(
 
 type ChangedLeaf = {
   readonly leaf: SourcePieceAdapterLeaf;
-  readonly pmFrom: number;
-  readonly pmTo: number;
-  readonly text: string;
-  readonly marks: readonly string[];
-  readonly expected: string;
-  readonly insert: string;
+  readonly patches: readonly SourcePiecePatch[];
+};
+
+type StepChange = {
+  readonly leafIndex: number;
+  /** Range in the adapter's current PM document, before this transaction. */
+  readonly beforeFrom: number;
+  readonly beforeTo: number;
+};
+
+type LocalChange = {
+  readonly leaf: SourcePieceAdapterLeaf;
+  readonly beforeFrom: number;
+  readonly beforeTo: number;
 };
 
 type BlockInputWithRange = SourcePieceBlockInput & {
@@ -434,6 +396,8 @@ function makeAdapterState(input: {
   readonly source: SourcePieceState;
   readonly blockValues: readonly SourcePieceAdapterBlock[];
   readonly leafDeltaRoot: LeafDeltaTree | null;
+  readonly structure: string;
+  readonly leafLocators?: readonly LeafLocator[];
   readonly validation: SourcePieceAdapterValidation;
 }): SourcePieceAdapterState {
   if (input.blockValues.length !== input.baseline.blocks.length) {
@@ -442,31 +406,39 @@ function makeAdapterState(input: {
       "Adapter block metadata does not match the parser baseline.",
     );
   }
-  const leafLocators: LeafLocator[] = [];
-  const localIndexes = new Map<number, number>();
-  for (const block of input.blockValues) {
-    // Baseline leaves are already ordered by parser/PM traversal; assign a
-    // stable local index without materializing every block's leaf tree.
-    localIndexes.set(block.index, 0);
-  }
-  for (const leaf of input.baseline.leaves) {
-    const localIndex = localIndexes.get(leaf.blockIndex) ?? 0;
-    leafLocators[leaf.index] = { blockIndex: leaf.blockIndex, localIndex };
-    localIndexes.set(leaf.blockIndex, localIndex + 1);
-  }
+  const leafLocators = input.leafLocators ?? buildLeafLocators(input.baseline, input.blockValues);
   const blockRoot = buildBlockTree(input.blockValues, 0, input.blockValues.length);
   return Object.freeze({
     documentId: input.documentId,
     doc: input.doc,
-    structure: documentStructure(input.doc),
+    structure: input.structure,
     baseline: input.baseline,
     blockRoot,
     blockCount: input.blockValues.length,
-    leafLocators: Object.freeze(leafLocators),
+    leafLocators: input.leafLocators ?? Object.freeze(leafLocators),
     source: input.source,
     leafDeltaRoot: input.leafDeltaRoot,
     validation: Object.freeze({ ...input.validation }),
   });
+}
+
+function buildLeafLocators(
+  baseline: SourceLeafBaseline,
+  blockValues: readonly SourcePieceAdapterBlock[],
+): readonly LeafLocator[] {
+  const leafLocators: LeafLocator[] = [];
+  const localIndexes = new Map<number, number>();
+  for (const block of blockValues) {
+    // Baseline leaves are already ordered by parser/PM traversal; assign a
+    // stable local index without materializing every block's leaf tree.
+    localIndexes.set(block.index, 0);
+  }
+  for (const leaf of baseline.leaves) {
+    const localIndex = localIndexes.get(leaf.blockIndex) ?? 0;
+    leafLocators[leaf.index] = { blockIndex: leaf.blockIndex, localIndex };
+    localIndexes.set(leaf.blockIndex, localIndex + 1);
+  }
+  return leafLocators;
 }
 
 function buildBlocks(baseline: SourceLeafBaseline): BlockInputWithRange[] {
@@ -569,70 +541,239 @@ function updateChangedBlocks(state: SourcePieceAdapterState, changed: ReadonlyMa
   for (const [blockIndex, entries] of grouped) {
     const block = getBlock(nextRoot, blockIndex, 0, state.blockCount);
     if (!block) throw new SourcePieceAdapterError("piece-state-conflict", `Missing metadata block ${blockIndex}.`);
-    let leafRoot = block.leafRoot;
     let leafDeltaRoot = block.leafDeltaRoot;
     for (const entry of entries) {
       const locator = state.leafLocators[entry.leaf.index];
       if (!locator || locator.blockIndex !== blockIndex) {
         throw new SourcePieceAdapterError("piece-state-conflict", `Missing local leaf locator ${entry.leaf.index}.`);
       }
-      const baseLeaf = getLeafRecord(leafRoot, locator.localIndex, 0, block.leafCount);
+      const baseLeaf = getLeafRecord(block.leafRoot, locator.localIndex, 0, block.leafCount);
       if (!baseLeaf) throw new SourcePieceAdapterError("piece-state-conflict", `Missing leaf ${entry.leaf.index}.`);
-      const delta = entry.insert.length - entry.expected.length;
+      const delta = entry.patches.reduce((sum, patch) => sum + patch.insert.length - patch.expected.length, 0);
       if (delta !== 0) leafDeltaRoot = addLeafDelta(leafDeltaRoot, locator.localIndex + 1, delta, 0, block.leafCount + 1);
-      // Keep baseline piece spans and PM coordinates immutable. Current
-      // offsets are derived from the block-local delta tree on lookup.
-      leafRoot = setLeafRecord(leafRoot, locator.localIndex, 0, block.leafCount, Object.freeze({
-        ...baseLeaf,
-        text: entry.text,
-        pieceTo: baseLeaf.pieceFrom + entry.text.length,
-        spanTo: baseLeaf.spanFrom + baseLeaf.rawText.length,
-      }));
     }
-    const nextBlock = Object.freeze({ ...block, leafRoot, leafDeltaRoot });
-    nextRoot = setBlock(nextRoot, blockIndex, 0, state.blockCount, nextBlock);
+    if (leafDeltaRoot !== block.leafDeltaRoot) {
+      // Leaf source text remains in the persistent source-piece rope.  The
+      // baseline leaf records are reused, so a long leaf is never rebuilt on
+      // every input; current text/length is derived from the local delta tree.
+      const nextBlock = Object.freeze({ ...block, leafDeltaRoot });
+      nextRoot = setBlock(nextRoot, blockIndex, 0, state.blockCount, nextBlock);
+    }
   }
   return nextRoot;
 }
 
-function collectAffectedLeafIndices(state: SourcePieceAdapterState, transaction: Transaction) {
-  const affected = new Set<number>();
+function collectStepChanges(state: SourcePieceAdapterState, transaction: Transaction): readonly StepChange[] {
+  const changes: StepChange[] = [];
   transaction.steps.forEach((step, stepIndex) => {
-    let mappedRange = false;
-    step.getMap().forEach((oldFrom, oldTo) => {
-      mappedRange = true;
-      const beforeFrom = mapStepPositionToTransactionBefore(transaction, stepIndex, oldFrom, -1);
-      const beforeTo = mapStepPositionToTransactionBefore(transaction, stepIndex, oldTo, 1);
-      const leafIndex = findCurrentLeafCoveringRange(state, beforeFrom, beforeTo);
-      if (leafIndex == null) {
+    if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) {
+      const markedStep = step as AddMarkStep | RemoveMarkStep;
+      const beforeFrom = mapStepPositionToTransactionBefore(transaction, stepIndex, markedStep.from, -1);
+      const beforeTo = mapStepPositionToTransactionBefore(transaction, stepIndex, markedStep.to, 1);
+      throw new SourcePieceAdapterError(
+        "marks-changed",
+        "The transaction changed marks outside the text-only source adapter slice.",
+        { pmFrom: beforeFrom, pmTo: beforeTo },
+      );
+    }
+    if (step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) {
+      const markedStep = step as AddNodeMarkStep | RemoveNodeMarkStep;
+      const beforePosition = mapStepPositionToTransactionBefore(transaction, stepIndex, markedStep.pos, -1);
+      throw new SourcePieceAdapterError(
+        "marks-changed",
+        "The transaction changed a node mark outside the text-only source adapter slice.",
+        { pmFrom: beforePosition, pmTo: beforePosition + 1 },
+      );
+    }
+    if (step instanceof ReplaceAroundStep) {
+      throw new SourcePieceAdapterError(
+        "structure-changed",
+        "Replace-around steps require a structure-aware source adapter.",
+      );
+    }
+    if (!(step instanceof ReplaceStep)) {
+      throw new SourcePieceAdapterError(
+        "unsupported-step",
+        `The source adapter does not have a proof for ${step.constructor.name || "an unknown"} document step.`,
+      );
+    }
+    const replaceStructure = (step as unknown as { readonly structure?: boolean }).structure === true;
+    if (replaceStructure || step.slice.openStart !== 0 || step.slice.openEnd !== 0) {
+      throw new SourcePieceAdapterError(
+        "structure-changed",
+        "A structural or open-slice replace step requires a structure-aware source adapter.",
+      );
+    }
+    const ranges: Array<{ oldFrom: number; oldTo: number }> = [];
+    step.getMap().forEach((oldFrom, oldTo) => ranges.push({ oldFrom, oldTo }));
+    if (ranges.length !== 1) {
+      throw new SourcePieceAdapterError(
+        "unsupported-step",
+        "A replace step with multiple mapped ranges is outside the text-only source adapter slice.",
+      );
+    }
+    const { oldFrom, oldTo } = ranges[0];
+    const beforeFrom = mapStepPositionToTransactionBefore(transaction, stepIndex, oldFrom, -1);
+    const beforeTo = mapStepPositionToTransactionBefore(transaction, stepIndex, oldTo, 1);
+    if (beforeFrom > beforeTo) {
+      throw new SourcePieceAdapterError(
+        "unsupported-step",
+        "The replace step produced an inverted source range.",
+        { pmFrom: beforeFrom, pmTo: beforeTo },
+      );
+    }
+    const leafIndex = findCurrentLeafCoveringRange(state, beforeFrom, beforeTo);
+    if (leafIndex == null) {
+      throw new SourcePieceAdapterError(
+        "unsupported-inline",
+        "A document-changing step is outside every parser-proven leaf.",
+        { pmFrom: beforeFrom, pmTo: beforeTo },
+      );
+    }
+    changes.push({ leafIndex, beforeFrom, beforeTo });
+  });
+  return Object.freeze(changes);
+}
+
+function buildChangedLeafPatches(
+  state: SourcePieceAdapterState,
+  transaction: Transaction,
+  stepChanges: readonly StepChange[],
+): ReadonlyMap<number, ChangedLeaf> {
+  const grouped = new Map<number, LocalChange[]>();
+  for (const change of stepChanges) {
+    const leaf = getLeaf(state, change.leafIndex);
+    if (!leaf) {
+      throw new SourcePieceAdapterError(
+        "source-leaf-not-found",
+        `Missing current source leaf ${change.leafIndex}.`,
+        { leafIndex: change.leafIndex },
+      );
+    }
+    const group = grouped.get(change.leafIndex);
+    const localChange = { leaf, beforeFrom: change.beforeFrom, beforeTo: change.beforeTo } satisfies LocalChange;
+    if (group) group.push(localChange);
+    else grouped.set(change.leafIndex, [localChange]);
+  }
+
+  const changed = new Map<number, ChangedLeaf>();
+  for (const [leafIndex, entries] of grouped) {
+    const leaf = entries[0].leaf;
+    const merged = mergeLocalChanges(entries);
+    const patches: SourcePiecePatch[] = [];
+    for (const range of merged) {
+      const leafRange = getCurrentLeafRange(state, leafIndex);
+      if (range.beforeFrom < leafRange.from || range.beforeTo > leafRange.to) {
         throw new SourcePieceAdapterError(
           "unsupported-inline",
-          "A document-changing step is outside every parser-proven leaf.",
-          { pmFrom: beforeFrom, pmTo: beforeTo },
+          `The mapped source range for leaf ${leafIndex} escaped its current PM span.`,
+          { leafIndex, pmFrom: range.beforeFrom, pmTo: range.beforeTo },
         );
       }
-      affected.add(leafIndex);
-    });
-    // AddMarkStep/RemoveMarkStep intentionally expose an empty StepMap. Their
-    // from/to range is already in the transaction-before coordinate space.
-    if (!mappedRange) {
-      const markedStep = step as unknown as { from?: unknown; to?: unknown };
-      if (Number.isInteger(markedStep.from) && Number.isInteger(markedStep.to)) {
-        const beforeFrom = markedStep.from as number;
-        const beforeTo = markedStep.to as number;
-        const leafIndex = findCurrentLeafCoveringRange(state, beforeFrom, beforeTo);
-        if (leafIndex == null) {
+      const afterFromResult = transaction.mapping.mapResult(range.beforeFrom, -1);
+      const afterToResult = transaction.mapping.mapResult(range.beforeTo, 1);
+      const afterFrom = afterFromResult.pos;
+      const afterTo = afterToResult.pos;
+      if (afterFrom > afterTo) {
+        throw new SourcePieceAdapterError(
+          "unsupported-step",
+          `The mapped source range for leaf ${leafIndex} is inverted after the transaction.`,
+          { leafIndex, pmFrom: afterFrom, pmTo: afterTo },
+        );
+      }
+      const finalLeafFrom = transaction.mapping.map(leafRange.from, -1);
+      const finalLeafTo = transaction.mapping.map(leafRange.to, 1);
+      if (afterFrom < finalLeafFrom || afterTo > finalLeafTo) {
+        throw new SourcePieceAdapterError(
+          "structure-changed",
+          `The transaction range for leaf ${leafIndex} crossed its final PM span.`,
+          { leafIndex, pmFrom: afterFrom, pmTo: afterTo },
+        );
+      }
+      assertLocalStructureUnchanged(
+        state.doc,
+        transaction.doc,
+        { from: range.beforeFrom, to: range.beforeTo },
+        { from: afterFrom, to: afterTo },
+        leafIndex,
+      );
+      const text = transaction.doc.textBetween(afterFrom, afterTo, "\n", "\uFFFC");
+      if (text.includes("\n") || text.includes("\uFFFC")) {
+        throw new SourcePieceAdapterError(
+          "structure-changed",
+          `Transaction range for leaf ${leafIndex} crosses a block boundary.`,
+          { leafIndex, pmFrom: afterFrom, pmTo: afterTo },
+        );
+      }
+      const marks = collectMarks(transaction.doc, afterFrom, afterTo);
+      if (text.length > 0 && !sameMarks(leaf.marks, marks)) {
+        throw new SourcePieceAdapterError(
+          "marks-changed",
+          `Transaction changed marks for source leaf ${leafIndex}.`,
+          { leafIndex, pmFrom: afterFrom, pmTo: afterTo, expected: leaf.marks.join("|"), actual: marks.join("|") },
+        );
+      }
+
+      const relativeFrom = range.beforeFrom - leafRange.from;
+      const relativeTo = range.beforeTo - leafRange.from;
+      const currentTextLength = leaf.pieceTo - leaf.pieceFrom;
+      const blockId = blockIdForIndex(leaf.blockIndex);
+      let pieceFrom: number;
+      let pieceTo: number;
+      let insert: string;
+      if (leaf.emptySlot && currentTextLength === 0 && relativeFrom === 0 && relativeTo === 0) {
+        // An empty cell's padding belongs to its unique parser span.  The
+        // first insertion replaces that span atomically while keeping the
+        // padding bytes around the newly inserted content.
+        pieceFrom = leaf.spanFrom;
+        pieceTo = leaf.spanTo;
+        insert = `${leaf.leadingPadding}${text}${leaf.trailingPadding}`;
+      } else {
+        if (relativeFrom < 0 || relativeTo < relativeFrom || relativeTo > currentTextLength) {
           throw new SourcePieceAdapterError(
             "unsupported-inline",
-            "A marked document range is outside every parser-proven leaf.",
-            { pmFrom: beforeFrom, pmTo: beforeTo },
+            `The mapped source range for leaf ${leafIndex} escaped its current piece span.`,
+            { leafIndex, pmFrom: range.beforeFrom, pmTo: range.beforeTo },
           );
         }
-        affected.add(leafIndex);
+        pieceFrom = leaf.pieceFrom + relativeFrom;
+        pieceTo = leaf.pieceFrom + relativeTo;
+        insert = text;
       }
+      let expected: string;
+      try {
+        expected = getSourcePieceBlockSlice(state.source, blockId, pieceFrom, pieceTo);
+      } catch (error) {
+        if (error instanceof Error) {
+          throw new SourcePieceAdapterError("piece-state-conflict", error.message, { leafIndex, cause: error.name });
+        }
+        throw error;
+      }
+      patches.push({ blockId, pieceFrom, pieceTo, expected, insert });
     }
-  });
-  return affected;
+    changed.set(leafIndex, Object.freeze({ leaf, patches: Object.freeze(patches) }));
+  }
+  return changed;
+}
+
+function mergeLocalChanges(entries: readonly LocalChange[]): readonly LocalChange[] {
+  const ordered = [...entries].sort((left, right) =>
+    left.beforeFrom - right.beforeFrom || left.beforeTo - right.beforeTo,
+  );
+  const merged: LocalChange[] = [];
+  for (const entry of ordered) {
+    const previous = merged[merged.length - 1];
+    if (!previous || entry.beforeFrom > previous.beforeTo) {
+      merged.push(entry);
+      continue;
+    }
+    merged[merged.length - 1] = {
+      leaf: previous.leaf,
+      beforeFrom: previous.beforeFrom,
+      beforeTo: Math.max(previous.beforeTo, entry.beforeTo),
+    };
+  }
+  return merged;
 }
 
 function mapStepPositionToTransactionBefore(
@@ -798,28 +939,6 @@ function getLeafRecord(root: LeafRecordTree | null, index: number, from: number,
     : getLeafRecord(root.right, index, middle + 1, to);
 }
 
-function setLeafRecord(
-  root: LeafRecordTree | null,
-  index: number,
-  from: number,
-  to: number,
-  value: SourcePieceAdapterLeaf,
-): LeafRecordTree | null {
-  if (!root || from >= to) return root;
-  const middle = from + Math.floor((to - from) / 2);
-  if (index === middle) return Object.freeze({ left: root.left, right: root.right, value });
-  if (index < middle) return Object.freeze({
-    left: setLeafRecord(root.left, index, from, middle, value),
-    right: root.right,
-    value: root.value,
-  });
-  return Object.freeze({
-    left: root.left,
-    right: setLeafRecord(root.right, index, middle + 1, to, value),
-    value: root.value,
-  });
-}
-
 function materializeCurrentLeaf(
   block: SourcePieceAdapterBlock,
   leaf: SourcePieceAdapterLeaf,
@@ -827,16 +946,29 @@ function materializeCurrentLeaf(
 ): SourcePieceAdapterLeaf {
   const before = prefixLeafDelta(block.leafDeltaRoot, localIndex, 0, block.leafCount + 1);
   const through = prefixLeafDelta(block.leafDeltaRoot, localIndex + 1, 0, block.leafCount + 1);
+  const currentTextLength = leaf.text.length + through - before;
   const spanFrom = leaf.spanFrom + before;
   const spanTo = leaf.spanTo + through;
   const pieceFrom = spanFrom + leaf.leadingPadding.length;
   return Object.freeze({
     ...leaf,
     pieceFrom,
-    pieceTo: pieceFrom + leaf.text.length,
+    pieceTo: pieceFrom + currentTextLength,
     spanFrom,
     spanTo,
   });
+}
+
+/** Explicit inspection materializes only this leaf's current text. */
+function materializePublicLeaf(
+  state: SourcePieceAdapterState,
+  block: SourcePieceAdapterBlock,
+  leaf: SourcePieceAdapterLeaf,
+  localIndex: number,
+): SourcePieceAdapterLeaf {
+  const current = materializeCurrentLeaf(block, leaf, localIndex);
+  const text = getSourcePieceBlockSlice(state.source, block.id, current.pieceFrom, current.pieceTo);
+  return Object.freeze({ ...current, text });
 }
 
 function buildBlockTree(values: readonly SourcePieceAdapterBlock[], from: number, to: number): BlockTree | null {

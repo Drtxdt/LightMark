@@ -330,13 +330,15 @@ try {
         verbatimModuleSyntax: false,
       },
     }).outputText);
+    fs.writeFileSync(path.join(runtimeDir, "editor", "documentHistory.mjs"), ts.transpileModule(fs.readFileSync(path.join(root, "src", "editor", "documentHistory.ts"), "utf8"), { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText);
+    fs.writeFileSync(path.join(runtimeDir, "editor", "pendingDocumentCommands.mjs"), ts.transpileModule(fs.readFileSync(path.join(root, "src", "editor", "pendingDocumentCommands.ts"), "utf8"), { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText);
     fs.writeFileSync(runtimePath, ts.transpileModule(fs.readFileSync(path.join(root, "src", "editor", "documentRuntime.ts"), "utf8"), {
       compilerOptions: {
         module: ts.ModuleKind.ES2022,
         target: ts.ScriptTarget.ES2022,
         verbatimModuleSyntax: false,
       },
-    }).outputText.replaceAll('from "./documentMutationTracker"', 'from "./documentMutationTracker.mjs"'));
+    }).outputText.replaceAll('from "./documentMutationTracker"', 'from "./documentMutationTracker.mjs"').replaceAll("from './documentHistory'", "from './documentHistory.mjs'").replaceAll("from './pendingDocumentCommands'", "from './pendingDocumentCommands.mjs'"));
     const runtime = await import(pathToFileURL(runtimePath).href);
     let snapshotStarted;
     let releaseSnapshot;
@@ -426,9 +428,16 @@ try {
       "let mtimeSerial = 1;",
       "let deferWrite = false;",
       "let shouldFailNextWrite = false;",
+      "let shouldFailNextFileSnapshot = false;",
+      "let shouldFailNextConfigWrite = false;",
       "let deferDraftWrite = false;",
+      "let shouldFailNextDraftList = false;",
+      "let nextDraftWriteReceipt = null;",
       "let shouldFailNextDraftDelete = false;",
+      "let shouldFailNextLargeDraftDelete = false;",
+      "let deferLargeDraftDelete = false;",
       "let deferDraftDelete = false;",
+      "let deferReadSnapshot = false;",
       "let deferIndexRelease = false;",
       "let activeWrites = 0;",
       "let maxActiveWrites = 0;",
@@ -438,6 +447,10 @@ try {
       "let releaseDraftWriteResolve = null;",
       "let draftDeleteStartedResolve = null;",
       "let releaseDraftDeleteResolve = null;",
+      "let largeDraftDeleteStartedResolve = null;",
+      "let releaseLargeDraftDeleteResolve = null;",
+      "let readSnapshotStartedResolve = null;",
+      "let releaseReadSnapshotResolve = null;",
       "let indexReleaseStartedResolve = null;",
       "let releaseIndexResolve = null;",
       "let saveDialogStartedResolve = null;",
@@ -448,14 +461,25 @@ try {
       "export function releaseSaveDialog() { releaseSaveDialogResolve?.(); releaseSaveDialogResolve = null; }",
       "export function deferNextWrite() { deferWrite = true; }",
       "export function failNextWrite() { shouldFailNextWrite = true; }",
+      "export function failNextFileSnapshot() { shouldFailNextFileSnapshot = true; }",
+      "export function failNextConfigWrite() { shouldFailNextConfigWrite = true; }",
       "export function deferNextDraftWrite() { deferDraftWrite = true; }",
+      "export function failNextDraftList() { shouldFailNextDraftList = true; }",
+      "export function setNextDraftWriteReceipt(receipt) { nextDraftWriteReceipt = receipt; }",
       "export function failNextDraftDelete() { shouldFailNextDraftDelete = true; }",
+      "export function failNextLargeDraftDelete() { shouldFailNextLargeDraftDelete = true; }",
+      "export function deferNextLargeDraftDelete() { deferLargeDraftDelete = true; }",
       "export function deferNextDraftDelete() { deferDraftDelete = true; }",
       "export function deferNextIndexRelease() { deferIndexRelease = true; }",
       "export function waitForDraftWriteStart() { return new Promise((resolve) => { draftWriteStartedResolve = resolve; }); }",
       "export function releaseDraftWrite() { releaseDraftWriteResolve?.(); releaseDraftWriteResolve = null; }",
       "export function waitForDraftDeleteStart() { return new Promise((resolve) => { draftDeleteStartedResolve = resolve; }); }",
       "export function releaseDraftDelete() { releaseDraftDeleteResolve?.(); releaseDraftDeleteResolve = null; }",
+      "export function waitForLargeDraftDeleteStart() { return new Promise((resolve) => { largeDraftDeleteStartedResolve = resolve; }); }",
+      "export function releaseLargeDraftDelete() { releaseLargeDraftDeleteResolve?.(); releaseLargeDraftDeleteResolve = null; }",
+      "export function deferNextReadSnapshot() { deferReadSnapshot = true; }",
+      "export function waitForReadSnapshotStart() { return new Promise((resolve) => { readSnapshotStartedResolve = resolve; }); }",
+      "export function releaseReadSnapshot() { releaseReadSnapshotResolve?.(); releaseReadSnapshotResolve = null; }",
       "export function waitForIndexReleaseStart() { return new Promise((resolve) => { indexReleaseStartedResolve = resolve; }); }",
       "export function releaseIndex() { releaseIndexResolve?.(); releaseIndexResolve = null; }",
       "export function resetWriteMetrics() { activeWrites = 0; maxActiveWrites = 0; }",
@@ -469,7 +493,11 @@ try {
       "    try {",
       "      if (deferWrite) { deferWrite = false; writeStartedResolve?.(); writeStartedResolve = null; await new Promise((resolve) => { releaseWriteResolve = resolve; }); }",
       "      if (shouldFailNextWrite) { shouldFailNextWrite = false; throw new Error('simulated write failure'); }",
-      "      files.set(args.path, { exists: true, mtime: ++mtimeSerial, size: args.content.length, content: args.content }); return null;",
+      "      const file = { exists: true, mtime: ++mtimeSerial, size: args.content.length, content: args.content };",
+      "      files.set(args.path, file);",
+      "      const targetFingerprint = { sizeBytes: file.size, modifiedMillis: file.mtime, sha256: `fixture-${file.mtime}` };",
+      "      const outputFingerprint = { ...targetFingerprint, modifiedMillis: file.mtime + 1000 };",
+      "      return { path: args.path, outcome: 'committed', diskWritten: 'yes', targetFingerprint, outputFingerprint };",
       "    } finally { activeWrites -= 1; }",
       "  }",
       "  if (command === 'write_draft') {",
@@ -477,7 +505,9 @@ try {
       "    if (deferDraftWrite) { deferDraftWrite = false; draftWriteStartedResolve?.(); draftWriteStartedResolve = null; await new Promise((resolve) => { releaseDraftWriteResolve = resolve; }); }",
       "    draftRecords.set(args.record.id, args.record);",
       "    draftEvents.push({ kind: 'write-done', id: args.record.id });",
-      "    return null;",
+      "    const receipt = nextDraftWriteReceipt ?? { path: `drafts/${args.record.id}.json`, outcome: 'committed', diskWritten: 'yes' };",
+      "    nextDraftWriteReceipt = null;",
+      "    return receipt;",
       "  }",
       "  if (command === 'delete_draft') {",
       "    draftEvents.push({ kind: 'delete-start', id: args.draftId });",
@@ -487,13 +517,24 @@ try {
       "    draftEvents.push({ kind: 'delete-done', id: args.draftId });",
       "    return null;",
       "  }",
-      "  if (command === 'save_large_file') return { isDirty: false, pendingEditCount: 0 };",
-      "  if (command === 'close_large_file') return null;",
-      "  if (command === 'get_file_snapshot') { const file = files.get(args.path); return file ? { exists: true, mtime: file.mtime, size: file.size } : { exists: false }; }",
+      "  if (command === 'delete_large_file_draft') {",
+      "    draftEvents.push({ kind: 'snapshot-delete-start', snapshotId: args.snapshotId });",
+      "    if (deferLargeDraftDelete) { deferLargeDraftDelete = false; largeDraftDeleteStartedResolve?.(); largeDraftDeleteStartedResolve = null; await new Promise((resolve) => { releaseLargeDraftDeleteResolve = resolve; }); }",
+      "    if (shouldFailNextLargeDraftDelete) { shouldFailNextLargeDraftDelete = false; throw new Error('simulated large snapshot delete failure'); }",
+      "    draftEvents.push({ kind: 'snapshot-delete-done', snapshotId: args.snapshotId });",
+      "    return { snapshotId: args.snapshotId, deleted: true };",
+      "  }",
+      "  if (command === 'save_large_file' || command === 'save_large_file_as') { const revision = args.expectedRevision ?? 0; const path = args.targetPath ?? 'large-close.md'; const fingerprint = { sizeBytes: 0, modifiedMillis: mtimeSerial, sha256: `fixture-large-${mtimeSerial}` }; return { sessionId: args.sessionId, requestedRevision: revision, savedRevision: revision, currentRevision: revision, saved: true, isDirty: false, pendingEditCount: 0, path, baseFingerprint: fingerprint, diskFingerprint: fingerprint, coordinateSpace: 'utf16-code-units', outcome: 'committed', diskWritten: 'yes' }; }",
+      "  if (command === 'close_large_file') return { sessionId: args.sessionId, closed: true, cleanupCompleted: true };",
+      "  if (command === 'get_file_info') { const file = files.get(args.path); return { path: args.path, sizeBytes: file?.size ?? 0, lineCount: (file?.content ?? '').split(/\\r\\n|\\r|\\n/).length, isLarge: false, encoding: 'utf-8' }; }",
+      "  if (command === 'get_file_snapshot') { if (shouldFailNextFileSnapshot) { shouldFailNextFileSnapshot = false; throw new Error('simulated post-write stat failure'); } const file = files.get(args.path); return file ? { exists: true, mtime: file.mtime, size: file.size } : { exists: false }; }",
+      "  if (command === 'get_large_file_fingerprint') { const file = files.get(args.path); return file ? { sizeBytes: file.size, modifiedMillis: file.mtime, sha256: `fixture-${file.mtime}` } : null; }",
+      "  if (command === 'read_text_file_snapshot') { if (deferReadSnapshot) { deferReadSnapshot = false; readSnapshotStartedResolve?.(); readSnapshotStartedResolve = null; await new Promise((resolve) => { releaseReadSnapshotResolve = resolve; }); } const file = files.get(args.path); return file ? { content: file.content, fingerprint: { sizeBytes: file.size, modifiedMillis: file.mtime, sha256: `fixture-${file.mtime}` } } : { content: '', fingerprint: { sizeBytes: 0, modifiedMillis: null, sha256: 'fixture-missing' } }; }",
       "  if (command === 'read_text_file') return files.get(args.path)?.content ?? '';",
       "  if (command === 'save_markdown_file_dialog') { if (deferSaveDialog) { deferSaveDialog = false; saveDialogStartedResolve?.(); saveDialogStartedResolve = null; await new Promise((resolve) => { releaseSaveDialogResolve = resolve; }); } return dialogPath; }",
-      "  if (command === 'list_drafts') return [...draftRecords.values()];",
+      "  if (command === 'list_drafts') { if (shouldFailNextDraftList) { shouldFailNextDraftList = false; throw new Error('simulated draft list failure'); } return { records: [...draftRecords.values()], issues: [] }; }",
       "  if (command === 'list_markdown_files') return [];",
+      "  if (command === 'write_app_config') { if (shouldFailNextConfigWrite) { shouldFailNextConfigWrite = false; throw new Error('simulated post-save config sync failure'); } return null; }",
       "  if (command === 'workspace_index_open') return { root: args.root, generation: 0, busy: false, error: null, documentCount: 0, candidates: [] };",
       "  if (command === 'workspace_index_status') return { root: '', generation: 0, busy: false, error: null, documentCount: 0, candidates: [] };",
       "  if (command === 'workspace_index_release_open_document') { if (deferIndexRelease) { deferIndexRelease = false; indexReleaseStartedResolve?.(); indexReleaseStartedResolve = null; await new Promise((resolve) => { releaseIndexResolve = resolve; }); } return null; }",
@@ -956,6 +997,13 @@ try {
       assert.ok(realMathDraft.source);
       realMathDraft.source.textContent = "draft+1";
       realMathDraft.source.dispatchEvent({ type: "input" });
+      tauri.setNextDraftWriteReceipt({
+        path: "drafts/real-math-draft.json",
+        outcome: "committed",
+        diskWritten: "yes",
+        cleanupWarning: "残留清理文件",
+        recoveryArtifact: "C:/Temp/lightmark-recovery.json",
+      });
       const draftAuthorization = store.captureWindowCloseAuthorization();
       const draftResult = await draft.flushDraftsForWindowClose(
         [realMathDraftTab],
@@ -966,6 +1014,8 @@ try {
       assert.equal(draftResult.receipts.length, 1);
       const realMathDraftRecord = [...tauri.draftRecords.values()][0];
       assert.equal(realMathDraftRecord.content, "formula draft+1");
+      assert.match(draft.draftStore.message, /残留清理文件/u, "draft cleanup warnings remain visible after the successful write");
+      assert.match(draft.draftStore.message, /lightmark-recovery\.json/u, "draft recovery artifact remains visible after the successful write");
       assert.ok(draftResult.receipts[0].flushReceipt, "the recovery receipt carries the authorized PM flush");
       assert.equal(
         store.isWindowCloseAuthorizationCurrent(draftAuthorization, [], draftResult.receipts),
@@ -976,6 +1026,13 @@ try {
       realMathDraft.close();
       unregisterRealMathDraft();
     }
+
+    tauri.failNextDraftList();
+    draft.draftStore.status = "idle";
+    draft.draftStore.message = "";
+    await draft.recoverStartupDrafts();
+    assert.equal(draft.draftStore.status, "failed", "a draft directory/list failure is explicit");
+    assert.match(draft.draftStore.message, /草稿列表读取失败/u, "a draft list failure is not reported as an empty directory");
 
     const realMathWindowTab = makeTab("real-math-window", "real-math-window.md", "real-math-window.md", "window formula", "normal");
     realMathWindowTab.fileSnapshot = { exists: true, mtime: 120, size: 13 };
@@ -1139,9 +1196,46 @@ try {
     assert.equal(tabA.isDirty, true);
     assert.equal(tabA.content, "new");
     assert.equal(tabB.content, "other", "the real appStore save does not touch a second tab");
-    assert.deepEqual(tauri.calls.filter((call) => call.command === "write_text_file")[0].args, { path: "a.md", content: "old" });
+    assert.deepEqual(
+      (({ path, content }) => ({ path, content }))(tauri.calls.filter((call) => call.command === "write_text_file")[0].args),
+      { path: "a.md", content: "old" },
+    );
 
-    assert.equal(tabA.fileSnapshot?.mtime, 1, "a stale write keeps the previous baseline for conservative conflict detection");
+    assert.equal(tabA.fileSnapshot?.mtime, tauri.files.get("a.md")?.mtime, "a stale write records the installed target as the new disk baseline, not the independent recovery copy");
+    assert.equal(tabA.fileSnapshot?.fingerprint?.sha256, `fixture-${tauri.files.get("a.md")?.mtime}`, "the baseline uses the write receipt fingerprint");
+    assert.equal(await store.saveCurrentFile(), true, "the next save writes the newer dirty version without a self-conflict");
+    assert.equal(tabA.isDirty, false);
+    assert.equal(tauri.files.get("a.md")?.content, "new");
+
+    const postWriteStatTab = makeTab("post-write-stat", "post-write-stat.md", "post-write-stat.md", "before");
+    postWriteStatTab.fileSnapshot = {
+      exists: true,
+      mtime: 2,
+      size: 6,
+      fingerprint: { sizeBytes: 6, modifiedMillis: 2, sha256: "fixture-2" },
+    };
+    tauri.files.set(postWriteStatTab.path, { exists: true, mtime: 2, size: 6, content: postWriteStatTab.content });
+    resetStore([postWriteStatTab], postWriteStatTab);
+    tauri.deferNextWrite();
+    const postWriteStatSave = store.saveCurrentFile();
+    await tauri.waitForWriteStart();
+    // Arm the failure only after the pre-write conflict check has completed;
+    // this is the stat that follows a committed native write.
+    tauri.failNextFileSnapshot();
+    tauri.releaseWrite();
+    await assert.rejects(postWriteStatSave, /simulated post-write stat failure/, "a post-write stat failure remains visible after the disk commit");
+    assert.equal(postWriteStatTab.isDirty, false, "a committed version is clean even when post-write synchronization fails");
+    assert.equal(
+      postWriteStatTab.fileSnapshot?.fingerprint?.sha256,
+      `fixture-${tauri.files.get(postWriteStatTab.path)?.mtime}`,
+      "the write receipt output fingerprint becomes the tab baseline before reporting the sync failure",
+    );
+    assert.match(store.appStore.statusMessage, /文件已写入/u, "post-write synchronization failure is reported as a committed disk write");
+    assert.equal(await store.saveCurrentFile(), true, "a later save compares against the receipt baseline without manufacturing a conflict");
+    assert.equal(postWriteStatTab.isDirty, false);
+    // Restore the two-tab split used by the following SaveAs and background
+    // activation cases; the post-write failure case owns an isolated tab set.
+    resetStore([tabA, tabB], tabB);
 
     const tabC = makeTab("tab-c", "c.md", "c.md", "one");
     tabC.fileSnapshot = { exists: true, mtime: 10, size: 3 };
@@ -1154,7 +1248,10 @@ try {
     assert.equal(await store.saveCurrentFile(), true, "a stable production save commits and refreshes its baseline");
     store.setContent("two", true);
     assert.equal(await store.saveCurrentFile(), true, "a queued second save compares against the first save's refreshed baseline");
-    assert.deepEqual(tauri.calls.filter((call) => call.command === "write_text_file").slice(-1)[0].args, { path: "c.md", content: "two" });
+    assert.deepEqual(
+      (({ path, content }) => ({ path, content }))(tauri.calls.filter((call) => call.command === "write_text_file").slice(-1)[0].args),
+      { path: "c.md", content: "two" },
+    );
 
     const untitled = makeTab("untitled-a", "", "untitled", "draft", "untitled");
     const previousSecondary = tabB.id;
@@ -1222,7 +1319,7 @@ try {
     tauri.releaseWrite();
     assert.equal(await pendingSave, false, "pending editor input arising during write invalidates the captured version");
     assert.equal(pendingTab.isDirty, true, "pending editor input remains dirty after the stale write");
-    assert.equal(pendingTab.fileSnapshot?.mtime, 50, "pending editor input does not advance the tab baseline");
+    assert.equal(pendingTab.fileSnapshot?.mtime, tauri.files.get("pending.md")?.mtime, "pending editor input keeps dirty state while recording the written disk baseline");
     unregisterPending();
 
     const replacedTab = makeTab("replaced-tab", "replaced.md", "replaced.md", "old");
@@ -1450,11 +1547,25 @@ try {
       pendingRaceSession.pendingBufferRevision = 2;
       releasePendingFlushResolve?.();
       const pendingRaceResult = await pendingRaceResultPromise;
-      assert.equal(pendingRaceResult.ok, false, "a new pending formula buffer token during flush cancels window discard");
-      assert.equal(tauri.draftRecords.size, 0, "a changed pending buffer is not written as the prompt recovery version");
+    assert.equal(pendingRaceResult.ok, false, "a new pending formula buffer token during flush cancels window discard");
+    assert.equal(tauri.draftRecords.size, 0, "a changed pending buffer is not written as the prompt recovery version");
     } finally {
       unregisterPendingRace();
     }
+
+    const whitespaceDraft = makeTab("window-whitespace-draft", "", "window-whitespace-draft", " \r\n\t", "untitled");
+    resetStore([whitespaceDraft], whitespaceDraft);
+    tauri.draftRecords.clear();
+    store.appStore.settings.general.autoSave = false;
+    const whitespaceAuthorization = store.captureWindowCloseAuthorization();
+    const whitespaceResult = await draft.flushDraftsForWindowClose(
+      [whitespaceDraft],
+      "preserve",
+      whitespaceAuthorization.tabs,
+    );
+    assert.equal(whitespaceResult.ok, true, "a whitespace-only untitled document still creates a recovery draft");
+    const whitespaceRecord = [...tauri.draftRecords.values()][0];
+    assert.equal(whitespaceRecord.content, " \r\n\t", "untitled recovery keeps whitespace and original line-ending bytes");
 
     const wp04bFailures = [];
     const resetHarness = () => {
@@ -1557,6 +1668,235 @@ try {
       }
     });
 
+    await runWp04bRedCase("restore rejects input that arrives while the recovery prompt is open", async () => {
+      resetHarness();
+      const current = makeTab("restore-fence", "", "restore-fence", "current bytes", "untitled");
+      resetStore([current], current);
+      const record = {
+        id: "restore-fence-draft",
+        kind: "untitled",
+        content: "recovered bytes",
+        updatedAt: Date.now(),
+        editorMode: current.editorMode,
+      };
+      tauri.draftRecords.set(record.id, record);
+      const recovery = draft.recoverStartupDrafts();
+      const prompt = await dialog.waitForDialog();
+      store.setContent("new input while recovery waits", true);
+      prompt.resolve("restore");
+      await recovery;
+      assert.equal(current.content, "new input while recovery waits", "a stale recovery prompt cannot overwrite new input");
+      assert.match(draft.draftStore.message, /标签页已变化|仍保留/u, "the stale recovery is reported and remains recoverable");
+      assert.equal(tauri.draftRecords.has(record.id), true);
+    });
+
+    await runWp04bRedCase("restore rejects a same-content source revision change during the recovery prompt", async () => {
+      resetHarness();
+      const current = makeTab("restore-revision-fence", "", "restore-revision-fence", "current bytes", "untitled");
+      current.isDirty = false;
+      resetStore([current], current);
+      const session = makeSession(current);
+      const record = {
+        id: "restore-revision-fence-draft",
+        kind: "untitled",
+        content: "recovered bytes",
+        updatedAt: Date.now(),
+        editorMode: current.editorMode,
+      };
+      tauri.draftRecords.set(record.id, record);
+      const unregister = runtime.registerDocumentSession(session);
+      try {
+        const recovery = draft.recoverStartupDrafts();
+        const prompt = await dialog.waitForDialog();
+        // SourceEditor revision changes are authoritative even when a
+        // transitioning view has not copied its latest text into tab.content.
+        session.revision += 1;
+        prompt.resolve("restore");
+        await recovery;
+        assert.equal(current.content, "current bytes", "a same-content revision change cannot be overwritten by an older draft");
+        assert.equal(tauri.draftRecords.has(record.id), true, "the stale revision draft remains recoverable");
+        assert.match(draft.draftStore.message, /标签页已变化|仍保留/u, "the revision fence reports the rejected recovery");
+      } finally {
+        unregister();
+      }
+    });
+
+    await runWp04bRedCase("new untitled tab flushes the current pane before replacement", async () => {
+      resetHarness();
+      const current = makeTab("new-tab-flush", "new-tab-flush.md", "new-tab-flush.md", "stale projection");
+      current.fileSnapshot = { exists: true, mtime: 410, size: 15 };
+      resetStore([current], current);
+      const session = makeSession(current);
+      session.pending = true;
+      let flushCalls = 0;
+      const originalFlush = session.flushPendingEdits;
+      session.flushPendingEdits = async (...args) => {
+        flushCalls += 1;
+        current.content = "editor buffer before new tab";
+        return originalFlush.apply(session, args);
+      };
+      const unregister = runtime.registerDocumentSession(session);
+      try {
+        assert.equal(await store.setActivePane("main"), true, "activating the already active pane is a fast focus operation");
+        assert.equal(flushCalls, 0, "same-pane focus does not flush an editor buffer");
+        assert.equal(session.pending, true, "same-pane focus leaves pending input for its explicit boundary");
+        const created = await store.createUntitledTabAfterFlush("main");
+        assert.ok(created, "the guarded new-tab entry creates a tab after its flush");
+        assert.ok(flushCalls >= 1, "same-pane new-tab creation flushes its mounted editor");
+        assert.equal(current.content, "editor buffer before new tab", "the old tab keeps the editor buffer before projection");
+        assert.equal(store.appStore.tabs.includes(current), true);
+        assert.equal(store.appStore.activeTabId, created.id);
+      } finally {
+        unregister();
+      }
+    });
+
+    await runWp04bRedCase("new untitled tab preserves the current view when its session is replaced during flush", async () => {
+      resetHarness();
+      const current = makeTab("new-tab-session-race", "new-tab-session-race.md", "new-tab-session-race.md", "editor bytes");
+      resetStore([current], current);
+      const session = makeSession(current);
+      session.pending = true;
+      let startedResolve;
+      let releaseResolve;
+      const started = new Promise((resolve) => { startedResolve = resolve; });
+      const released = new Promise((resolve) => { releaseResolve = resolve; });
+      const originalFlush = session.flushPendingEdits;
+      session.flushPendingEdits = async (...args) => {
+        startedResolve();
+        await released;
+        return originalFlush.apply(session, args);
+      };
+      const unregister = runtime.registerDocumentSession(session);
+      let replacementUnregister;
+      try {
+        const creation = store.createUntitledTabAfterFlush("main");
+        await started;
+        unregister();
+        replacementUnregister = runtime.registerDocumentSession(makeSession(current));
+        releaseResolve();
+        await assert.rejects(
+          creation,
+          /会话已被替换|会话/u,
+          "a new-tab transition rejects when its captured editor session is replaced during flush",
+        );
+        assert.equal(store.appStore.tabs.length, 1, "the stale transition does not create a second tab");
+        assert.equal(store.appStore.activeTabId, current.id, "the original tab remains active after the rejected transition");
+        assert.equal(store.appStore.splitLayout.mainTabId, current.id, "the original pane mapping is preserved after the rejected transition");
+        assert.equal(current.content, "editor bytes", "the rejected transition does not overwrite the captured view");
+      } finally {
+        replacementUnregister?.();
+        // The original registration is removed above before the replacement
+        // is installed; this is idempotent for the normal cleanup path.
+        unregister();
+      }
+    });
+
+    await runWp04bRedCase("tab activation rejects a pane remap during editor-session initialization", async () => {
+      resetHarness();
+      const current = makeTab("activate-current", "activate-current.md", "activate-current.md", "current bytes");
+      current.isDirty = false;
+      const target = makeTab("activate-target", "activate-target.md", "activate-target.md", "target bytes");
+      target.isDirty = false;
+      resetStore([current, target], current);
+      const unregisterCurrent = runtime.registerDocumentSession(makeSession(current));
+      let unregisterTarget = () => {};
+      try {
+        const activation = store.activateTabInPane("main", target.id);
+        await new Promise((resolve) => setImmediate(resolve));
+        unregisterTarget = runtime.registerDocumentSession(makeSession(target));
+        // Resolve waitForDocumentSession, then invalidate the projected pane
+        // before activateTabInPane's final await continuation runs.
+        store.appStore.splitLayout.mainTabId = current.id;
+        store.appStore.splitLayout.mainTabIds = [current.id];
+        store.appStore.activeTabId = current.id;
+        store.appStore.currentFilePath = current.path;
+        store.appStore.currentContent = current.content;
+        store.appStore.isDirty = current.isDirty;
+        assert.equal(await activation, false, "activation rejects a pane remap after the target editor session appears");
+        assert.equal(store.appStore.splitLayout.mainTabId, current.id, "the remapped pane remains on its current tab");
+      } finally {
+        unregisterTarget();
+        unregisterCurrent();
+      }
+    });
+
+    await runWp04bRedCase("opening a file preserves the current pane when its read returns after a session replacement", async () => {
+      resetHarness();
+      const current = makeTab("open-session-race", "open-session-race.md", "open-session-race.md", "current editor bytes");
+      current.isDirty = false;
+      resetStore([current], current);
+      store.appStore.settings.general.autoSave = false;
+      const oldSession = makeSession(current);
+      const unregisterOld = runtime.registerDocumentSession(oldSession);
+      tauri.files.set("opened-after-race.md", { exists: true, mtime: 420, size: 12, content: "opened bytes" });
+      tauri.deferNextReadSnapshot();
+      let replacementUnregister;
+      try {
+        const opening = store.openFile("opened-after-race.md");
+        await tauri.waitForReadSnapshotStart();
+        unregisterOld();
+        replacementUnregister = runtime.registerDocumentSession(makeSession(current));
+        tauri.releaseReadSnapshot();
+        assert.equal(await opening, false, "a file read cannot project into a pane whose captured session changed");
+        assert.equal(store.appStore.tabs.length, 1, "the stale open does not add the read document");
+        assert.equal(store.appStore.activeTabId, current.id, "the original tab remains active after the stale read");
+        assert.equal(store.appStore.splitLayout.mainTabId, current.id, "the original pane mapping remains intact after the stale read");
+        assert.equal(current.content, "current editor bytes", "the stale read does not overwrite the current editor bytes");
+      } finally {
+        replacementUnregister?.();
+        unregisterOld();
+      }
+    });
+
+    await runWp04bRedCase("split close rechecks both pane fences after the second flush", async () => {
+      resetHarness();
+      const main = makeTab("split-close-main", "split-close-main.md", "split-close-main.md", "main");
+      const secondary = makeTab("split-close-secondary", "split-close-secondary.md", "split-close-secondary.md", "secondary");
+      main.isDirty = false;
+      secondary.isDirty = false;
+      resetStore([main, secondary], main);
+      store.appStore.splitLayout = {
+        enabled: true,
+        activePaneId: "main",
+        mainTabId: main.id,
+        secondaryTabId: secondary.id,
+        mainTabIds: [main.id],
+        secondaryTabIds: [secondary.id],
+        ratio: 0.5,
+      };
+      let releaseSecondary;
+      let secondaryFlushStartedResolve;
+      const secondaryFlushStarted = new Promise((resolve) => { secondaryFlushStartedResolve = resolve; });
+      const mainSession = makeSession(main, { paneId: "main" });
+      const secondarySession = makeSession(secondary, { paneId: "secondary" });
+      const originalSecondaryFlush = secondarySession.flushPendingEdits;
+      secondarySession.flushPendingEdits = async (...args) => {
+        secondaryFlushStartedResolve();
+        await new Promise((resolve) => { releaseSecondary = resolve; });
+        return originalSecondaryFlush.call(secondarySession, ...args);
+      };
+      const unregisterMain = runtime.registerDocumentSession(mainSession);
+      const unregisterSecondary = runtime.registerDocumentSession(secondarySession);
+      try {
+        const closing = store.toggleSplitLayout();
+        await secondaryFlushStarted;
+        // This input arrives after the main pane's authorized flush but while
+        // the secondary pane is still waiting.  The final double fence must
+        // keep the split mounted and preserve the pending main buffer.
+        mainSession.pending = true;
+        mainSession.pendingInputVersion = 1;
+        releaseSecondary();
+        assert.equal(await closing, false, "a new main-pane input cancels split teardown");
+        assert.equal(store.appStore.splitLayout.enabled, true, "split remains enabled after the fence rejects teardown");
+        assert.equal(mainSession.hasPendingEdits(), true, "the late main-pane input remains pending");
+        assert.equal(store.appStore.splitLayout.mainTabId, main.id, "the main pane mapping is preserved");
+      } finally {
+        unregisterSecondary();
+        unregisterMain();
+      }
+    });
+
     await runWp04bRedCase("close-save routes large tabs through save_large_file", async () => {
       resetHarness();
       const large = makeTab("close-large", "large-close.md", "large-close.md", "", "large");
@@ -1568,6 +1908,12 @@ try {
         loadedRanges: [{ startLine: 0, endLine: 2 }],
         pendingEdits: [{ startLine: 1, startColumn: 0, endLine: 1, endColumn: 1, text: "x" }],
         outline: [],
+        revision: 0,
+        savedRevision: 0,
+        pendingEditCount: 1,
+        baseFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        diskFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        coordinateSpace: "utf16-code-units",
       };
       resetStore([large], large);
       store.appStore.documentMode = "large";
@@ -1586,12 +1932,235 @@ try {
         await closePromise;
         assert.equal(tauri.calls.some((call) => call.command === "save_large_file" && call.args.sessionId === "large-close-session"), true, "large close-save uses the native large-file save command");
         assert.equal(tauri.calls.some((call) => call.command === "write_text_file"), false, "large close-save never writes the empty tab content as Markdown");
-        assert.equal(tauri.calls.some((call) => call.command === "close_large_file" && call.args.sessionId === "large-close-session"), true, `large close releases its native session (status=${store.appStore.statusMessage}, calls=${JSON.stringify(tauri.calls)})`);
+        assert.equal(tauri.calls.some((call) => call.command === "close_large_file"
+          && call.args.sessionId === "large-close-session"
+          && call.args.expectedRevision === 0
+          && call.args.coordinateSpace === "utf16-code-units"), true, `large close releases its native session with the revision coordinate fence (status=${store.appStore.statusMessage}, calls=${JSON.stringify(tauri.calls)})`);
         assert.equal(store.appStore.tabs.some((tab) => tab.id === large.id), false, "the saved large tab closes");
       } finally {
         if (prompt) prompt.resolve("cancel");
         await closePromise?.catch(() => {});
       }
+    });
+
+    await runWp04bRedCase("large committed write stays clean when post-save config sync fails", async () => {
+      resetHarness();
+      const large = makeTab("large-post-sync", "large-close.md", "large-close.md", "", "large");
+      large.documentMode = "large";
+      large.largeFile = {
+        sessionId: "large-post-sync-session",
+        sizeBytes: 4096,
+        totalLines: 20,
+        loadedRanges: [],
+        pendingEdits: [],
+        outline: [],
+        revision: 4,
+        savedRevision: 3,
+        pendingEditCount: 0,
+        baseFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        diskFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        coordinateSpace: "utf16-code-units",
+        targetPath: "large-close.md",
+      };
+      resetStore([large], large);
+      store.appStore.documentMode = "large";
+      store.appStore.largeFile = large.largeFile;
+      store.appStore.currentFilePath = large.path;
+      store.appStore.currentContent = "";
+      store.appStore.isDirty = true;
+      store.appStore.saveState = "dirty";
+      const unregister = runtime.registerDocumentSession(makeSession(large));
+      try {
+        tauri.failNextConfigWrite();
+        await assert.rejects(
+          store.saveCurrentFile(),
+          /simulated post-save config sync failure/u,
+          "a config-sync failure remains visible after a committed large-file write",
+        );
+        assert.equal(large.isDirty, false, "a committed large version remains clean after config sync fails");
+        assert.equal(store.appStore.isDirty, false, "the active projection reflects the known committed version");
+        assert.equal(store.appStore.saveState, "saved", "post-save synchronization failure does not masquerade as a write failure");
+        assert.match(store.appStore.statusMessage, /大文件已写入/u, "the status identifies the committed disk write");
+        assert.match(store.appStore.statusMessage, /同步失败/u, "the status keeps the post-save synchronization failure");
+        assert.match(
+          large.largeFile.diskFingerprint?.sha256 ?? "",
+          /^fixture-large-\d+$/u,
+          "the native output fingerprint remains the large tab disk baseline",
+        );
+        assert.equal(await store.saveCurrentFile(), true, "the next production save lane remains usable after sync failure");
+      } finally {
+        unregister();
+      }
+    });
+
+    await runWp04bRedCase("large save keeps new input dirty when draft cleanup is still waiting", async () => {
+      resetHarness();
+      const large = makeTab("large-cleanup-race", "large-close.md", "large-close.md", "", "large");
+      large.documentMode = "large";
+      large.largeFile = {
+        sessionId: "large-cleanup-race-session",
+        sizeBytes: 4096,
+        totalLines: 20,
+        loadedRanges: [],
+        pendingEdits: [],
+        outline: [],
+        revision: 4,
+        savedRevision: 3,
+        pendingEditCount: 0,
+        baseFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        diskFingerprint: { sizeBytes: 4096, modifiedMillis: 1, sha256: "fixture-large-base" },
+        coordinateSpace: "utf16-code-units",
+        targetPath: "large-close.md",
+      };
+      resetStore([large], large);
+      store.appStore.documentMode = "large";
+      store.appStore.largeFile = large.largeFile;
+      store.appStore.currentFilePath = large.path;
+      store.appStore.currentContent = "";
+      store.appStore.isDirty = true;
+      store.appStore.saveState = "dirty";
+      const cleanup = draft.captureDraftCleanupContext(large);
+      assert.ok(cleanup, "the cleanup race has a path-owned draft id");
+      tauri.draftRecords.set(cleanup.id, {
+        id: cleanup.id,
+        kind: "large",
+        schemaVersion: 1,
+        path: large.path,
+        updatedAt: Date.now(),
+        editorMode: large.editorMode,
+        largeSnapshot: {
+          schemaVersion: 1,
+          snapshotId: "large-cleanup-race-snapshot",
+          draftId: cleanup.id,
+          originPath: large.path,
+          originFingerprint: large.largeFile.baseFingerprint,
+          capturedRevision: large.largeFile.revision,
+          coordinateSpace: "utf16-code-units",
+          byteLength: large.largeFile.sizeBytes,
+          totalLines: large.largeFile.totalLines,
+          sha256: "large-cleanup-race-sha",
+        },
+      });
+      const session = makeSession(large);
+      const unregister = runtime.registerDocumentSession(session);
+      let savePromise;
+      try {
+        tauri.deferNextLargeDraftDelete();
+        savePromise = store.saveCurrentFile();
+        await tauri.waitForLargeDraftDeleteStart();
+        // The native snapshot delete is waiting after the committed save.
+        // This is a new local input generation, so cleanup must not restore a
+        // clean projection from the earlier pre-cleanup observation.
+        large.isDirty = true;
+        large.largeFile.pendingEditCount = 1;
+        tauri.releaseLargeDraftDelete();
+        assert.equal(await savePromise, false, "save reports the new input instead of claiming the old version is clean");
+        assert.equal(large.isDirty, true, "new input remains dirty after delayed draft cleanup");
+        assert.equal(store.appStore.isDirty, true, "the active projection keeps the new input dirty");
+        assert.equal(store.appStore.saveState, "dirty", "the save state reflects the post-save input generation");
+      } finally {
+        tauri.releaseLargeDraftDelete();
+        unregister();
+        await savePromise?.catch(() => {});
+      }
+    });
+
+    await runWp04bRedCase("large draft cleanup deletes its manifest first and restores it after payload failure", async () => {
+      resetHarness();
+      const large = makeTab("large-draft-cleanup", "large-draft-cleanup.md", "large-draft-cleanup.md", "", "large");
+      large.documentMode = "large";
+      large.isDirty = false;
+      large.largeFile = {
+        sessionId: "large-draft-session",
+        sizeBytes: 8192,
+        totalLines: 12,
+        loadedRanges: [],
+        pendingEdits: [],
+        outline: [],
+        revision: 4,
+        savedRevision: 3,
+        pendingEditCount: 0,
+        baseFingerprint: { sizeBytes: 8192, modifiedMillis: 4, sha256: "large-base" },
+        diskFingerprint: { sizeBytes: 8192, modifiedMillis: 4, sha256: "large-base" },
+        coordinateSpace: "utf16-code-units",
+      };
+      resetStore([large], large);
+      store.appStore.documentMode = "large";
+      store.appStore.largeFile = large.largeFile;
+      const cleanup = draft.captureDraftCleanupContext(large);
+      assert.ok(cleanup, "large cleanup captures the path-owned draft id");
+      const record = {
+        id: cleanup.id,
+        kind: "large",
+        schemaVersion: 1,
+        path: large.path,
+        updatedAt: Date.now(),
+        editorMode: large.editorMode,
+        largeSnapshot: {
+          schemaVersion: 1,
+          snapshotId: "snapshot-large-cleanup",
+          draftId: cleanup.id,
+          originPath: large.path,
+          originFingerprint: { sizeBytes: 8192, modifiedMillis: 4, sha256: "large-base" },
+          capturedRevision: 4,
+          coordinateSpace: "utf16-code-units",
+          byteLength: 8192,
+          totalLines: 12,
+          sha256: "snapshot-sha",
+        },
+      };
+      tauri.draftRecords.set(record.id, record);
+      tauri.failNextLargeDraftDelete();
+      const failed = await draft.clearCapturedDraft(cleanup);
+      assert.equal(failed, false, "payload cleanup failure is reported");
+      assert.equal(tauri.draftRecords.has(record.id), true, "a failed payload cleanup restores the manifest for recovery");
+      assert.match(draft.draftStore.message, /已恢复草稿记录/u, "payload cleanup failure keeps the manifest recovery diagnosis visible");
+      assert.deepEqual(
+        tauri.draftEvents.map((event) => event.kind),
+        ["delete-start", "delete-done", "snapshot-delete-start", "write-start", "write-done"],
+        "manifest deletion precedes payload deletion and a failed payload step restores it",
+      );
+
+      tauri.draftEvents.length = 0;
+      tauri.failNextDraftDelete();
+      const firstStepFailed = await draft.clearCapturedDraft(cleanup);
+      assert.equal(firstStepFailed, false, "manifest deletion failure is reported");
+      assert.equal(tauri.draftRecords.has(record.id), true, "manifest failure leaves both recovery assets available");
+      assert.equal(tauri.draftEvents.some((event) => event.kind === "snapshot-delete-start"), false, "payload deletion is not attempted after manifest failure");
+
+      tauri.draftEvents.length = 0;
+      const cleared = await draft.clearCapturedDraft(cleanup);
+      assert.equal(cleared, true, "large draft cleanup succeeds after native failures are cleared");
+      assert.equal(tauri.draftRecords.has(record.id), false);
+      assert.deepEqual(
+        tauri.draftEvents.map((event) => event.kind),
+        ["delete-start", "delete-done", "snapshot-delete-start", "snapshot-delete-done"],
+      );
+
+      tauri.draftRecords.set(record.id, record);
+      tauri.draftEvents.length = 0;
+      tauri.deferNextLargeDraftDelete();
+      tauri.failNextLargeDraftDelete();
+      const interleavedCleanup = draft.clearCapturedDraft(cleanup);
+      await tauri.waitForLargeDraftDeleteStart();
+      const newer = makeTab("large-draft-newer", large.path, large.name, "newer draft bytes", "normal");
+      newer.isDirty = true;
+      store.appStore.tabs.push(newer);
+      const newerWrite = draft.flushDraftsForWindowClose([newer], "preserve");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(
+        tauri.draftEvents.some((event) => event.kind === "write-start"),
+        false,
+        "a newer same-id draft waits for the in-flight large cleanup lock",
+      );
+      tauri.releaseLargeDraftDelete();
+      assert.equal(await interleavedCleanup, false, "the failed cleanup remains an explicit failure");
+      assert.equal((await newerWrite).ok, true, "the newer same-id draft writes after cleanup compensation completes");
+      assert.equal(
+        tauri.draftRecords.get(record.id)?.content,
+        "newer draft bytes",
+        "old large-draft compensation cannot overwrite the newer same-id draft",
+      );
     });
 
     await runWp04bRedCase("pending editor input still opens the close prompt", async () => {
@@ -1886,7 +2455,7 @@ try {
   const draftDir = fs.mkdtempSync(path.join(root, "node_modules", ".lightmark-draft-transaction-"));
   try {
     fs.writeFileSync(path.join(draftDir, "draft-vue.mjs"), proxyStub);
-    fs.writeFileSync(path.join(draftDir, "draft-runtime.mjs"), "export function documentSessionForTab() { return null; }\n");
+    fs.writeFileSync(path.join(draftDir, "draft-runtime.mjs"), "export function documentSessionForTab() { return null; }\nexport async function flushDocumentSessionPendingEdits() { return undefined; }\n");
     fs.writeFileSync(path.join(draftDir, "draft-tracker.mjs"), fs.readFileSync(mutationTrackerPath));
     fs.writeFileSync(path.join(draftDir, "draft-dialog.mjs"), "export function showDialog() { return Promise.resolve('keep'); }\n");
     fs.writeFileSync(path.join(draftDir, "draft-app-store.mjs"), [
@@ -1894,7 +2463,14 @@ try {
       "export const appStore = { settings: { general: { autoSave: true, autoSaveIntervalMinutes: 5 } }, tabs: reactive([]), activeTabId: '' };",
       "export async function flushDocumentSnapshot() {}",
       "export async function flushDocumentSnapshotWithReceipt() { return { markdown: '' }; }",
+      "export function getPaneTab() { return appStore.tabs.find((item) => item.id === appStore.activeTabId) ?? null; }",
+      "export async function preparePaneActivation() { return { fence: {}, flushed: null }; }",
+      "export function paneActivationFenceStillCurrent() { return true; }",
+      "export async function captureLargeFileDraftSnapshot() { throw new Error('large draft fixture is not exercised here'); }",
+      "export function createRecoveredLargeTab() { throw new Error('large draft fixture is not exercised here'); }",
+      "export function largePaneForTab() { return 'main'; }",
       "export function createUntitledTab(content = '', dirty = false) { const tab = { id: `created-${appStore.tabs.length}`, kind: 'untitled', path: '', content, isDirty: dirty, editorMode: 'wysiwyg' }; appStore.tabs.push(tab); appStore.activeTabId = tab.id; return tab; }",
+      "export async function createUntitledTabAfterFlush(_paneId, content = '', dirty = false) { return createUntitledTab(content, dirty); }",
       "export function setContent(content, dirty = true) { const tab = appStore.tabs.find((item) => item.id === appStore.activeTabId); if (tab) { tab.content = content; tab.isDirty = dirty; } }",
       "export async function switchMode() {}",
     ].join("\n"));
@@ -1905,9 +2481,9 @@ try {
       "export function deferNextWrite() { defer = true; }",
       "export function releaseWrite() { release?.(); release = null; }",
       "export async function invoke(command, args = {}) {",
-      "  if (command === 'write_draft') { draftWrites.push(args.record); if (defer) { defer = false; await new Promise((resolve) => { release = resolve; }); } return null; }",
+      "  if (command === 'write_draft') { draftWrites.push(args.record); if (defer) { defer = false; await new Promise((resolve) => { release = resolve; }); } return { path: `drafts/${args.record.id}.json`, outcome: 'committed', diskWritten: 'yes' }; }",
       "  if (command === 'get_file_snapshot') return { exists: false };",
-      "  if (command === 'list_drafts') return [];",
+      "  if (command === 'list_drafts') return { records: [], issues: [] };",
       "  return null;",
       "}",
     ].join("\n"));

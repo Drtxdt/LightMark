@@ -4,12 +4,14 @@ import { appStore, closeGoToLine, recordNavigationLocation } from "../../stores/
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 const value = ref("");
+const composing = ref(false);
 const backdrop = ref<HTMLElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
 useOverlayFocus({ backdrop, panel, initialFocus: input, close: closeGoToLine });
 
 function submit() {
+  if (composing.value) return;
   const line = Number.parseInt(value.value.trim(), 10);
   if (!Number.isFinite(line) || line < 1) {
     appStore.statusMessage = "请输入有效的行号";
@@ -40,6 +42,8 @@ function submit() {
       <input
         ref="input"
         v-model="value"
+        @compositionstart="composing = true"
+        @compositionend="composing = false"
         inputmode="numeric"
         pattern="[0-9]*"
         class="w-full border-b border-paper-200 bg-transparent px-4 py-3 text-base text-ink-900 outline-none placeholder:text-ink-500 dark:border-paper-800 dark:text-ink-100 dark:placeholder:text-ink-300"

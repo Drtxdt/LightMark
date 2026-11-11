@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import ts from 'typescript';
+import {pathToFileURL} from 'node:url';
+import {compileTypeScriptModuleGraph}from'./transpile-module-graph.mjs';
+const temp=fs.mkdtempSync(path.resolve('node_modules/.lightmark-large-find-'));
+try{
+ const {LargeSearchCoordinator}=await import(pathToFileURL(compileTypeScriptModuleGraph(path.resolve('src/editor/largeSearchCoordinator.ts'),temp)).href);
+ const source=fs.readFileSync('src/components/editor/LargeMarkdownEditor.vue','utf8').split('<script setup lang="ts">')[1].split('</script>')[0];
+ const ast=ts.createSourceFile('large.ts',source,ts.ScriptTarget.Latest,true),node=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='handleFind');assert.ok(node);
+ const code=ts.transpileModule(node.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+ const make=new Function('deps',`const {LargeSearchCoordinator,searchLargeFile,submitPending}=deps; const appStore={splitLayout:{activePaneId:'main'}},props={paneId:'main'},largeFile={value:{sessionId:'owned',revision:1}},readOnly={value:false};
+ const findReplaceStore={open:true,query:'old',replaceText:'replacement',caseSensitive:false,wholeWord:false,regex:false,currentIndex:-1,total:0},findOptions=()=>({caseSensitive:findReplaceStore.caseSensitive,wholeWord:findReplaceStore.wholeWord,regex:findReplaceStore.regex});
+ let pendingVersion=0,findRevision=-1,findFingerprint='',findMatches=[];const searchCoordinator=new LargeSearchCoordinator(),published=[],replaced=[],loaded=[],errors=[];
+ const isPending=()=>false,LargeSessionStaleError=Error,formatLargeTransactionEvidence=String,logicalHead={line:0,column:0},view={focus(){}},cache={clear(){}};
+ const setFindResult=(total,index,error)=>{published.push({total,index,error});findReplaceStore.total=total;findReplaceStore.currentIndex=index},showError=e=>errors.push(e);
+ const replaceLargeFileMatches=async(...args)=>{replaced.push(args);if(deps.afterReplace)await deps.afterReplace()},loadWindow=async(...args)=>loaded.push(args);
+ ${code};return {run:detail=>handleFind({detail}),findReplaceStore,published,replaced,loaded,errors,searchCoordinator,input:()=>pendingVersion++};`);
+ const match={line:4,startColumn:2,endColumn:5,text:'old'},result=matches=>({matches,total:matches.length,revision:1,coordinateSpace:'utf16-code-units',error:''});
+ const setup=(search,extra={})=>make({LargeSearchCoordinator,searchLargeFile:search,submitPending:async()=>{},...extra});
+ const empty=setup(async()=>result([]));await empty.run('replaceCurrent');assert.equal(empty.replaced.length,0,'missing single match must never become replace all');
+ const single=setup(async()=>result([match]));single.findReplaceStore.currentIndex=99;await single.run('replaceCurrent');assert.deepEqual(single.replaced[0].slice(0,4),['old','replacement',{caseSensitive:false,wholeWord:false,regex:false},match]);
+ let release;const old=setup(()=>new Promise(resolve=>release=resolve));const held=old.run('replaceCurrent');await new Promise(r=>setTimeout(r,0));old.findReplaceStore.query='new';release(result([match]));await held;assert.equal(old.published.length,0);assert.equal(old.replaced.length,0);
+ let releaseSubmit;const frozen=setup(async()=>result([match]),{submitPending:()=>new Promise(resolve=>releaseSubmit=resolve)});const command=frozen.run('replaceCurrent');frozen.findReplaceStore.replaceText='later replacement';releaseSubmit();await command;assert.equal(frozen.replaced[0][1],'replacement','replacement belongs to command start');
+ let calls=0,aborts=0;
+ const changing=setup((query,_options,_start,_limit,_pane,signal)=>{calls++;if(query==='old')return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>{aborts++;reject(new DOMException('cancel','AbortError'))},{once:true}));return Promise.resolve(result([{...match,text:'new'}]))});
+ const first=changing.run('refresh');await new Promise(r=>setTimeout(r,0));changing.findReplaceStore.query='new';await changing.run('refresh');await first;assert.equal(calls,2);assert.equal(aborts,1);assert.equal(changing.published.length,1);assert.equal(changing.errors.length,0);
+ let releaseShared,sharedCalls=0;const shared=setup(()=>{sharedCalls++;return new Promise(resolve=>releaseShared=resolve)});const refresh=shared.run('refresh'),next=shared.run('next');await new Promise(r=>setTimeout(r,0));releaseShared(result([match]));await Promise.all([refresh,next]);assert.equal(sharedCalls,1,'identical in-flight queries reuse the same backend scan');
+ const guarded=setup(async()=>result([match]),{afterReplace:async()=>guarded.input()});await guarded.run('replaceAll');assert.equal(guarded.loaded.length,0);assert.equal(guarded.errors.length,1);
+ const coordinator=new LargeSearchCoordinator();let queuedCalls=0;const queued=coordinator.search('old',1,async()=>{queuedCalls++;return 'wrong'});coordinator.cancel();await assert.rejects(queued,error=>error.name==='AbortError');assert.equal(queuedCalls,0,'superseded queued queries never start I/O');
+ console.log('Production large find ownership passed: single-match intent, frozen arguments, stale query suppression, cancellation and shared scans.');
+}finally{fs.rmSync(temp,{recursive:true,force:true})}

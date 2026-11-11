@@ -1,9 +1,44 @@
 import { Node as ProseMirrorNode, type Schema } from "@tiptap/pm/model";
 import { NodeSelection, Selection } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
+import type {
+  RecoveryCompositionV3,
+  RecoveryExposedMarkdownRange,
+  RecoveryExposedMarkdownV3,
+  RecoveryHistoryV3,
+  RecoveryLocalBufferV3,
+  RecoveryLocalStateV3,
+  RecoveryLocalTextUi,
+  WysiwygFormatHistoryEntry,
+} from "./recoveryLocalState";
+
+export type {
+  RecoveryCompositionV3,
+  RecoveryExposedMarkdownRange,
+  RecoveryExposedMarkdownV3,
+  RecoveryHistoryAvailability,
+  RecoveryHistoryV3,
+  RecoveryLocalBufferCapture,
+  RecoveryLocalBufferCaptureFailure,
+  RecoveryLocalBufferCaptureResult,
+  RecoveryLocalBufferCaptureSnapshot,
+  RecoveryLocalBufferKind,
+  RecoveryLocalBufferRegistration,
+  RecoveryLocalBufferRegistry,
+  RecoveryLocalBufferRestore,
+  RecoveryLocalBufferRestoreIssue,
+  RecoveryLocalBufferRestoreSnapshot,
+  RecoveryLocalBufferStatus,
+  RecoveryLocalBufferV3,
+  RecoveryLocalStateV3,
+  RecoveryLocalTextUi,
+  WysiwygFormatHistoryEntry,
+} from "./recoveryLocalState";
 
 export const RECOVERY_FORMAT = "lightmark-recovery" as const;
 export const RECOVERY_SCHEMA_VERSION = 2 as const;
+export const RECOVERY_V3_SCHEMA_VERSION = 3 as const;
+export const RECOVERY_CURRENT_SCHEMA_VERSION = RECOVERY_V3_SCHEMA_VERSION;
 
 const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 const MAX_BUNDLE_BYTES = 96 * 1024 * 1024;
@@ -15,6 +50,13 @@ const MAX_PENDING_MATH_ENTRIES = 512;
 const MAX_MATH_TEXT_LENGTH = 2 * 1024 * 1024;
 const MAX_PATH_LENGTH = 4096;
 const MAX_SCROLL_TOP = Number.MAX_SAFE_INTEGER;
+const MAX_LOCAL_BUFFERS = 512;
+const MAX_LOCAL_HISTORY_ENTRIES = 20;
+const MAX_LOCAL_STATE_BYTES = 32 * 1024 * 1024;
+const MAX_LOCAL_BUFFER_ID_LENGTH = 256;
+const MAX_LOCAL_ERROR_CODE_LENGTH = 256;
+const MAX_LOCAL_ERROR_MESSAGE_LENGTH = 4096;
+const MAX_LOCAL_PREVIEW_STATUS_LENGTH = 256;
 
 const mathDelimiters = new Set([
   "inline-dollar",
@@ -27,6 +69,9 @@ const mathDelimiters = new Set([
 const pendingStates = new Set(["editing", "composing", "blurPending", "conflict"]);
 const selectionTypes = new Set(["text", "node", "all", "cell"]);
 const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
+const localBufferKinds = new Set(["frontmatter", "htmlBlock", "footnote", "toc", "mermaid", "math"]);
+const localBufferStatuses = new Set(["accepted", "editing", "conflicted", "orphaned"]);
+const textUiDirections = new Set(["forward", "backward", "none"]);
 
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -65,6 +110,69 @@ export type RecoveryPendingMath = {
   entries: RecoveryPendingMathEntry[];
 };
 
+/**
+ * Preserve pending math entries that outlive a NodeView remount.  Stable ids
+ * are authoritative: if a newly mounted entry uses the same id with a
+ * different payload, capture fails instead of selecting one value silently.
+ */
+export function mergeRecoveryPendingMath(
+  current: RecoveryPendingMath,
+  retained: RecoveryPendingMath,
+): RecoveryPendingMath {
+  const entries = [...current.entries];
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  for (const entry of retained.entries) {
+    const existing = byId.get(entry.id);
+    if (!existing) {
+      // A PM restore remounts NodeViews and may allocate a new runtime id for
+      // the same linked formula.  Treat an exact accepted/local payload at
+      // the same kind+position as that remount, while keeping the live entry
+      // (its UI state is the current truth).  A changed payload at the same
+      // binding is a real conflict and must stop capture rather than choose
+      // one side silently.
+      const positional = entry.binding.status === "linked"
+        ? entries.find((candidate) => candidate.binding.status === "linked"
+          && candidate.binding.kind === entry.binding.kind
+          && candidate.binding.position === entry.binding.position)
+        : undefined;
+      if (positional) {
+        if (sameRecoveryPendingMathPayload(positional, entry)) continue;
+        throw new Error(
+          `Recovery pending math payload conflicts for linked binding ${entry.binding.kind}@${entry.binding.position}.`,
+        );
+      }
+      entries.push(entry);
+      byId.set(entry.id, entry);
+      continue;
+    }
+    if (JSON.stringify(existing) !== JSON.stringify(entry)) {
+      throw new Error(`Recovery pending math payload conflicts for stable id ${entry.id}.`);
+    }
+  }
+  return { version: Math.max(current.version, retained.version), entries };
+}
+
+function sameRecoveryPendingMathPayload(
+  left: RecoveryPendingMathEntry,
+  right: RecoveryPendingMathEntry,
+) {
+  return left.binding.status === "linked"
+    && right.binding.status === "linked"
+    && left.binding.kind === right.binding.kind
+    && left.binding.position === right.binding.position
+    && JSON.stringify({ accepted: left.accepted, local: left.local })
+      === JSON.stringify({ accepted: right.accepted, local: right.local });
+}
+
+export function subtractCapturedPendingMath(
+  retained: RecoveryPendingMath,
+  captured: RecoveryPendingMath,
+): RecoveryPendingMath {
+  const capturedIds = new Set(captured.entries.map((entry) => entry.id));
+  const entries = retained.entries.filter((entry) => !capturedIds.has(entry.id));
+  return entries.length ? { version: retained.version, entries } : { version: 0, entries: [] };
+}
+
 export type RecoveryScroll = {
   scrollTop: number;
   scrollRatio: number;
@@ -102,6 +210,11 @@ export type RecoveryBundle = {
   origin: RecoveryOrigin;
 };
 
+export type RecoveryBundleV3 = Omit<RecoveryBundle, "schemaVersion"> & {
+  schemaVersion: typeof RECOVERY_V3_SCHEMA_VERSION;
+  localState: RecoveryLocalStateV3;
+};
+
 export type RecoveryCapture = {
   sourceBytes: Uint8Array;
   doc: ProseMirrorNode;
@@ -109,6 +222,10 @@ export type RecoveryCapture = {
   scroll: RecoveryScroll;
   pendingMath: RecoveryPendingMath;
   origin: RecoveryOrigin;
+};
+
+export type RecoveryCaptureV3 = RecoveryCapture & {
+  localState: RecoveryLocalStateV3;
 };
 
 export type DecodedRecovery = {
@@ -119,6 +236,11 @@ export type DecodedRecovery = {
   scroll: RecoveryScroll;
   pendingMath: RecoveryPendingMath;
   origin: RecoveryOrigin;
+  localState?: RecoveryLocalStateV3;
+};
+
+export type DecodedRecoveryV3 = Omit<DecodedRecovery, "localState"> & {
+  localState: RecoveryLocalStateV3;
 };
 
 export type RecoveryValidationCode =
@@ -131,7 +253,8 @@ export type RecoveryValidationCode =
   | "invalid-selection"
   | "invalid-scroll"
   | "invalid-pending-math"
-  | "invalid-origin";
+  | "invalid-origin"
+  | "invalid-local-state";
 
 export class RecoveryValidationError extends Error {
   readonly code: RecoveryValidationCode;
@@ -145,10 +268,35 @@ export class RecoveryValidationError extends Error {
   }
 }
 
-export function encodeRecoveryBundle(input: RecoveryCapture): string {
+/**
+ * A recovery source and its PM document are separate evidence streams.  A
+ * recovered document may contain edits that were not mapped back to source
+ * bytes, so an adapter must establish that mapping before allowing a source
+ * overwrite.  This guard is intentionally small and side-effect free so the
+ * product adapter and its tests can share the same boundary.
+ */
+export function assertRecoverySourceMappingProven(input: {
+  sourceText: string;
+  modelText: string;
+  mappingProven: boolean;
+}) {
+  if (input.mappingProven) return;
+  throw new Error(
+    `Recovery source mapping is unresolved; source (${input.sourceText.length} UTF-16 units) and PM model (${input.modelText.length} UTF-16 units) cannot overwrite source bytes.`,
+  );
+}
+
+export function encodeRecoveryBundle(input: RecoveryCapture | RecoveryCaptureV3): string {
+  return encodeBundle(input, Object.prototype.hasOwnProperty.call(input, "localState"));
+}
+
+export function encodeRecoveryBundleV3(input: RecoveryCaptureV3): string {
+  return encodeBundle(input, true);
+}
+
+function encodeBundle(input: RecoveryCapture | RecoveryCaptureV3, v3: boolean): string {
   const sourceBytes = copySourceBytes(input.sourceBytes);
   const sourceText = decodeUtf8(sourceBytes, "$.sourceBytes");
-  void sourceText;
   assertDocumentState(input.doc, "$.document.json");
   const documentJson = input.doc.toJSON() as unknown;
   validateJsonValue(documentJson, "$.document.json");
@@ -158,9 +306,9 @@ export function encodeRecoveryBundle(input: RecoveryCapture): string {
   const pendingMath = validatePendingMath(input.pendingMath, input.doc, "$.pendingMath");
   const scroll = validateScroll(input.scroll, "$.scroll");
   const origin = validateOrigin(input.origin, "$.origin");
-  const bundle: RecoveryBundle = {
+  const bundle = {
     format: RECOVERY_FORMAT,
-    schemaVersion: RECOVERY_SCHEMA_VERSION,
+    schemaVersion: v3 ? RECOVERY_V3_SCHEMA_VERSION : RECOVERY_SCHEMA_VERSION,
     source: {
       encoding: "utf-8",
       bytesBase64: encodeBase64(sourceBytes),
@@ -177,7 +325,17 @@ export function encodeRecoveryBundle(input: RecoveryCapture): string {
     scroll,
     pendingMath,
     origin,
-  };
+  } as RecoveryBundle | RecoveryBundleV3;
+  if (v3) {
+    const localState = validateRecoveryLocalStateV3(
+      (input as RecoveryCaptureV3).localState,
+      sourceText.length,
+      input.doc,
+    );
+    validateLocalStateMathCrossCheck(localState, pendingMath, input.doc, "$.localState");
+    (bundle as RecoveryBundleV3).localState = localState;
+    assertByteLimit(JSON.stringify(localState), MAX_LOCAL_STATE_BYTES, "$.localState");
+  }
   const serialized = JSON.stringify(bundle);
   assertByteLimit(serialized, MAX_BUNDLE_BYTES, "$");
   return serialized;
@@ -185,14 +343,38 @@ export function encodeRecoveryBundle(input: RecoveryCapture): string {
 
 export function decodeRecoveryBundle(input: string | unknown, schema: Schema): DecodedRecovery {
   const bundle = parseBundle(input);
-  assertExactKeys(bundle, ["format", "schemaVersion", "source", "document", "selection", "scroll", "pendingMath", "origin"], "$");
   if (bundle.format !== RECOVERY_FORMAT) {
     throw new RecoveryValidationError("invalid-format", "Recovery file format is not supported.", "$.format");
   }
-  if (bundle.schemaVersion !== RECOVERY_SCHEMA_VERSION) {
+  if (bundle.schemaVersion === RECOVERY_SCHEMA_VERSION) {
+    assertExactKeys(bundle, recoveryBundleKeys, "$");
+    return decodeRecoveryBase(bundle, schema);
+  }
+  if (bundle.schemaVersion === RECOVERY_V3_SCHEMA_VERSION) {
+    assertExactKeys(bundle, recoveryBundleV3Keys, "$");
+    const decoded = decodeRecoveryBase(bundle, schema);
+    const localState = validateRecoveryLocalStateV3(bundle.localState, decoded.sourceText.length, decoded.doc);
+    validateLocalStateMathCrossCheck(localState, decoded.pendingMath, decoded.doc, "$.localState");
+    return {
+      ...decoded,
+      localState,
+    };
+  }
+  throw new RecoveryValidationError("unsupported-version", "Recovery file schema version is not supported.", "$.schemaVersion");
+}
+
+export function decodeRecoveryBundleV3(input: string | unknown, schema: Schema): DecodedRecoveryV3 {
+  const decoded = decodeRecoveryBundle(input, schema);
+  if (!decoded.localState) {
     throw new RecoveryValidationError("unsupported-version", "Recovery file schema version is not supported.", "$.schemaVersion");
   }
+  return decoded as DecodedRecoveryV3;
+}
 
+const recoveryBundleKeys = ["format", "schemaVersion", "source", "document", "selection", "scroll", "pendingMath", "origin"] as const;
+const recoveryBundleV3Keys = [...recoveryBundleKeys, "localState"] as const;
+
+function decodeRecoveryBase(bundle: Record<string, unknown>, schema: Schema): DecodedRecovery {
   const source = decodeSource(bundle.source);
   const documentRecord = expectRecord(bundle.document, "$.document", "invalid-document");
   assertExactKeys(documentRecord, ["format", "json"], "$.document");
@@ -221,6 +403,764 @@ export function decodeRecoveryBundle(input: string | unknown, schema: Schema): D
     pendingMath,
     origin,
   };
+}
+
+/**
+ * Validate and copy the v3 local state.  This function is intentionally
+ * independent of an EditorView or a renderer: strings that happen to contain
+ * HTML, Mermaid source, or script-looking text remain opaque JSON data.
+ */
+export function validateRecoveryLocalStateV3(
+  value: unknown,
+  sourceUtf16Length?: number,
+  doc?: ProseMirrorNode,
+): RecoveryLocalStateV3 {
+  const path = "$.localState";
+  const record = expectRecord(value, path, "invalid-local-state");
+  validateLocalJsonValue(record, path);
+  assertExactKeys(record, ["schema", "revision", "buffers", "exposedMarkdown", "composition", "history"], path, "invalid-local-state");
+  if (record.schema !== "lightmark.local-state") {
+    throw new RecoveryValidationError("invalid-local-state", "Local state schema is unsupported.", `${path}.schema`);
+  }
+  assertNonNegativeSafeInteger(record.revision, `${path}.revision`, "Local state revision must be a non-negative safe integer.");
+  if (!Array.isArray(record.buffers) || record.buffers.length > MAX_LOCAL_BUFFERS) {
+    throw new RecoveryValidationError("invalid-local-state", "Local state buffer count exceeds the supported limit.", `${path}.buffers`);
+  }
+  const ids = new Set<string>();
+  const buffers = record.buffers.map((entry, index) => validateLocalBuffer(
+    entry,
+    `${path}.buffers[${index}]`,
+    record.revision as number,
+    sourceUtf16Length,
+    ids,
+    doc,
+  ));
+  const exposedMarkdown = record.exposedMarkdown === null
+    ? null
+    : validateExposedMarkdownV3(record.exposedMarkdown, `${path}.exposedMarkdown`, record.revision as number, doc);
+  const composition = record.composition === null
+    ? null
+    : validateCompositionV3(record.composition, `${path}.composition`, record.revision as number);
+  const history = validateHistoryV3(record.history, `${path}.history`);
+  return {
+    schema: "lightmark.local-state",
+    revision: record.revision,
+    buffers,
+    exposedMarkdown,
+    composition,
+    history,
+  };
+}
+
+function validateLocalBuffer(
+  value: unknown,
+  path: string,
+  localRevision: number,
+  sourceUtf16Length: number | undefined,
+  ids: Set<string>,
+  doc: ProseMirrorNode | undefined,
+): RecoveryLocalBufferV3 {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertAllowedKeys(record, ["id", "kind", "status", "sourceRevision", "pmPath", "positionHint", "rawSpan", "payload", "ui", "error"], path, "invalid-local-state");
+  requireKeys(record, ["id", "kind", "status", "sourceRevision", "payload"], path, "invalid-local-state");
+  assertIdentifier(record.id, `${path}.id`, "Local buffer id is invalid.");
+  if (ids.has(record.id)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer ids must be unique.", `${path}.id`);
+  }
+  ids.add(record.id);
+  if (typeof record.kind !== "string" || !localBufferKinds.has(record.kind)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer kind is unsupported.", `${path}.kind`);
+  }
+  if (typeof record.status !== "string" || !localBufferStatuses.has(record.status)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer status is unsupported.", `${path}.status`);
+  }
+  assertNonNegativeSafeInteger(record.sourceRevision, `${path}.sourceRevision`, "Local buffer sourceRevision must be a non-negative safe integer.");
+  if ((record.sourceRevision as number) > localRevision) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer sourceRevision cannot be newer than local state revision.", `${path}.sourceRevision`);
+  }
+
+  const pmPath = record.pmPath === undefined ? undefined : validatePmPath(record.pmPath, `${path}.pmPath`);
+  const positionHint = record.positionHint === undefined
+    ? undefined
+    : validatePositionHint(record.positionHint, `${path}.positionHint`);
+  const rawSpan = record.rawSpan === undefined
+    ? undefined
+    : validateRawSpan(record.rawSpan, `${path}.rawSpan`, sourceUtf16Length);
+  const payload = validateLocalPayload(record.kind, record.payload, `${path}.payload`, record.status);
+  const payloadTextLength = localPayloadTextLength(record.kind, payload);
+  const ui = record.ui === undefined ? undefined : validateTextUi(record.ui, `${path}.ui`, payloadTextLength);
+  const error = record.error === undefined ? undefined : validateLocalError(record.error, `${path}.error`);
+  if ((record.status === "conflicted" || record.status === "orphaned") && !error) {
+    throw new RecoveryValidationError("invalid-local-state", "Conflicted or orphaned local buffers must retain a typed error.", `${path}.error`);
+  }
+  if (doc && (record.status === "accepted" || record.status === "editing")) {
+    validateLocalBufferBinding(
+      record.kind,
+      payload,
+      pmPath,
+      positionHint,
+      doc,
+      path,
+    );
+  }
+  return {
+    id: record.id,
+    kind: record.kind,
+    status: record.status,
+    sourceRevision: record.sourceRevision,
+    ...(pmPath ? { pmPath } : {}),
+    ...(positionHint !== undefined ? { positionHint } : {}),
+    ...(rawSpan ? { rawSpan } : {}),
+    payload,
+    ...(ui ? { ui } : {}),
+    ...(error ? { error } : {}),
+  } as RecoveryLocalBufferV3;
+}
+
+function validateLocalBufferBinding(
+  kind: string,
+  payload: any,
+  pmPath: number[] | undefined,
+  positionHint: number | null | undefined,
+  doc: ProseMirrorNode,
+  path: string,
+) {
+  if (pmPath === undefined && (positionHint === undefined || positionHint === null)) return;
+  const expectedTypes = expectedLocalNodeTypes(kind, payload);
+  const fromPath = pmPath === undefined ? undefined : resolvePmPath(doc, pmPath);
+  if (pmPath !== undefined && !fromPath) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer PM path does not resolve in the recovered document.", `${path}.pmPath`);
+  }
+  const fromPosition = positionHint === undefined || positionHint === null
+    ? undefined
+    : doc.nodeAt(positionHint);
+  if (positionHint !== undefined && positionHint !== null && !fromPosition) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer positionHint does not point to a document node.", `${path}.positionHint`);
+  }
+  if (fromPath && fromPosition && fromPath.pos !== positionHint) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer PM path and positionHint do not identify the same node.", path);
+  }
+  const node = fromPath?.node || fromPosition;
+  if (!node || !expectedTypes.includes(node.type.name)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer binding points to an unexpected ProseMirror node type.", path);
+  }
+  assertLocalAcceptedAttrs(kind, payload, node, path);
+}
+
+function expectedLocalNodeTypes(kind: string, payload: any): string[] {
+  if (kind === "frontmatter") return ["frontMatter"];
+  if (kind === "htmlBlock") return ["htmlBlock"];
+  if (kind === "footnote") return ["footnotes"];
+  if (kind === "toc") return ["tableOfContents"];
+  if (kind === "mermaid") return ["mermaidDiagram"];
+  if (kind === "math") return payload?.local?.displayMode ? ["blockMath"] : ["inlineMath"];
+  return [];
+}
+
+function resolvePmPath(doc: ProseMirrorNode, path: readonly number[]) {
+  let node = doc;
+  let nodePos = -1;
+  for (const index of path) {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= node.childCount) return null;
+    let offset = 0;
+    for (let childIndex = 0; childIndex < index; childIndex += 1) offset += node.child(childIndex).nodeSize;
+    nodePos = nodePos < 0 ? offset : nodePos + 1 + offset;
+    node = node.child(index);
+  }
+  return { node, pos: nodePos };
+}
+
+function assertLocalAcceptedAttrs(kind: string, payload: any, node: ProseMirrorNode, path: string) {
+  const attrs = node.attrs as Record<string, unknown>;
+  const accepted = payload?.accepted;
+  const same = kind === "frontmatter"
+    ? accepted?.yaml === attrs.yaml && accepted?.editing === attrs.editing
+    : kind === "htmlBlock"
+      ? accepted?.html === attrs.html && accepted?.editing === attrs.editing
+      : kind === "footnote"
+        ? accepted?.markdown === attrs.markdown && accepted?.html === attrs.html && accepted?.editing === attrs.editing
+        : kind === "mermaid"
+          ? accepted?.code === attrs.code && accepted?.editing === attrs.editing
+          : kind === "math"
+            ? mathContentMatchesNode(accepted, attrs)
+            : kind === "toc"
+              ? (payload.editing === undefined || payload.editing === attrs.editing)
+              : true;
+  if (!same) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer accepted payload does not match the bound document node.", `${path}.payload.accepted`);
+  }
+}
+
+function validateExposedMarkdownBinding(
+  range: RecoveryExposedMarkdownRange,
+  selection: { anchor: number; head: number },
+  doc: ProseMirrorNode,
+  path: string,
+) {
+  const max = doc.content.size;
+  for (const [name, value] of [["from", range.from], ["to", range.to], ["blockFrom", range.blockFrom], ["selection.anchor", selection.anchor], ["selection.head", selection.head]] as const) {
+    if (value > max) {
+      throw new RecoveryValidationError("invalid-local-state", "Exposed Markdown position is outside the recovered document.", `${path}.${name}`);
+    }
+  }
+  if (range.kind === "heading") {
+    const node = doc.nodeAt(range.blockFrom);
+    if (!node || (node.type.name !== "heading" && node.type.name !== "markdownHeading")) {
+      throw new RecoveryValidationError("invalid-local-state", "Heading exposed Markdown range is not bound to a heading node.", `${path}.range.blockFrom`);
+    }
+    if (range.headingLevel !== undefined && node.attrs.level !== undefined && node.attrs.level !== range.headingLevel) {
+      throw new RecoveryValidationError("invalid-local-state", "Heading exposed Markdown level does not match the document node.", `${path}.range.headingLevel`);
+    }
+    const blockEnd = range.blockFrom + node.nodeSize - 1;
+    if (range.from < range.blockFrom + 1 || range.to > blockEnd) {
+      throw new RecoveryValidationError("invalid-local-state", "Heading exposed Markdown range exceeds its bound heading.", `${path}.range`);
+    }
+  } else {
+    const node = doc.nodeAt(range.blockFrom);
+    if (!node?.isTextblock) {
+      throw new RecoveryValidationError("invalid-local-state", "Inline exposed Markdown range is not bound to a textblock.", `${path}.range.blockFrom`);
+    }
+    const blockEnd = range.blockFrom + node.nodeSize - 1;
+    if (range.from < range.blockFrom + 1 || range.to > blockEnd) {
+      throw new RecoveryValidationError("invalid-local-state", "Inline exposed Markdown range exceeds its bound textblock.", `${path}.range`);
+    }
+  }
+}
+
+function validateLocalStateMathCrossCheck(
+  localState: RecoveryLocalStateV3,
+  pendingMath: RecoveryPendingMath,
+  doc: ProseMirrorNode,
+  path: string,
+) {
+  const pendingById = new Map(pendingMath.entries.map((entry) => [entry.id, entry]));
+  for (const [index, buffer] of localState.buffers.entries()) {
+    if (buffer.kind !== "math" || !buffer.payload || typeof buffer.payload !== "object") continue;
+    const pending = pendingById.get(buffer.id);
+    if (!pending) continue;
+    const payload = buffer.payload as any;
+    if (!jsonEqual(payload.accepted, pending.accepted) || !jsonEqual(payload.local, pending.local)) {
+      throw new RecoveryValidationError("invalid-local-state", "Math local buffer and pendingMath payload disagree for the same stable id.", `${path}.buffers[${index}].payload`);
+    }
+    if (pending.binding.status === "linked" && buffer.status !== "conflicted" && buffer.status !== "orphaned"
+      && buffer.positionHint !== undefined && buffer.positionHint !== null
+      && buffer.positionHint !== pending.binding.position) {
+      throw new RecoveryValidationError("invalid-local-state", "Math local buffer position does not match its pendingMath binding.", `${path}.buffers[${index}].positionHint`);
+    }
+  }
+}
+
+function validateLocalPayload(
+  kind: string,
+  value: unknown,
+  path: string,
+  status: string,
+): unknown {
+  if (value === null && (status === "conflicted" || status === "orphaned")) return null;
+  if (kind === "frontmatter") return validateFrontmatterPayload(value, path);
+  if (kind === "htmlBlock") return validateHtmlBlockPayload(value, path);
+  if (kind === "footnote") return validateFootnotePayload(value, path);
+  if (kind === "toc") return validateTocPayload(value, path);
+  if (kind === "mermaid") return validateMermaidPayload(value, path);
+  if (kind === "math") return validateMathLocalPayload(value, path);
+  throw new RecoveryValidationError("invalid-local-state", "Local buffer kind is unsupported.", path);
+}
+
+function validateFrontmatterPayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["accepted", "draft", "valueRevision"]);
+  requireKeys(record, ["accepted", "draft"], path, "invalid-local-state");
+  const accepted = validateAcceptedTextState(record.accepted, `${path}.accepted`, "yaml", ["yaml", "editing"]);
+  const draft = validateTextDraft(record.draft, `${path}.draft`, "yaml", ["yaml", "editing"]);
+  const valueRevision = validateOptionalRevision(record.valueRevision, `${path}.valueRevision`);
+  return {
+    accepted,
+    draft,
+    ...(valueRevision === undefined ? {} : { valueRevision }),
+  };
+}
+
+function validateHtmlBlockPayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["accepted", "draft", "committing", "valueRevision"]);
+  requireKeys(record, ["accepted", "draft"], path, "invalid-local-state");
+  const accepted = validateAcceptedTextState(
+    record.accepted,
+    `${path}.accepted`,
+    "html",
+    ["html", "editing", "decoded", "sanitized"],
+  );
+  const draft = validateTextDraft(
+    record.draft,
+    `${path}.draft`,
+    "html",
+    ["html", "value", "decoded", "sanitized", "editing"],
+  );
+  const committing = validateOptionalBoolean(record.committing, `${path}.committing`);
+  const valueRevision = validateOptionalRevision(record.valueRevision, `${path}.valueRevision`);
+  return {
+    accepted,
+    draft,
+    ...(committing === undefined ? {} : { committing }),
+    ...(valueRevision === undefined ? {} : { valueRevision }),
+  };
+}
+
+function validateFootnotePayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["accepted", "draft", "fallbackHtml", "normalized", "committing", "frame", "valueRevision"]);
+  requireKeys(record, ["accepted", "draft", "fallbackHtml"], path, "invalid-local-state");
+  const accepted = validateAcceptedFootnoteState(record.accepted, `${path}.accepted`);
+  const draft = validateTextDraft(record.draft, `${path}.draft`, "markdown", ["markdown", "normalized", "editing"]);
+  const fallbackHtml = validateText(record.fallbackHtml, `${path}.fallbackHtml`);
+  const normalized = validateOptionalBoolean(record.normalized, `${path}.normalized`);
+  const committing = validateOptionalBoolean(record.committing, `${path}.committing`);
+  const frame = validateOptionalFrame(record.frame, `${path}.frame`);
+  const valueRevision = validateOptionalRevision(record.valueRevision, `${path}.valueRevision`);
+  return {
+    accepted,
+    draft,
+    fallbackHtml,
+    ...(normalized === undefined ? {} : { normalized }),
+    ...(committing === undefined ? {} : { committing }),
+    ...(frame === undefined ? {} : { frame }),
+    ...(valueRevision === undefined ? {} : { valueRevision }),
+  };
+}
+
+function validateTocPayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["candidate", "accepted", "editing", "valueRevision"]);
+  requireKeys(record, ["candidate"], path, "invalid-local-state");
+  const candidate = validateText(record.candidate, `${path}.candidate`);
+  const accepted = record.accepted === undefined ? undefined : validateText(record.accepted, `${path}.accepted`);
+  const editing = validateOptionalBoolean(record.editing, `${path}.editing`);
+  const valueRevision = validateOptionalRevision(record.valueRevision, `${path}.valueRevision`);
+  return {
+    candidate,
+    ...(accepted === undefined ? {} : { accepted }),
+    ...(editing === undefined ? {} : { editing }),
+    ...(valueRevision === undefined ? {} : { valueRevision }),
+  };
+}
+
+function validateMermaidPayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["accepted", "draft", "preview", "valueRevision"]);
+  requireKeys(record, ["accepted", "draft"], path, "invalid-local-state");
+  const accepted = validateAcceptedTextState(record.accepted, `${path}.accepted`, "code", ["code", "editing"]);
+  const draft = validateTextDraft(record.draft, `${path}.draft`, "code", ["code", "editing"]);
+  const preview = record.preview === undefined ? undefined : validateMermaidPreview(record.preview, `${path}.preview`);
+  const valueRevision = validateOptionalRevision(record.valueRevision, `${path}.valueRevision`);
+  return {
+    accepted,
+    draft,
+    ...(preview === undefined ? {} : { preview }),
+    ...(valueRevision === undefined ? {} : { valueRevision }),
+  };
+}
+
+function validateMathLocalPayload(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["accepted", "local", "valueRevision", "ui"]);
+  requireKeys(record, ["accepted", "local", "valueRevision"], path, "invalid-local-state");
+  const accepted = validateLocalMathContent(record.accepted, `${path}.accepted`);
+  const local = validateLocalMathContent(record.local, `${path}.local`);
+  const valueRevision = validateNonNegativeSafeInteger(record.valueRevision, `${path}.valueRevision`, "Math local valueRevision must be a non-negative safe integer.");
+  const ui = record.ui === undefined || record.ui === null
+    ? record.ui
+    : validateTextUi(record.ui, `${path}.ui`, local.raw.length);
+  return {
+    accepted,
+    local,
+    valueRevision,
+    ...(ui === undefined ? {} : { ui }),
+  };
+}
+
+function validateAcceptedTextState(value: unknown, path: string, textKey: string, keys: readonly string[]) {
+  const record = localPayloadRecord(value, path, keys);
+  requireKeys(record, [textKey, "editing"], path, "invalid-local-state");
+  const text = validateText(record[textKey], `${path}.${textKey}`);
+  const editing = validateBoolean(record.editing, `${path}.editing`);
+  const result: Record<string, unknown> = { [textKey]: text, editing };
+  for (const key of keys) {
+    if (key === textKey || key === "editing" || record[key] === undefined) continue;
+    if (key === "decoded" || key === "sanitized") result[key] = validateBoolean(record[key], `${path}.${key}`);
+  }
+  return result;
+}
+
+function validateAcceptedFootnoteState(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["markdown", "html", "editing"]);
+  requireKeys(record, ["markdown", "html", "editing"], path, "invalid-local-state");
+  return {
+    markdown: validateText(record.markdown, `${path}.markdown`),
+    html: validateText(record.html, `${path}.html`),
+    editing: validateBoolean(record.editing, `${path}.editing`),
+  };
+}
+
+function validateTextDraft(value: unknown, path: string, textKey: string, keys: readonly string[]) {
+  if (typeof value === "string") return validateText(value, path);
+  const record = localPayloadRecord(value, path, keys);
+  const aliases = textKey === "html" && keys.includes("value") ? ["html", "value"] : [textKey];
+  const present = aliases.filter((key) => Object.prototype.hasOwnProperty.call(record, key));
+  if (present.length === 0) {
+    throw new RecoveryValidationError("invalid-local-state", `Local draft must contain ${textKey} text.`, path);
+  }
+  for (const key of present) {
+    if (typeof record[key] !== "string") {
+      throw new RecoveryValidationError("invalid-local-state", `Local draft ${key} alias must be text when present.`, `${path}.${key}`);
+    }
+  }
+  if (present.length > 1) {
+    throw new RecoveryValidationError("invalid-local-state", "Local draft contains ambiguous text aliases.", path);
+  }
+  const textKeyPresent = present[0];
+  const result: Record<string, unknown> = { [textKeyPresent]: validateText(record[textKeyPresent], `${path}.${textKeyPresent}`) };
+  for (const key of keys) {
+    if (key === textKeyPresent || record[key] === undefined) continue;
+    if (key === "editing" || key === "decoded" || key === "sanitized" || key === "normalized") {
+      result[key] = validateBoolean(record[key], `${path}.${key}`);
+    }
+  }
+  return result;
+}
+
+function validateMermaidPreview(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["generation", "status"]);
+  requireKeys(record, ["generation", "status"], path, "invalid-local-state");
+  const generation = validateNonNegativeSafeInteger(record.generation, `${path}.generation`, "Mermaid preview generation must be a non-negative safe integer.");
+  if (typeof record.status !== "string" || record.status.length === 0 || record.status.length > MAX_LOCAL_PREVIEW_STATUS_LENGTH) {
+    throw new RecoveryValidationError("invalid-local-state", "Mermaid preview status is invalid.", `${path}.status`);
+  }
+  return { generation, status: record.status };
+}
+
+function validateLocalMathContent(value: unknown, path: string) {
+  const record = localPayloadRecord(value, path, ["tex", "delimiter", "raw", "originalTex", "displayMode"]);
+  requireKeys(record, ["tex", "delimiter", "raw", "originalTex", "displayMode"], path, "invalid-local-state");
+  for (const key of ["tex", "raw", "originalTex"] as const) validateMathText(record[key], `${path}.${key}`);
+  if (typeof record.delimiter !== "string" || !mathDelimiters.has(record.delimiter)) {
+    throw new RecoveryValidationError("invalid-local-state", "Math local delimiter is unsupported.", `${path}.delimiter`);
+  }
+  if (typeof record.displayMode !== "boolean") {
+    throw new RecoveryValidationError("invalid-local-state", "Math local displayMode must be boolean.", `${path}.displayMode`);
+  }
+  return {
+    tex: record.tex,
+    delimiter: record.delimiter,
+    raw: record.raw,
+    originalTex: record.originalTex,
+    displayMode: record.displayMode,
+  };
+}
+
+function validateExposedMarkdownV3(
+  value: unknown,
+  path: string,
+  localRevision: number,
+  doc?: ProseMirrorNode,
+): RecoveryExposedMarkdownV3 {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["active", "range", "docRevision", "selection"], path, "invalid-local-state");
+  const active = validateBoolean(record.active, `${path}.active`);
+  const docRevision = validateNonNegativeSafeInteger(record.docRevision, `${path}.docRevision`, "Exposed Markdown docRevision must be a non-negative safe integer.");
+  if (docRevision > localRevision) {
+    throw new RecoveryValidationError("invalid-local-state", "Exposed Markdown docRevision cannot be newer than local state revision.", `${path}.docRevision`);
+  }
+  const range = validateExposedMarkdownRange(record.range, `${path}.range`);
+  const selection = validateSelectionOffsets(record.selection, `${path}.selection`);
+  if (doc && active) validateExposedMarkdownBinding(range, selection, doc, path);
+  return { active, range, docRevision, selection };
+}
+
+function validateExposedMarkdownRange(value: unknown, path: string): RecoveryExposedMarkdownRange {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertAllowedKeys(record, ["kind", "from", "to", "blockFrom", "open", "close", "markName", "headingLevel", "headingInvalid"], path, "invalid-local-state");
+  requireKeys(record, ["kind", "from", "to", "blockFrom", "open", "close"], path, "invalid-local-state");
+  if (record.kind !== "heading" && record.kind !== "inline") {
+    throw new RecoveryValidationError("invalid-local-state", "Exposed Markdown range kind is unsupported.", `${path}.kind`);
+  }
+  const from = validateNonNegativeSafeInteger(record.from, `${path}.from`, "Exposed Markdown range from is invalid.");
+  const to = validateNonNegativeSafeInteger(record.to, `${path}.to`, "Exposed Markdown range to is invalid.");
+  const blockFrom = validateNonNegativeSafeInteger(record.blockFrom, `${path}.blockFrom`, "Exposed Markdown blockFrom is invalid.");
+  if (from > to) throw new RecoveryValidationError("invalid-local-state", "Exposed Markdown range must be ordered.", path);
+  const open = validateText(record.open, `${path}.open`);
+  const close = validateText(record.close, `${path}.close`);
+  const markName = record.markName === undefined ? undefined : validateIdentifierText(record.markName, `${path}.markName`);
+  const headingLevel = record.headingLevel === undefined
+    ? undefined
+    : validateNonNegativeSafeInteger(record.headingLevel, `${path}.headingLevel`, "Exposed Markdown headingLevel is invalid.");
+  if (record.kind === "heading" && (headingLevel === undefined || headingLevel < 1 || headingLevel > 6)) {
+    throw new RecoveryValidationError("invalid-local-state", "Heading exposed Markdown range must retain a level from one to six.", `${path}.headingLevel`);
+  }
+  const headingInvalid = record.headingInvalid === undefined ? undefined : validateBoolean(record.headingInvalid, `${path}.headingInvalid`);
+  return {
+    kind: record.kind,
+    from,
+    to,
+    blockFrom,
+    open,
+    close,
+    ...(markName === undefined ? {} : { markName }),
+    ...(headingLevel === undefined ? {} : { headingLevel }),
+    ...(headingInvalid === undefined ? {} : { headingInvalid }),
+  };
+}
+
+function validateCompositionV3(value: unknown, path: string, localRevision: number): RecoveryCompositionV3 {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["active", "source", "revision"], path, "invalid-local-state");
+  const active = validateBoolean(record.active, `${path}.active`);
+  if (record.source !== "pm" && record.source !== "node-view") {
+    throw new RecoveryValidationError("invalid-local-state", "Composition source is unsupported.", `${path}.source`);
+  }
+  const revision = validateNonNegativeSafeInteger(record.revision, `${path}.revision`, "Composition revision is invalid.");
+  if (revision > localRevision) {
+    throw new RecoveryValidationError("invalid-local-state", "Composition revision cannot be newer than local state revision.", `${path}.revision`);
+  }
+  return { active, source: record.source, revision };
+}
+
+function validateHistoryV3(value: unknown, path: string): RecoveryHistoryV3 {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["sourceCheckpointId", "format", "pm", "source"], path, "invalid-local-state");
+  const sourceCheckpointId = validateIdentifierText(record.sourceCheckpointId, `${path}.sourceCheckpointId`);
+  const formatRecord = expectRecord(record.format, `${path}.format`, "invalid-local-state");
+  assertExactKeys(formatRecord, ["undo", "redo"], `${path}.format`, "invalid-local-state");
+  const undo = validateFormatHistoryStack(formatRecord.undo, `${path}.format.undo`);
+  const redo = validateFormatHistoryStack(formatRecord.redo, `${path}.format.redo`);
+  const pm = validateHistoryAvailability(record.pm, `${path}.pm`);
+  const source = validateHistoryAvailability(record.source, `${path}.source`);
+  return { sourceCheckpointId, format: { undo, redo }, pm, source };
+}
+
+function validateFormatHistoryStack(value: unknown, path: string): WysiwygFormatHistoryEntry[] {
+  if (!Array.isArray(value) || value.length > MAX_LOCAL_HISTORY_ENTRIES) {
+    throw new RecoveryValidationError("invalid-local-state", "Format history stack exceeds the supported limit.", path);
+  }
+  return value.map((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    const record = expectRecord(entry, entryPath, "invalid-local-state");
+    assertExactKeys(record, ["before", "after", "beforeAnchor", "beforeHead", "afterAnchor", "afterHead"], entryPath, "invalid-local-state");
+    const before = validateText(record.before, `${entryPath}.before`);
+    const after = validateText(record.after, `${entryPath}.after`);
+    const beforeAnchor = validateNonNegativeSafeInteger(record.beforeAnchor, `${entryPath}.beforeAnchor`, "Format history beforeAnchor is invalid.");
+    const beforeHead = validateNonNegativeSafeInteger(record.beforeHead, `${entryPath}.beforeHead`, "Format history beforeHead is invalid.");
+    const afterAnchor = validateNonNegativeSafeInteger(record.afterAnchor, `${entryPath}.afterAnchor`, "Format history afterAnchor is invalid.");
+    const afterHead = validateNonNegativeSafeInteger(record.afterHead, `${entryPath}.afterHead`, "Format history afterHead is invalid.");
+    if (beforeAnchor > before.length || beforeHead > before.length) {
+      throw new RecoveryValidationError("invalid-local-state", "Format history before selection is outside its source text.", entryPath);
+    }
+    if (afterAnchor > after.length || afterHead > after.length) {
+      throw new RecoveryValidationError("invalid-local-state", "Format history after selection is outside its source text.", entryPath);
+    }
+    return { before, after, beforeAnchor, beforeHead, afterAnchor, afterHead };
+  });
+}
+
+function validateHistoryAvailability(value: unknown, path: string) {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertAllowedKeys(record, ["status", "reason", "checkpointId"], path, "invalid-local-state");
+  requireKeys(record, ["status"], path, "invalid-local-state");
+  if (record.status !== "captured" && record.status !== "unavailable") {
+    throw new RecoveryValidationError("invalid-local-state", "History availability status is unsupported.", `${path}.status`);
+  }
+  const reason = record.reason === undefined ? undefined : validateErrorText(record.reason, `${path}.reason`, MAX_LOCAL_ERROR_MESSAGE_LENGTH);
+  const checkpointId = record.checkpointId === undefined ? undefined : validateIdentifierText(record.checkpointId, `${path}.checkpointId`);
+  if (reason === undefined) {
+    throw new RecoveryValidationError("invalid-local-state", "Unavailable history must retain a reason.", `${path}.reason`);
+  }
+  if (record.status === "captured") {
+    throw new RecoveryValidationError(
+      "invalid-local-state",
+      "PM/CM history cannot be marked captured until a versioned history adapter is available.",
+      `${path}.status`,
+    );
+  }
+  return {
+    status: "unavailable" as const,
+    reason,
+    ...(checkpointId === undefined ? {} : { checkpointId }),
+  };
+}
+
+function validatePmPath(value: unknown, path: string) {
+  if (!Array.isArray(value) || value.length > MAX_PATH_LENGTH || value.some((entry) => !Number.isSafeInteger(entry) || entry < 0)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer PM path is invalid.", path);
+  }
+  return value.map((entry) => entry as number);
+}
+
+function validatePositionHint(value: unknown, path: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer positionHint must be null or a non-negative safe integer.", path);
+  }
+  return value;
+}
+
+function validateRawSpan(value: unknown, path: string, sourceUtf16Length: number | undefined) {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["from", "to"], path, "invalid-local-state");
+  const from = validateNonNegativeSafeInteger(record.from, `${path}.from`, "Local buffer raw span from is invalid.");
+  const to = validateNonNegativeSafeInteger(record.to, `${path}.to`, "Local buffer raw span to is invalid.");
+  if (from > to || (sourceUtf16Length !== undefined && to > sourceUtf16Length)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local buffer raw span is outside the source snapshot.", path);
+  }
+  return { from, to };
+}
+
+function validateTextUi(value: unknown, path: string, textLength: number | undefined): RecoveryLocalTextUi {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["anchor", "head", "direction", "focused", "composing"], path, "invalid-local-state");
+  const anchor = validateNonNegativeSafeInteger(record.anchor, `${path}.anchor`, "Local text selection anchor is invalid.");
+  const head = validateNonNegativeSafeInteger(record.head, `${path}.head`, "Local text selection head is invalid.");
+  if (textLength !== undefined && (anchor > textLength || head > textLength)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local text selection is outside its captured value.", path);
+  }
+  if (typeof record.direction !== "string" || !textUiDirections.has(record.direction)) {
+    throw new RecoveryValidationError("invalid-local-state", "Local text selection direction is unsupported.", `${path}.direction`);
+  }
+  const focused = validateBoolean(record.focused, `${path}.focused`);
+  const composing = validateBoolean(record.composing, `${path}.composing`);
+  return { anchor, head, direction: record.direction as "forward" | "backward" | "none", focused, composing };
+}
+
+function validateSelectionOffsets(value: unknown, path: string) {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["anchor", "head"], path, "invalid-local-state");
+  return {
+    anchor: validateNonNegativeSafeInteger(record.anchor, `${path}.anchor`, "Selection anchor is invalid."),
+    head: validateNonNegativeSafeInteger(record.head, `${path}.head`, "Selection head is invalid."),
+  };
+}
+
+function validateLocalError(value: unknown, path: string) {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertExactKeys(record, ["code", "message"], path, "invalid-local-state");
+  return {
+    code: validateErrorText(record.code, `${path}.code`, MAX_LOCAL_ERROR_CODE_LENGTH),
+    message: validateErrorText(record.message, `${path}.message`, MAX_LOCAL_ERROR_MESSAGE_LENGTH),
+  };
+}
+
+function localPayloadRecord(value: unknown, path: string, keys: readonly string[]) {
+  const record = expectRecord(value, path, "invalid-local-state");
+  assertAllowedKeys(record, keys, path, "invalid-local-state");
+  return record;
+}
+
+function localPayloadTextLength(kind: string, payload: any): number | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const draft = payload.draft;
+  if (typeof draft === "string") return draft.length;
+  if (draft && typeof draft === "object") {
+    for (const key of ["yaml", "html", "value", "markdown", "code"]) {
+      if (typeof draft[key] === "string") return draft[key].length;
+    }
+  }
+  if (kind === "toc" && typeof payload.candidate === "string") return payload.candidate.length;
+  if (kind === "math" && payload.local && typeof payload.local.raw === "string") return payload.local.raw.length;
+  return undefined;
+}
+
+function validateLocalJsonValue(value: unknown, path: string) {
+  try {
+    validateJsonValue(value, path);
+  } catch (error) {
+    if (error instanceof RecoveryValidationError && error.code === "invalid-json") {
+      throw new RecoveryValidationError("invalid-local-state", error.message, error.path);
+    }
+    throw error;
+  }
+}
+
+function validateText(value: unknown, path: string): string {
+  if (typeof value !== "string" || value.length > MAX_STRING_LENGTH) {
+    throw new RecoveryValidationError("invalid-local-state", "Local state text is invalid or too large.", path);
+  }
+  return value;
+}
+
+function validateMathText(value: unknown, path: string): string {
+  if (typeof value !== "string" || value.length > MAX_MATH_TEXT_LENGTH) {
+    throw new RecoveryValidationError("invalid-local-state", "Math local text is invalid or too large.", path);
+  }
+  return value;
+}
+
+function validateIdentifierText(value: unknown, path: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_LOCAL_BUFFER_ID_LENGTH || value.includes("\u0000")) {
+    throw new RecoveryValidationError("invalid-local-state", "Identifier text is invalid.", path);
+  }
+  return value;
+}
+
+function validateErrorText(value: unknown, path: string, maxLength: number): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength || value.includes("\u0000")) {
+    throw new RecoveryValidationError("invalid-local-state", "Error text is invalid.", path);
+  }
+  return value;
+}
+
+function validateBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw new RecoveryValidationError("invalid-local-state", "Expected a boolean.", path);
+  return value;
+}
+
+function validateOptionalBoolean(value: unknown, path: string): boolean | undefined {
+  return value === undefined ? undefined : validateBoolean(value, path);
+}
+
+function validateOptionalRevision(value: unknown, path: string): number | undefined {
+  return value === undefined ? undefined : validateNonNegativeSafeInteger(value, path, "Revision must be a non-negative safe integer.");
+}
+
+function validateOptionalFrame(value: unknown, path: string): "idle" | "scheduled" | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "idle" && value !== "scheduled") {
+    throw new RecoveryValidationError("invalid-local-state", "Footnote frame state is unsupported.", path);
+  }
+  return value;
+}
+
+function validateNonNegativeSafeInteger(value: unknown, path: string, message: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new RecoveryValidationError("invalid-local-state", message, path);
+  }
+  return value as number;
+}
+
+function assertNonNegativeSafeInteger(value: unknown, path: string, message: string): asserts value is number {
+  validateNonNegativeSafeInteger(value, path, message);
+}
+
+function assertIdentifier(value: unknown, path: string, message: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_LOCAL_BUFFER_ID_LENGTH || value.includes("\u0000")) {
+    throw new RecoveryValidationError("invalid-local-state", message, path);
+  }
+}
+
+function assertAllowedKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  path: string,
+  code: RecoveryValidationCode = "invalid-json",
+) {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new RecoveryValidationError(code, `Unexpected field ${key}.`, `${path}.${key}`);
+  }
+}
+
+function requireKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  path: string,
+  code: RecoveryValidationCode = "invalid-json",
+) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      throw new RecoveryValidationError(code, `Missing field ${key}.`, `${path}.${key}`);
+    }
+  }
 }
 
 function parseBundle(input: string | unknown): Record<string, unknown> {
@@ -695,13 +1635,18 @@ function expectRecord(value: unknown, path: string, code: RecoveryValidationCode
   return value as Record<string, any>;
 }
 
-function assertExactKeys(value: Record<string, unknown>, keys: readonly string[], path: string) {
+function assertExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  path: string,
+  code: RecoveryValidationCode = "invalid-json",
+) {
   const allowed = new Set(keys);
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new RecoveryValidationError("invalid-json", `Unexpected field ${key}.`, `${path}.${key}`);
+    if (!allowed.has(key)) throw new RecoveryValidationError(code, `Unexpected field ${key}.`, `${path}.${key}`);
   }
   for (const key of keys) {
-    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new RecoveryValidationError("invalid-json", `Missing field ${key}.`, `${path}.${key}`);
+    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new RecoveryValidationError(code, `Missing field ${key}.`, `${path}.${key}`);
   }
 }
 

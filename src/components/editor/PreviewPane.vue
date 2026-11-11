@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import mermaid from "mermaid";
 import { appStore, openWikiLink } from "../../stores/appStore";
 import { renderMarkdown } from "../../utils/markdown";
@@ -7,7 +7,15 @@ import { resolveRenderedImageSources } from "../../utils/imageAssets";
 import { extractOutline } from "../../utils/outline";
 import { parseWikiLinkHref } from "../../utils/wikiLinks";
 
+const highlightingVersion = ref(0);
+watch(() => appStore.currentContent, async (source) => {
+  const { prepareMarkdownLanguages } = await import("../../utils/markdownHighlighting");
+  await prepareMarkdownLanguages(source);
+  if (source === appStore.currentContent) highlightingVersion.value++;
+}, { immediate: true });
+
 const html = computed(() => {
+  void highlightingVersion.value;
   const rendered = resolveRenderedImageSources(renderMarkdown(appStore.currentContent));
   const outline = extractOutline(appStore.currentContent);
   let index = 0;

@@ -190,6 +190,8 @@ export interface CapturedEditorTarget {
   capturedAt: number;
   large?: {
     sessionId: string;
+    revision: number;
+    inputVersion?: number;
     startLine: number;
     endLine: number;
     startColumn: number;
@@ -259,6 +261,7 @@ export interface AppearanceSettings {
   paragraphSpacing: number;
   codeFontFamily: string;
   showSidebar: boolean;
+  sidebarPreference?: "auto" | "shown" | "hidden";
   showOutline: boolean;
 }
 
@@ -361,7 +364,43 @@ export interface FileInfo {
   encoding: string;
 }
 
+export const LARGE_COORDINATE_SPACE = "utf16-code-units" as const;
+export type LargeCoordinateSpace = typeof LARGE_COORDINATE_SPACE;
+
 export interface LargeOutlineItem extends OutlineItem {
+}
+
+export interface LargeFileFingerprint {
+  sizeBytes: number;
+  modifiedMillis: number | null;
+  sha256: string;
+}
+
+export type LargeFileTransactionOutcome =
+  | "committed"
+  | "conflict"
+  | "not-committed"
+  | "ambiguous";
+
+export type LargeFileDiskWriteStatus = "yes" | "no" | "unknown";
+
+/** Atomic text-file read returned by the Rust transaction boundary. */
+export interface TextFileSnapshot {
+  content: string;
+  fingerprint: LargeFileFingerprint;
+}
+
+/** Structured write evidence; a receipt can still carry cleanup warnings. */
+export interface TextFileWriteReceipt {
+  path: string;
+  outcome: LargeFileTransactionOutcome;
+  diskWritten: LargeFileDiskWriteStatus;
+  /** Observed target after the OS call; a committed receipt's disk baseline. */
+  targetFingerprint?: LargeFileFingerprint | null;
+  /** Independent recovery copy; equal bytes can have a different modification time. */
+  outputFingerprint?: LargeFileFingerprint | null;
+  recoveryArtifact?: string;
+  cleanupWarning?: string;
 }
 
 export interface LargeFileSession {
@@ -370,6 +409,17 @@ export interface LargeFileSession {
   sizeBytes: number;
   totalLines: number;
   outline: LargeOutlineItem[];
+  revision: number;
+  savedRevision: number;
+  pendingEditCount: number;
+  baseFingerprint: LargeFileFingerprint;
+  /** Null while a recovered untitled session has no writable target. */
+  diskFingerprint: LargeFileFingerprint | null;
+  coordinateSpace: LargeCoordinateSpace;
+  /** Empty for a recovered untitled view; provenance is retained separately. */
+  targetPath?: string | null;
+  originPath?: string;
+  recoveryDraftId?: string;
 }
 
 export interface FileChunk {
@@ -378,6 +428,8 @@ export interface FileChunk {
   endLine: number;
   totalLines: number;
   text: string;
+  revision: number;
+  coordinateSpace: LargeCoordinateSpace;
 }
 
 export interface TextEdit {
@@ -391,24 +443,103 @@ export interface TextEdit {
 export interface DirtyState {
   isDirty: boolean;
   pendingEditCount: number;
+  revision: number;
+  savedRevision: number;
+  coordinateSpace: LargeCoordinateSpace;
+}
+
+export interface LargeSaveReceipt {
+  sessionId: string;
+  requestedRevision: number;
+  savedRevision: number;
+  currentRevision: number;
+  saved: boolean;
+  isDirty: boolean;
+  pendingEditCount: number;
+  path: string;
+  baseFingerprint: LargeFileFingerprint;
+  diskFingerprint: LargeFileFingerprint;
+  coordinateSpace: LargeCoordinateSpace;
+  outcome: LargeFileTransactionOutcome;
+  diskWritten: LargeFileDiskWriteStatus;
+  targetFingerprint?: LargeFileFingerprint | null;
+  outputFingerprint?: LargeFileFingerprint | null;
+  recoveryArtifact?: string;
+  cleanupWarning?: string;
+}
+
+export interface LargeCloseReceipt {
+  sessionId: string;
+  closed: boolean;
+  cleanupCompleted: boolean;
+  recoveryArtifact?: string;
+  cleanupWarning?: string;
+}
+
+export interface LargeDraftSnapshotRef {
+  schemaVersion: number;
+  snapshotId: string;
+  draftId: string;
+  originPath: string;
+  originFingerprint: LargeFileFingerprint;
+  capturedRevision: number;
+  coordinateSpace: LargeCoordinateSpace;
+  byteLength: number;
+  totalLines: number;
+  sha256: string;
+}
+
+export interface LargeDraftCaptureReceipt {
+  sessionId: string;
+  requestedRevision: number;
+  currentRevision: number;
+  snapshot: LargeDraftSnapshotRef;
+}
+
+export interface LargeDraftOpenReceipt {
+  snapshot: LargeDraftSnapshotRef;
+  session: LargeFileSession;
+  originPath: string;
+  targetPath: null;
+  recoveryDraftId: string;
+}
+
+export interface LargeDraftDeleteReceipt {
+  snapshotId: string;
+  deleted: boolean;
+  cleanupWarning?: string;
 }
 
 export interface DraftRecord {
   id: string;
   kind: "file" | "untitled" | "large";
+  schemaVersion?: number;
   path?: string;
   content?: string;
   pendingEdits?: TextEdit[];
+  largeSnapshot?: LargeDraftSnapshotRef;
   fileMtime?: number;
   fileSize?: number;
   updatedAt: number;
   editorMode?: EditorMode;
 }
 
+export interface DraftListIssue {
+  path: string;
+  code: string;
+  message: string;
+}
+
+export interface DraftListReceipt {
+  records: DraftRecord[];
+  issues: DraftListIssue[];
+}
+
 export interface FileSnapshot {
   exists: boolean;
   mtime?: number;
   size?: number;
+  fingerprint?: LargeFileFingerprint;
 }
 
 export interface SimilarFileCandidate {
@@ -426,6 +557,8 @@ export interface LargeFindOptions {
 
 export interface LargeFindMatch {
   line: number;
+  /** Present for a regular expression match crossing logical line boundaries. */
+  endLine?: number;
   startColumn: number;
   endColumn: number;
   text: string;
@@ -437,6 +570,8 @@ export interface LargeFindResult {
   total: number;
   truncated: boolean;
   error: string;
+  revision: number;
+  coordinateSpace: LargeCoordinateSpace;
 }
 
 export interface LargeFileState {
@@ -446,6 +581,16 @@ export interface LargeFileState {
   loadedRanges: Array<{ startLine: number; endLine: number }>;
   pendingEdits: TextEdit[];
   outline: LargeOutlineItem[];
+  revision: number;
+  savedRevision: number;
+  pendingEditCount: number;
+  baseFingerprint: LargeFileFingerprint;
+  /** Null while a recovered untitled session has no writable target. */
+  diskFingerprint: LargeFileFingerprint | null;
+  coordinateSpace: LargeCoordinateSpace;
+  targetPath?: string | null;
+  originPath?: string;
+  recoveryDraftId?: string;
 }
 
 export interface WysiwygFormatHistoryEntry {
