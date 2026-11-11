@@ -1,0 +1,197 @@
+{
+  "date": "2026-11-11",
+  "scope": "Windows local working tree, review only",
+  "head": "12fe8c9c3ff2aea5f4925ced26532be30b697a66",
+  "initialDirty": {
+    "modified": 81,
+    "untracked": 134
+  },
+  "tools": {
+    "node": "v24.18.0",
+    "pnpm": "10.32.1",
+    "rust": "1.94.1"
+  },
+  "selectedProductionFiles": {
+    "count": 166,
+    "sameAsOctoberCandidate": true,
+    "sha256OfSortedPathColonDigestLines": "1df59c0888dcafdb87c4479e79e9a83037031773871374d971d300d4a7836c2f",
+    "scopePattern": "^(src\\/|src-tauri\\/(src\\/|build\\.rs$|Cargo\\.(lock|toml)$|tauri\\.conf\\.json$|capabilities\\/)|package\\.json$|pnpm-lock\\.yaml$|vite\\.config\\.ts$|index\\.html$|tailwind\\.config\\.cjs$|postcss\\.config\\.cjs$|tsconfig(\\.node)?\\.json$|public\\/)"
+  },
+  "checks": {
+    "build": {
+      "passed": true,
+      "typecheck": true,
+      "staticJsGzipKiB": {
+        "shell": 206,
+        "shellAndSource": 322.6,
+        "shellAndWysiwyg": 604.2
+      }
+    },
+    "defaultTemp": {
+      "count": 94,
+      "passed": 93,
+      "failed": 1,
+      "failedChecks": [
+        "check-wp10-content-boundary.mjs"
+      ],
+      "manifest": ".cache/release-review-2026-11-11-checks/summary.json"
+    },
+    "workspaceTemp": {
+      "count": 94,
+      "passed": 94,
+      "failed": 0,
+      "manifest": ".cache/release-review-2026-11-11-controlled-temp/summary.json"
+    },
+    "rustLockedOffline": {
+      "passed": 123,
+      "failed": 0,
+      "ignored": 1,
+      "ignoredScope": "physical size matrix"
+    },
+    "rustfmt": {
+      "exitCode": 1,
+      "filesWithDiffs": 18
+    }
+  },
+  "nativeReplace": {
+    "scope": "current native dev WebView2 / real keyboard / isolated profile; not installed release",
+    "expectedMatches": 0,
+    "observedMatches": 1,
+    "query": "LR",
+    "replacement": "X",
+    "before": "# Writing probe\n\nL$x$R\n\nAİBC!\n",
+    "after": "# Writing probe\n\nX\n\nAİBC!\n",
+    "beforeSha256": "2e8e8b2010091f5cfd588aa11eb40b4ce2e216ea8af6b81e43c7193702f7e05a",
+    "afterSha256": "b6b7f4b633669fc97f2720c25f204f3ccc138a4830a341826b8d890f1c400a7c",
+    "observedStatusAfterSave": "已保存",
+    "nativeReport": ".cache/release-review-2026-11-11-interactive/manifest.json",
+    "processExit": 0
+  },
+  "logicProbe": [
+    {
+      "id": "plain-control",
+      "expected": {
+        "count": 1,
+        "content": [
+          "LX"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "LX"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "keep-formula-before-match",
+      "expected": {
+        "count": 1,
+        "content": [
+          "L",
+          "inlineMath",
+          "X"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "LX"
+        ]
+      },
+      "passed": false
+    },
+    {
+      "id": "do-not-match-across-formula",
+      "expected": {
+        "count": 0,
+        "content": [
+          "L",
+          "inlineMath",
+          "R"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "X"
+        ]
+      },
+      "passed": false
+    },
+    {
+      "id": "case-fold-uses-original-offsets",
+      "expected": {
+        "count": 1,
+        "content": [
+          "AİXC!"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "AİBX!"
+        ]
+      },
+      "passed": false
+    },
+    {
+      "id": "do-not-overwrite-unreadable-config",
+      "expected": 0,
+      "observed": 1,
+      "passed": false
+    },
+    {
+      "id": "workspace-before-late-reply",
+      "expected": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "observed": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "passed": true
+    },
+    {
+      "id": "workspace-after-late-reply",
+      "expected": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "observed": [
+        "C:/test-notes/B",
+        "a.md"
+      ],
+      "passed": false
+    }
+  ],
+  "windowsCliPreflight": {
+    "scope": "read-only comparison on archived executable; nonexistent config stopped export before output",
+    "sha256": "c69ab97c71ddc66a95d5657960cbbca249a329f493b3f63b847eb65cdd8ca87d",
+    "sourceAndOrdinaryAbsoluteOutput": "continued to config validation",
+    "sourceAndCanonicalOutput": "rejected as the source file",
+    "exitCodes": [
+      2,
+      2
+    ],
+    "inputUnchanged": true
+  },
+  "archivedInstaller": {
+    "date": "2026-10-30",
+    "sha256": "998053a3368f6f020a1a3221d3a36b5609dc56487414431ed4a0735c0d5f9b7b",
+    "authenticode": "NotSigned",
+    "installedInThisAudit": false
+  },
+  "historicalPerformance": {
+    "date": "2026-10-30",
+    "rawSamples": 3920,
+    "correctnessChecks": 39,
+    "metric": "event to requestAnimationFrame opportunity P95 ms; not physical presentation",
+    "wys50kEnterMs": 974.1,
+    "wys50kBackspaceMs": 825.3,
+    "mathCommitMs": 540.4,
+    "boundaryProcessTreePrivateBytes": 4531249152
+  }
+}

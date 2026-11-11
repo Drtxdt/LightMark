@@ -1,0 +1,438 @@
+{
+  "date": "2026-11-11",
+  "baseCommit": "12fe8c9c3ff2aea5f4925ced26532be30b697a66",
+  "scope": "Uncommitted Windows candidate source snapshot; no installer, publication or hosted Actions run.",
+  "source": {
+    "productionFiles": 167,
+    "sourcePattern": "^(src\\/|src-tauri\\/(src\\/|build\\.rs$|Cargo\\.(lock|toml)$|tauri\\.conf\\.json$|capabilities\\/)|package\\.json$|pnpm-lock\\.yaml$|vite\\.config\\.ts$|index\\.html$|tailwind\\.config\\.cjs$|postcss\\.config\\.cjs$|tsconfig(\\.node)?\\.json$|public\\/)",
+    "sha256OfSortedPathColonDigestLines": "52de988d759b361edb72e1ffcd91d0426220766ec69e2a17ad6e316a23f8c5c1",
+    "matchesIndependentCopy": true,
+    "independentCopyFilesAtCapture": 349,
+    "independentCopySha256": "890cbfad0325880fcada21b1d48fc4271cf0099338cb84d63ccd70784a5c2997",
+    "verifiedLocalArchive": {
+      "path": ".cache/formal-acceptance-2026-11-11/lightmark-tested-source.zip",
+      "files": 349,
+      "bytes": 1384327,
+      "sha256": "774b460286b0c02b01fba2a6dfeda29940e1c52a1e330e7d1fffe1cf75b71942"
+    }
+  },
+  "frontend": {
+    "workspace": {
+      "count": 95,
+      "passed": 95,
+      "failed": 0
+    },
+    "freshLockedInstall": {
+      "count": 95,
+      "passed": 95,
+      "failed": 0
+    },
+    "builds": "vue-tsc, Vite and existing bundle budgets passed in both directories",
+    "workspaceDist": "c1c4f430b220c65344b0fece1ca052fc156ffd8982bd9fec99ef7a16c6b3557f",
+    "freshDist": "c1c4f430b220c65344b0fece1ca052fc156ffd8982bd9fec99ef7a16c6b3557f",
+    "byteIdenticalDist": true,
+    "productionQaMarkersFound": 0
+  },
+  "rust": {
+    "lockedOffline": {
+      "passed": 130,
+      "failed": 0,
+      "ignored": 1
+    },
+    "cleanTarget": {
+      "passed": 130,
+      "failed": 0,
+      "ignored": 1
+    },
+    "ignored": "commands::large_jobs::tests::physical_large_file_matrix"
+  },
+  "originalReviewProbes": [
+    {
+      "id": "plain-control",
+      "expected": {
+        "count": 1,
+        "content": [
+          "LX"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "LX"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "keep-formula-before-match",
+      "expected": {
+        "count": 1,
+        "content": [
+          "L",
+          "inlineMath",
+          "X"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "L",
+          "inlineMath",
+          "X"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "do-not-match-across-formula",
+      "expected": {
+        "count": 0,
+        "content": [
+          "L",
+          "inlineMath",
+          "R"
+        ]
+      },
+      "observed": {
+        "count": 0,
+        "content": [
+          "L",
+          "inlineMath",
+          "R"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "case-fold-uses-original-offsets",
+      "expected": {
+        "count": 1,
+        "content": [
+          "AİXC!"
+        ]
+      },
+      "observed": {
+        "count": 1,
+        "content": [
+          "AİXC!"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "do-not-overwrite-unreadable-config",
+      "expected": 0,
+      "observed": 0,
+      "passed": true
+    },
+    {
+      "id": "workspace-before-late-reply",
+      "expected": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "observed": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "passed": true
+    },
+    {
+      "id": "workspace-after-late-reply",
+      "expected": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "observed": [
+        "C:/test-notes/B",
+        "b.md"
+      ],
+      "passed": true
+    }
+  ],
+  "nativeWindows": {
+    "healthyProfile": {
+      "scenario": "find-integrity",
+      "passed": true,
+      "verifiedIsolatedProfile": true,
+      "steps": [
+        {
+          "label": "opened",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "LR",
+          "count": "0/0"
+        },
+        {
+          "label": "replace across formula is a no-op",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "R",
+          "count": "1/1"
+        },
+        {
+          "label": "replace next to formula",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "undo",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "redo",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "b",
+          "count": "1/1"
+        },
+        {
+          "label": "replace all after Unicode character",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "Unicode undo",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "Unicode redo",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "reopened from disk",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        }
+      ],
+      "disk": {
+        "bytes": 14,
+        "sha256": "32bfb2df6b421d168d3e9d919aecdaca7572687e4cdd3d00f1585ca560bcca6b"
+      }
+    },
+    "damagedProfile": {
+      "scenario": "workspace-profile",
+      "passed": true,
+      "verifiedIsolatedProfile": true,
+      "steps": [
+        {
+          "workspace": "A",
+          "files": [
+            "A.md"
+          ],
+          "indexGeneration": 1
+        },
+        {
+          "workspace": "B",
+          "files": [
+            "B.md"
+          ],
+          "indexGeneration": 2
+        },
+        {
+          "workspace": "A",
+          "files": [
+            "A.md"
+          ],
+          "indexGeneration": 3
+        },
+        {
+          "activeWatcher": "A",
+          "observed": "watched.md",
+          "configWritesPaused": true
+        },
+        {
+          "label": "opened",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "LR",
+          "count": "0/0"
+        },
+        {
+          "label": "replace across formula is a no-op",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "R",
+          "count": "1/1"
+        },
+        {
+          "label": "replace next to formula",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "undo",
+          "markdown": "L$x$R\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "redo",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "query": "b",
+          "count": "1/1"
+        },
+        {
+          "label": "replace all after Unicode character",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "Unicode undo",
+          "markdown": "L$x$Z\n\nAİBC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "Unicode redo",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        },
+        {
+          "label": "reopened from disk",
+          "markdown": "L$x$Z\n\nAİQC!\n",
+          "formulas": 1
+        }
+      ],
+      "disk": {
+        "bytes": 14,
+        "sha256": "32bfb2df6b421d168d3e9d919aecdaca7572687e4cdd3d00f1585ca560bcca6b"
+      },
+      "config": {
+        "bytes": 35,
+        "sha256": "740e1990c4c94a3bc5661d9762da3d029c1c89bd2de364ace06abd689fa29c41"
+      }
+    },
+    "desktopExport": {
+      "passed": true,
+      "cases": [
+        {
+          "target": "html",
+          "bytes": 387042,
+          "sha256": "f9cf4225c5649be632543a47401112e7e79123f50468949f4cae1b2b051b82bf",
+          "passed": true
+        },
+        {
+          "target": "pdf",
+          "bytes": 149596,
+          "sha256": "00485e46737915b0174058435a38cdd77a27883e656182426ea41f2b564b470e",
+          "passed": true
+        },
+        {
+          "target": "png",
+          "bytes": 1353560,
+          "sha256": "8366331c861f21c152bcc5548eeea1b0f981103cb71c8cd3c9c119436006ec3b",
+          "passed": true
+        }
+      ],
+      "layout": {
+        "pages": 5,
+        "orderedParagraphsExtracted": 100,
+        "endMarker": true,
+        "pngPixels": [
+          900,
+          4921
+        ],
+        "pngLastInkBottom": 4340,
+        "pngBlankTailPixels": 581,
+        "visualReview": "PDF pages 1–5 and PNG beginning/end inspected; the formula, table, sample image, code, and final marker are visible. PNG has excess space below last non-background ink."
+      }
+    }
+  },
+  "releaseCli": {
+    "build": "cargo build --locked --offline --release --features tauri/custom-protocol --bins",
+    "appSha256": "ecbad67ad4b70ad2cc823871065d2145856bdd4e7bc713fac3641e001b1eebe5",
+    "cliSha256": "058ae9e5a6b717e4651e5326b125d5542b9a1c90122774365826b92245861e27",
+    "sourceSha256": "83eabf8b9b54a44d44e9692c3a20989b6911ede8c1680ec091858cb7aa48e63f",
+    "cases": [
+      {
+        "label": "same spelling",
+        "code": 2,
+        "bytesUnchanged": true
+      },
+      {
+        "label": "verbatim Windows path",
+        "code": 2,
+        "bytesUnchanged": true
+      },
+      {
+        "label": "hard link",
+        "code": 2,
+        "bytesUnchanged": true
+      },
+      {
+        "label": "default markdown target",
+        "code": 2,
+        "bytesUnchanged": true
+      },
+      {
+        "label": "existing without force",
+        "code": 2,
+        "bytesUnchanged": true
+      },
+      {
+        "label": "render html",
+        "code": 0,
+        "bytesUnchanged": true,
+        "output": {
+          "bytes": 377346,
+          "sha256": "69f6dfeb2db69c4fc06f562a553eed694557ff761219ac42a031ec347e213f09"
+        }
+      },
+      {
+        "label": "render pdf",
+        "code": 0,
+        "bytesUnchanged": true,
+        "output": {
+          "bytes": 46184,
+          "sha256": "d1c6fd294f1a0a4e04da0190cbc3c1232d9a10943e9179081190f55256539796"
+        }
+      },
+      {
+        "label": "render png",
+        "code": 0,
+        "bytesUnchanged": true,
+        "output": {
+          "bytes": 18095,
+          "sha256": "126de7c9d8840386b5e8451c9e3b2f1fbb8deb762d0f4ef8e303448d88a60d03"
+        }
+      },
+      {
+        "label": "render docx",
+        "code": 0,
+        "bytesUnchanged": true,
+        "output": {
+          "bytes": 10643,
+          "sha256": "547477239751e834d0e846a8e54684be9c088877d83065899fe7d18976af4c09"
+        }
+      },
+      {
+        "label": "renderer failure keeps previous export",
+        "code": 5,
+        "bytesUnchanged": true,
+        "previousOutputUnchanged": true
+      }
+    ],
+    "status": "passed"
+  },
+  "limits": [
+    "No fresh signed installer/upgrade test or OS input-method acceptance",
+    "No claim of hostile filesystem concurrency or power-loss recovery",
+    "No hosted PR run",
+    "Performance measurements are from the earlier audit; this is not new large-document benchmarking"
+  ]
+}
