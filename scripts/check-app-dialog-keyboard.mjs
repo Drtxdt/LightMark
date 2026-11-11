@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const root = new URL("../", import.meta.url);
@@ -27,7 +26,9 @@ const compiledOverlay = ts.transpileModule(overlaySource, {
     target: ts.ScriptTarget.ES2022,
   },
 }).outputText;
-const tempRoot = await mkdtemp(path.join(os.tmpdir(), "lightmark-app-dialog-keyboard-"));
+// The generated useOverlayFocus module imports Vue through Node's normal
+// package resolution. Keep it below this checkout's installed dependencies.
+const tempRoot = await mkdtemp(fileURLToPath(new URL("node_modules/.lightmark-app-dialog-keyboard-", root)));
 const helperPath = path.join(tempRoot, "dialogKeyboard.mjs");
 const overlayPath = path.join(tempRoot, "useOverlayFocus.mjs");
 await writeFile(helperPath, compiled, "utf8");
