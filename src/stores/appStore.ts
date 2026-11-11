@@ -3631,6 +3631,7 @@ export async function createNewFile() {
   const path = await invoke<string>("create_markdown_file", {
     folder: appStore.currentWorkspace,
     name: base,
+    renameOnConflict: true,
   });
   await refreshFileTree();
   await openFile(path);

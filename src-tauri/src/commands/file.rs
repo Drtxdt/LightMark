@@ -1894,9 +1894,7 @@ pub fn save_asset_file(
         .map_err(|err| format!("Failed to create folder {}: {err}", assets_dir.display()))?;
 
     let safe_name = sanitize_asset_file_name(&file_name);
-    let target = unique_asset_path(&assets_dir, &safe_name);
-    fs::write(&target, bytes)
-        .map_err(|err| format!("Failed to write {}: {err}", target.display()))?;
+    let target = create_new_document_file(&assets_dir, &safe_name, &bytes, true)?;
     target
         .strip_prefix(document_dir)
         .map(|path| path_to_string(path.to_path_buf()))
@@ -2181,26 +2179,25 @@ pub fn find_similar_markdown_files(
 }
 
 #[tauri::command]
-pub fn create_markdown_file(folder: String, name: String) -> Result<String, String> {
+pub fn create_markdown_file(folder: String, name: String, rename_on_conflict: Option<bool>) -> Result<String, String> {
     let folder = PathBuf::from(folder);
     if !folder.is_dir() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
 
+    if name.contains(['/', '\\', ':']) || matches!(name.as_str(), "." | "..") {
+        return Err("新笔记的名称不能包含目录或盘符。".to_string());
+    }
     let safe_name = if name.trim().is_empty() {
         "Untitled.md".to_string()
-    } else if name.ends_with(".md") || name.ends_with(".markdown") {
+    } else if is_markdown_file(Path::new(&name)) {
         name
     } else {
         format!("{name}.md")
     };
 
-    let path = folder.join(safe_name);
-    if path.exists() {
-        return Err(format!("File already exists: {}", path.display()));
-    }
-    fs::write(&path, "").map_err(|err| format!("Failed to create {}: {err}", path.display()))?;
-    Ok(path_to_string(path))
+    create_new_document_file(&folder, &safe_name, &[], rename_on_conflict.unwrap_or(false))
+        .map(path_to_string)
 }
 
 fn sanitize_asset_file_name(file_name: &str) -> String {
@@ -2224,32 +2221,42 @@ fn sanitize_asset_file_name(file_name: &str) -> String {
     }
 }
 
-fn unique_asset_path(folder: &Path, file_name: &str) -> PathBuf {
-    let path = folder.join(file_name);
-    if !path.exists() {
-        return path;
+fn create_new_document_file(folder: &Path, file_name: &str, bytes: &[u8], rename_on_conflict: bool) -> Result<PathBuf, String> {
+    // Keep partial writes out of the published file and workspace watchers.
+    // The final operation both claims the name and makes complete bytes visible.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".lightmark-new-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
     }
-
+    let mut temp = builder.tempfile_in(folder)
+        .map_err(|err| format!("无法在 {} 中创建文件：{err}", folder.display()))?;
+    temp.write_all(bytes).and_then(|()| temp.as_file().sync_all())
+        .map_err(|err| format!("无法写入 {file_name}：{err}"))?;
+    let mut staged = temp.into_temp_path();
     let source = Path::new(file_name);
-    let stem = source
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("image");
+    let stem = source.file_stem().and_then(|value| value.to_str()).unwrap_or(file_name);
     let extension = source.extension().and_then(|value| value.to_str());
-
-    for index in 1.. {
-        let candidate_name = match extension {
-            Some(ext) if !ext.is_empty() => format!("{stem}-{index}.{ext}"),
-            _ => format!("{stem}-{index}"),
+    for index in 0..=u32::MAX {
+        let candidate = match (index, extension) {
+            (0, _) => folder.join(file_name),
+            (_, Some(ext)) if !ext.is_empty() => folder.join(format!("{stem}-{index}.{ext}")),
+            _ => folder.join(format!("{stem}-{index}")),
         };
-        let candidate = folder.join(candidate_name);
-        if !candidate.exists() {
-            return candidate;
+        match staged.persist_noclobber(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {
+                if !rename_on_conflict {
+                    return Err(format!("文件已存在：{}", candidate.display()));
+                }
+                staged = failure.path;
+            }
+            Err(failure) => return Err(format!("无法创建 {}：{}", candidate.display(), failure.error)),
         }
     }
-
-    unreachable!("unbounded asset filename search should always return");
+    Err(format!("无法为 {file_name} 分配空闲名称。"))
 }
 
 fn resolve_asset_folder(document_dir: &Path, value: Option<&str>) -> Result<PathBuf, String> {
@@ -3013,6 +3020,73 @@ mod tests {
     #[test]
     fn asset_file_name_preserves_unicode_letters() {
         assert_eq!(sanitize_asset_file_name("旅行 照片.jpg"), "旅行-照片.jpg");
+    }
+
+    fn race_creations<T: Send>(work: impl Fn(u8) -> T + Sync) -> Vec<T> {
+        const WRITERS: u8 = 12;
+        let barrier = std::sync::Barrier::new(usize::from(WRITERS));
+        std::thread::scope(|scope| {
+            let barrier = &barrier;
+            let work = &work;
+            let handles: Vec<_> = (0..WRITERS)
+                .map(|number| scope.spawn(move || {
+                    barrier.wait();
+                    work(number)
+                }))
+                .collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+        })
+    }
+
+    #[test]
+    fn concurrent_pastes_keep_every_payload_and_existing_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("文章.md");
+        let assets = dir.path().join("assets");
+        fs::write(&doc, "original").unwrap();
+        fs::create_dir(&assets).unwrap();
+        fs::write(assets.join("照片.png"), b"old attachment").unwrap();
+        let outputs = race_creations(|number| {
+            let bytes = vec![number; 8192];
+            let reference = super::save_asset_file(
+                doc.to_string_lossy().into_owned(), "照片.png".into(), bytes.clone(), None,
+            ).unwrap();
+            (dir.path().join(reference), bytes)
+        });
+        let names: std::collections::HashSet<_> = outputs.iter().map(|(path, _)| path).collect();
+        assert_eq!(names.len(), outputs.len(), "two pastes returned the same file");
+        for (path, bytes) in &outputs { assert_eq!(fs::read(path).unwrap(), *bytes); }
+        assert_eq!(fs::read(assets.join("照片.png")).unwrap(), b"old attachment");
+        assert_eq!(fs::read_dir(assets).unwrap().count(), outputs.len() + 1);
+        assert_eq!(fs::read(doc).unwrap(), b"original");
+    }
+
+    #[test]
+    fn concurrent_explicit_note_creation_has_exactly_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let results = race_creations(|_| super::create_markdown_file(root.clone(), "同名".into(), None));
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        let note = dir.path().join("同名.md");
+        fs::write(&note, "keep these bytes").unwrap();
+        assert!(super::create_markdown_file(root, "同名.md".into(), None).is_err());
+        assert_eq!(fs::read(note).unwrap(), b"keep these bytes");
+    }
+
+    #[test]
+    fn concurrent_automatic_note_names_keep_all_new_notes_and_existing_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("未命名.MD"), b"original").unwrap();
+        let paths = race_creations(|_| {
+            super::create_markdown_file(root.clone(), "未命名.MD".into(), Some(true)).unwrap()
+        });
+        let names: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(names.len(), paths.len());
+        for name in paths { assert_eq!(fs::read(name).unwrap(), b""); }
+        assert_eq!(fs::read(dir.path().join("未命名.MD")).unwrap(), b"original");
+        assert!(dir.path().join("未命名-1.MD").is_file());
+        assert!(super::create_markdown_file(root, "nested/page".into(), None).is_err());
     }
 
     #[test]
