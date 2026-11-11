@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod draft;
 pub mod export;
+pub mod export_images;
 pub mod file;
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod file_replace_transaction;

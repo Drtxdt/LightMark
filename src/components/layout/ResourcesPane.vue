@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { appStore, completePendingAssetRelink } from "../../stores/appStore";
 import { extractAssetReferences, type AssetReference } from "../../utils/documentAssets";
+import { chooseExportImageFolder } from "../../utils/imageAssets";
 import { beginPendingAssetCommand, captureDocumentCommandTarget } from "../../editor/documentRuntime";
 import { releasePendingCommand, type PendingCommandHandle } from '../../editor/pendingDocumentCommands';
 
@@ -104,6 +105,7 @@ async function relink(item: ReferenceRow) {
   let command: PendingCommandHandle | undefined;
   try {
     const tabId = appStore.activeTabId;
+    const markdownPath = appStore.currentFilePath;
     const settings = { ...appStore.settings.image };
     const target = await captureDocumentCommandTarget(tabId, "externalDiff");
     if (target.markdown !== item.sourceMarkdown) throw new Error('正文已变化，正在刷新资源列表，请重新选择原引用。');
@@ -111,7 +113,7 @@ async function relink(item: ReferenceRow) {
     const reference = peers.find(ref => ref.from === item.from && ref.to === item.to);
     if (!reference) throw new Error("该资源引用位置已经变化，请刷新资源列表后重新选择。");
     command = beginPendingAssetCommand(target, { from: reference.from, to: reference.to, expected: reference.source, insert: '' });
-    const selected = await invoke<string | null>("open_asset_file_dialog");
+    const selected = await invoke<string | null>("open_asset_file_dialog", { markdownPath });
     if (!selected) return;
     await completePendingAssetRelink(command, selected, settings);
     appStore.statusMessage = `已重新链接 ${item.source}，尚未保存。`;
@@ -157,8 +159,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="resources-pane">
-    <div class="mb-3 flex items-center justify-between gap-2">
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
       <h2 class="text-xs font-medium tracking-wide text-ink-500 dark:text-ink-300">当前文档资源</h2>
+      <button class="btn-small" :disabled="!!unavailableMessage" title="允许当前文档在本次启动期间导出所选目录及其子目录中的图片" @click="chooseExportImageFolder">允许导出图片目录</button>
       <button class="btn-small" :disabled="busy || !!unavailableMessage" @click="refresh()">刷新</button>
     </div>
     <p v-if="unavailableMessage" class="resource-state">{{ unavailableMessage }}</p>

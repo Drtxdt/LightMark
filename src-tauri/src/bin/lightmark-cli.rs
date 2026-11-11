@@ -36,6 +36,9 @@ struct ExportArgs {
     format: String,
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
+    /// 允许此文档从指定目录及子目录嵌入本地图片，可重复使用
+    #[arg(long, value_name = "DIRECTORY")]
+    resource_root: Vec<PathBuf>,
     #[arg(long)]
     force: bool,
     #[arg(long, value_enum)]
@@ -132,6 +135,7 @@ struct HeadlessRequest {
     theme: Option<CliTheme>,
     math_numbering: Option<CliMathNumbering>,
     config_path: Option<String>,
+    resource_roots: Vec<PathBuf>,
     response_path: String,
 }
 
@@ -186,6 +190,16 @@ fn run_export(args: ExportArgs) -> i32 {
             return 2;
         }
     };
+    let mut resource_roots = Vec::new();
+    for dir in &args.resource_root {
+        match dir.canonicalize() {
+            Ok(root) if root.is_dir() => resource_roots.push(root),
+            _ => {
+                eprintln!("图片目录不可用：{}", dir.display());
+                return 2;
+            }
+        }
+    }
     let config = match validate_optional_file(args.config.as_deref(), "配置文件") {
         Ok(path) => path,
         Err(error) => {
@@ -203,6 +217,7 @@ fn run_export(args: ExportArgs) -> i32 {
             theme: args.theme,
             math_numbering: args.math_numbering,
             config_path: config.as_ref().map(|path| path_string(path)),
+            resource_roots,
             response_path: String::new(),
         },
         args.json,
@@ -244,6 +259,7 @@ fn run_check(args: CheckArgs) -> i32 {
             theme: None,
             math_numbering: args.math_numbering,
             config_path: config.as_ref().map(|path| path_string(path)),
+            resource_roots: Vec::new(),
             response_path: String::new(),
         },
         args.json,

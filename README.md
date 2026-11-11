@@ -23,7 +23,8 @@ LightMark 是一款轻量级 Markdown 桌面编辑器，基于 Tauri 2 + Rust + 
 - Mermaid 图表：代码块内实时 SVG 预览与编辑。
 - 代码块语法高亮：基于 `highlight.js` / `lowlight`。
 - 图片处理：支持剪贴板粘贴、拖拽插入，自动保存到文档同级的 `assets/` 目录。
-- 导出：支持自包含 HTML、原生 PDF、PNG，以及安装 Pandoc 后的 DOCX、LaTeX、EPUB 等格式；导出前会显示公式兼容、降级或阻止状态。
+- 支持导出自包含 HTML、原生 PDF、PNG，以及安装 Pandoc 后的 DOCX、LaTeX、EPUB 等格式。导出前会显示公式兼容、降级或阻止状态。嵌入本地图片时，默认从当前笔记所在目录及其子目录读取。共享图片放在其他目录时，可在导出菜单或资源栏点击“允许导出图片目录”。授权对当前笔记有效，应用退出后失效。
+- CLI 可为一次导出指定共享图片目录，例如 `lightmark-cli export notes/article.md -f html -o article.html --resource-root shared/images`。多份共享目录可分别传入 `--resource-root`。
 - 右键上下文菜单：支持格式设置、表格操作、GitHub 警示框插入、剪贴板操作、复制为 HTML。
 - 命令面板：`Ctrl+Shift+P` 打开，模糊搜索命令。
 - 主题：亮色 / 暗色 / 跟随系统三种模式；组件配色与键盘焦点的一致性正在验收。

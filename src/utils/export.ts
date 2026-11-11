@@ -13,7 +13,7 @@ import type {
 import { appStore, completeExportStatus, currentFileName, failExportStatus, flushDocumentSnapshot, startExportStatus } from "../stores/appStore";
 import { escapeHtml } from "./html";
 import { buildExportHtml, renderMarkdown } from "./markdown";
-import { resolveMarkdownImagePath, resolveMarkdownImageSource } from "./imageAssets";
+import { resolveMarkdownImageSource } from "./imageAssets";
 import { preparePandocMath } from "./mathMarkdown";
 import type { MathNumberingMode } from "./mathMarkdown";
 import { analyzeMathExportCompatibility } from "./mathExportCompatibility";
@@ -321,13 +321,12 @@ async function inlineExportResources(html: string, currentPath: string) {
   for (const image of images) {
     const source = image.getAttribute("src") || "";
     if (!source || /^(?:data:|blob:|#)/i.test(source)) continue;
-    if (!/^https?:/i.test(source) && isTauri()) {
-      const path = resolveMarkdownImagePath(source, currentPath);
+    if (isTauri() && !isWebImageUrl(source)) {
       try {
-        const bytes = await invoke<number[]>("read_export_resource", { path });
+        const resource = await invoke<{ bytes: number[]; mimeType: string }>("read_export_resource", { markdownPath: currentPath, source });
         image.setAttribute(
           "src",
-          `data:${mimeForImageSource(source)};base64,${arrayBufferToBase64(Uint8Array.from(bytes).buffer)}`,
+          `data:${resource.mimeType};base64,${arrayBufferToBase64(Uint8Array.from(resource.bytes).buffer)}`,
         );
         image.removeAttribute("srcset");
         continue;
@@ -343,12 +342,23 @@ async function inlineExportResources(html: string, currentPath: string) {
       throw new Error(`无法内嵌导出资源：${source}\n${String(error)}`);
     }
     if (!response.ok) throw new Error(`无法内嵌导出资源：${source}（HTTP ${response.status}）`);
+    if (isTauri() && response.url && !isWebImageUrl(response.url)) throw new Error("远程图片重定向到了应用本地资源。");
     const buffer = await response.arrayBuffer();
     const mime = response.headers.get("content-type")?.split(";")[0] || mimeForImageSource(source);
     image.setAttribute("src", `data:${mime};base64,${arrayBufferToBase64(buffer)}`);
     image.removeAttribute("srcset");
   }
   return `<!doctype html>\n${documentHtml.documentElement.outerHTML}`;
+}
+
+function isWebImageUrl(source: string) {
+  try {
+    const url = new URL(source);
+    return ["http:", "https:"].includes(url.protocol)
+      && !["asset.localhost", "tauri.localhost", "ipc.localhost"].includes(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function mimeForImageSource(source: string) {

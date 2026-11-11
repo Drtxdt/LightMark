@@ -16,6 +16,19 @@ export function captureImageAssetTarget(): ImageAssetTarget {
   return Object.freeze({ markdownPath: appStore.currentFilePath, documentMode: appStore.documentMode, settings: Object.freeze({ ...appStore.settings.image }) });
 }
 
+export async function chooseExportImageFolder() {
+  const markdownPath = appStore.currentFilePath;
+  if (!markdownPath) return;
+  try {
+    const folder = await invoke<string | null>("allow_export_image_folder", { markdownPath });
+    if (folder && appStore.currentFilePath === markdownPath) {
+      appStore.statusMessage = `本次启动期间，此文档可导出 ${folder} 中的图片。`;
+    }
+  } catch (error) {
+    if (appStore.currentFilePath === markdownPath) appStore.statusMessage = String(error);
+  }
+}
+
 const imageExtensionByType: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",

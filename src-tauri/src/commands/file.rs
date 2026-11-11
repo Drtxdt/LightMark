@@ -146,11 +146,14 @@ pub fn open_folder_dialog() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn open_asset_file_dialog() -> Result<Option<String>, String> {
-    Ok(FileDialog::new()
+pub fn open_asset_file_dialog(markdown_path: Option<String>) -> Result<Option<String>, String> {
+    let selected = FileDialog::new()
         .add_filter("附件", &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "mp3", "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "mkv", "pdf"])
-        .pick_file()
-        .map(path_to_string))
+        .pick_file();
+    if let (Some(doc), Some(file)) = (markdown_path.as_deref(), selected.as_deref()) {
+        super::export_images::export_images().allow_file(Path::new(doc), file)?;
+    }
+    Ok(selected.map(path_to_string))
 }
 
 #[tauri::command]
@@ -170,7 +173,7 @@ pub fn save_markdown_file_dialog(
 
 #[tauri::command]
 pub fn read_text_file(path: String) -> Result<String, String> {
-    read_text_file_snapshot(path)
+    read_text_file_snapshot_at(Path::new(&path))
         .map(|snapshot| snapshot.content)
         .map_err(|error| error.to_string())
 }
@@ -180,7 +183,12 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 /// save; callers do not have to hash a second, potentially different file.
 #[tauri::command]
 pub fn read_text_file_snapshot(path: String) -> Result<TextFileSnapshot, LargeFileError> {
-    read_text_file_snapshot_at(Path::new(&path))
+    let document = Path::new(&path);
+    let snapshot = read_text_file_snapshot_at(document)?;
+    // A file disappearing immediately after the read need not invalidate the
+    // bytes already received. Its images will require a successful reopen.
+    let _ = super::export_images::export_images().opened(document);
+    Ok(snapshot)
 }
 
 #[tauri::command(async)]
@@ -1744,12 +1752,14 @@ pub fn write_text_file(
     expected_target_fingerprint: Option<LargeFileFingerprint>,
 ) -> Result<TextFileWriteReceipt, LargeFileError> {
     let path = PathBuf::from(path);
-    write_text_file_at_root(
+    let receipt = write_text_file_at_root(
         &path,
         &content,
         expected_target_fingerprint,
         transaction_index_root(path.parent().unwrap_or_else(|| Path::new("."))),
-    )
+    )?;
+    let _ = super::export_images::export_images().opened(&path);
+    Ok(receipt)
 }
 
 pub(crate) fn write_text_file_at_root(

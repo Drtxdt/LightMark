@@ -24,6 +24,8 @@ pub struct HeadlessExportRequest {
     pub theme: Option<String>,
     pub math_numbering: Option<String>,
     pub config_path: Option<String>,
+    #[serde(default)]
+    pub resource_roots: Vec<PathBuf>,
     pub response_path: String,
 }
 
@@ -42,10 +44,34 @@ pub fn get_headless_export_request(app: AppHandle) -> Result<Option<HeadlessExpo
     };
     let request = read_request(&path)?;
     trace_request(&request, "frontend requested payload");
+    match load_headless_payload(&app, request) {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) => {
+            // The caller is already waiting for a response file. A missing
+            // source/root or unreadable config must finish that CLI request.
+            complete_headless_export(
+                app,
+                serde_json::json!({ "ok": false, "code": 5, "message": error }),
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn load_headless_payload(
+    app: &AppHandle,
+    request: HeadlessExportRequest,
+) -> Result<HeadlessExportPayload, String> {
     let markdown = fs::read_to_string(&request.input_path)
         .map_err(|error| format!("无法读取 Markdown {}：{error}", request.input_path))?;
-    let config = read_config(&app, request.config_path.as_deref())?;
-    Ok(Some(HeadlessExportPayload { request, markdown, config }))
+    let doc = std::path::Path::new(&request.input_path);
+    let images = super::export_images::export_images();
+    images.opened(doc)?;
+    for folder in &request.resource_roots {
+        images.allow_folder(doc, folder)?;
+    }
+    let config = read_config(app, request.config_path.as_deref())?;
+    Ok(HeadlessExportPayload { request, markdown, config })
 }
 
 #[tauri::command]

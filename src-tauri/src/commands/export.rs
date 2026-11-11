@@ -13,14 +13,12 @@ use image::{GenericImage, GenericImageView, RgbaImage};
 use super::models::ExportSettings;
 use crate::export_destination::ExportDestination;
 
-#[tauri::command]
-pub fn read_export_resource(path: String) -> Result<Vec<u8>, String> {
-    let normalized = path.strip_prefix(r"\\?\").unwrap_or(&path).replace('/', "\\");
-    let source = PathBuf::from(normalized);
-    if !source.is_file() {
-        return Err(format!("导出资源不存在：{}", source.display()));
-    }
-    fs::read(&source).map_err(|err| format!("无法读取导出资源 {}：{err}", source.display()))
+#[tauri::command(async)]
+pub fn read_export_resource(
+    markdown_path: String,
+    source: String,
+) -> Result<super::export_images::ExportImage, String> {
+    super::export_images::export_images().read(Path::new(&markdown_path), &source)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -835,19 +833,19 @@ fn rasterize_svg_to_png(source: &Path, target: &Path) -> Result<(), String> {
         .map_err(|err| format!("无法生成 SVG 替代图片 {}：{err}", target.display()))
 }
 
-fn percent_decode_path(value: &str) -> Result<String, String> {
+pub(super) fn percent_decode_path(value: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
             if index + 2 >= bytes.len() {
-                return Err(format!("SVG 路径包含无效 URL 编码：{value}"));
+                return Err(format!("图片路径包含无效 URL 编码：{value}"));
             }
             let high = decode_hex(bytes[index + 1]);
             let low = decode_hex(bytes[index + 2]);
             let (Some(high), Some(low)) = (high, low) else {
-                return Err(format!("SVG 路径包含无效 URL 编码：{value}"));
+                return Err(format!("图片路径包含无效 URL 编码：{value}"));
             };
             output.push(high * 16 + low);
             index += 3;
@@ -856,7 +854,7 @@ fn percent_decode_path(value: &str) -> Result<String, String> {
             index += 1;
         }
     }
-    String::from_utf8(output).map_err(|_| format!("SVG 路径不是有效 UTF-8：{value}"))
+    String::from_utf8(output).map_err(|_| format!("图片路径不是有效 UTF-8：{value}"))
 }
 
 fn decode_hex(value: u8) -> Option<u8> {

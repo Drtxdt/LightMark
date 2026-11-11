@@ -71,6 +71,7 @@ pub fn run() {
             commands::draft::get_file_snapshot,
             commands::export::export_document,
             commands::export::read_export_resource,
+            commands::export_images::allow_export_image_folder,
             commands::export::save_export_bytes,
             commands::export::detect_pandoc,
             commands::config::read_app_config,

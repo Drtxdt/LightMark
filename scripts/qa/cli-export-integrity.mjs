@@ -26,9 +26,9 @@ const manifest = { status: 'running', profile, source: hash(original),
   app: hash(await readFile(app)), cli: hash(await readFile(cli)), cases: [] };
 const persist = () => writeFile(path.join(root, 'manifest.json'), JSON.stringify(manifest, null, 2));
 const run = promisify(execFile);
-async function check(label, args, expectedCode, message) {
+async function check(label, args, expectedCode, message, document = input) {
   let code = 0, output;
-  try { output = await run(cli, ['export', input, ...args, '--json'], { env, windowsHide: true, timeout: 180000 }); }
+  try { output = await run(cli, ['export', document, ...args, '--json'], { env, windowsHide: true, timeout: 180000 }); }
   catch (e) { code = e.code; output = e; }
   const combined = String(output.stdout) + String(output.stderr);
   const bytesUnchanged = (await readFile(input)).equals(original) && (await readFile(alias)).equals(original);
@@ -65,6 +65,27 @@ try {
   const failed = await check('renderer failure keeps previous export', ['-f', 'custom-pandoc', '-o', good, '--force', '--config', badWriter], 5, /Pandoc 导出失败/);
   assert.ok((await readFile(good)).equals(keep), 'failed renderer replaced an existing export');
   failed.previousOutputUnchanged = true;
+  const notes = path.join(root, 'notes'), shared = path.join(root, 'shared');
+  await mkdir(notes);
+  await mkdir(shared);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8"/></svg>';
+  await writeFile(path.join(shared, '封 面.svg'), svg, { flag: 'wx' });
+  const article = path.join(notes, '插图.md');
+  const markdown = '![封面](../shared/封%20面.svg)\n';
+  await writeFile(article, markdown, { flag: 'wx' });
+  const args = ['-f', 'html', '-o', good, '--force'];
+  await check('unapproved shared image preserves previous output', args, 5, /图片位于文档目录外/, article);
+  assert.ok((await readFile(good)).equals(keep));
+  await check('explicit resource root embeds the selected image', [...args, '--resource-root', shared], 0, undefined, article);
+  assert.ok((await readFile(good, 'utf8')).includes('data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64')));
+  assert.equal(await readFile(article, 'utf8'), markdown);
+  await writeFile(path.join(notes, 'attachment.png'), 'not image data', { flag: 'wx' });
+  const local = path.join(notes, '本地.md');
+  await writeFile(local, '![附件](attachment.png)\n', { flag: 'wx' });
+  await check('invalid local image is rejected', args, 5, /不是支持的图片格式/, local);
+  const badConfig = path.join(root, 'unreadable-settings.json');
+  await writeFile(badConfig, '{', { flag: 'wx' });
+  await check('invalid startup config returns a CLI error', [...args, '--config', badConfig], 5, /无法解析配置/);
   assert.ok(!(await readdir(root)).some(name => name.startsWith('.lightmark-export-')), 'staged output survived completion');
   manifest.status = 'passed';
 } catch (error) { manifest.status = 'failed'; manifest.error = String(error); throw error; }

@@ -19,6 +19,7 @@ import ThemeToggle from "../theme-toggle/ThemeToggle.vue";
 import UiIcon from "../ui/UiIcon.vue";
 import { openFindPanel } from "../../stores/findReplaceStore";
 import { exportTargets } from "../../utils/exportTargets";
+import { chooseExportImageFolder } from "../../utils/imageAssets";
 import type { EditorMode, ThemeMode } from "../../types";
 
 type EditorCommand =
@@ -270,7 +271,9 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
               <small>.{{ target.extension }}</small>
             </span>
           </button>
-          <div class="lm-export-menu-separator"></div>
+            <div class="lm-export-menu-separator"></div>
+            <button class="lm-export-menu-item" role="menuitem" :disabled="!appStore.currentFilePath || appStore.documentMode === 'large'"
+              @click="exportMenuOpen = false; chooseExportImageFolder()">允许导出图片目录…</button>
           <button
             v-for="target in secondaryExportTargets"
             :key="target.id"
