@@ -162,8 +162,8 @@ onMounted(async () => {
   unlistenExternalFileWatch = await listen("lightmark-file-watch-event", () => {
     void checkOpenFileSnapshots();
   });
-  unlistenWorkspaceWatch = await listen<{ paths?: string[] }>("lightmark-workspace-watch-event", (event) => {
-    scheduleWorkspaceKnowledgeRefresh(event.payload?.paths ?? []);
+  unlistenWorkspaceWatch = await listen<{ root: string; epoch: number; paths: string[] }>("lightmark-workspace-watch-event", (event) => {
+    scheduleWorkspaceKnowledgeRefresh(event.payload.paths, event.payload);
   });
   unlistenTauriImageDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type !== "drop") return;

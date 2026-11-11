@@ -325,10 +325,10 @@ fn prepare_database(path: &Path) -> Result<(), String> {
     }
 }
 
-pub fn queue_workspace_paths(paths: Vec<String>) {
+pub fn queue_workspace_paths(watcher_root: &str, paths: Vec<String>) {
     let should_start = {
         let Ok(mut state) = runtime().lock() else { return; };
-        if state.db_path.is_none() { return; }
+        if state.db_path.is_none() || state.root != watcher_root { return; }
         state.pending_paths.extend(paths);
         if state.worker_scheduled { false } else { state.worker_scheduled = true; true }
     };

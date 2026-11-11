@@ -2119,12 +2119,13 @@ pub fn unwatch_all_markdown_files() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn watch_markdown_workspace(app: AppHandle, path: String) -> Result<(), String> {
+pub fn watch_markdown_workspace(app: AppHandle, path: String, epoch: u64) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_dir() {
         return Err(format!("Workspace folder does not exist: {}", path_buf.display()));
     }
 
+    let watcher_root = path.clone();
     let app_handle = app.clone();
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
@@ -2140,8 +2141,8 @@ pub fn watch_markdown_workspace(app: AppHandle, path: String) -> Result<(), Stri
             if paths.is_empty() {
                 return;
             }
-            super::workspace_index::queue_workspace_paths(paths.clone());
-            let _ = app_handle.emit(WORKSPACE_WATCH_EVENT, WorkspaceWatchEvent { paths });
+            super::workspace_index::queue_workspace_paths(&watcher_root, paths.clone());
+            let _ = app_handle.emit(WORKSPACE_WATCH_EVENT, serde_json::json!({ "root": watcher_root, "epoch": epoch, "paths": paths }));
         },
         Config::default(),
     )

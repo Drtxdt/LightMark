@@ -211,6 +211,14 @@ let backlinkRefreshTimer = 0;
 let backlinkRefreshGeneration = 0;
 let wikiIndexHydrationPromise: Promise<void> | null = null;
 let workspaceKnowledgeRefreshTimer = 0;
+let workspaceEpoch = 0;
+let workspaceSelectionRequest = 0;
+let treeRequest = 0;
+let workspaceWatchTail: Promise<void> = Promise.resolve();
+let indexOpenTail: Promise<void> = Promise.resolve();
+type WorkspaceView = { root: string; epoch: number };
+const currentWorkspaceView = (): WorkspaceView => ({ root: appStore.currentWorkspace, epoch: workspaceEpoch });
+const ownsWorkspace = (view: WorkspaceView) => view.epoch === workspaceEpoch && view.root === appStore.currentWorkspace;
 let distractionHintTimer = 0;
 const documentSnapshotCoordinator = new DocumentSnapshotCoordinator();
 const documentRuntimeMetadata = new Map<string, {
@@ -573,13 +581,14 @@ function commitDocumentSnapshot(snapshot: MarkdownSnapshot, expectedTab: Documen
   scheduleKnowledgeRefresh();
   const runtime = documentRuntimeMetadata.get(tabId);
   if (tab.path && appStore.workspaceIndexReady) {
+    const view = currentWorkspaceView();
     void workspaceIndexClient.updateOpenDocument(
       tab.path,
       documentRuntimeIdentity(tab.id).epoch,
       runtime?.revision ?? snapshot.revision,
       snapshot.markdown,
-    ).then((status) => applyRustWorkspaceIndexStatus(status)).catch((error) => {
-      appStore.wikiIndexError = `Rust 工作区索引更新失败：${error}`;
+    ).then((status) => applyRustWorkspaceIndexStatus(status, view)).catch((error) => {
+      if (ownsWorkspace(view)) appStore.wikiIndexError = `Rust 工作区索引更新失败：${error}`;
     });
   }
   return snapshot.markdown;
@@ -935,6 +944,7 @@ export function loadConfig() {
 }
 
 async function readConfigState() {
+  const initialWorkspace = currentWorkspaceView();
   const config = await invoke<AppConfig>("read_app_config");
   appStore.recentFiles = config.recentFiles ?? [];
   appStore.settings = normalizeSettings(config);
@@ -943,16 +953,13 @@ async function readConfigState() {
   appStore.tabs = [];
   appStore.activeTabId = "";
   appStore.splitLayout = defaultSplitLayout();
-  appStore.currentWorkspace = "";
-  appStore.fileTree = [];
   if (shouldRestoreSession(config)) {
-    if (config.session?.workspacePath) {
-      appStore.currentWorkspace = config.session.workspacePath;
+    if (config.session?.workspacePath && ownsWorkspace(initialWorkspace) && !initialWorkspace.root) {
+      const restored = selectWorkspace(config.session.workspacePath);
       try {
         await refreshFileTree();
       } catch {
-        appStore.currentWorkspace = "";
-        appStore.fileTree = [];
+        if (ownsWorkspace(restored)) selectWorkspace("");
       }
     }
     await restoreSession(config.session);
@@ -969,21 +976,50 @@ export async function persistConfig() {
   await invoke("write_app_config", { config });
 }
 
-export async function refreshFileTree() {
-  if (!appStore.currentWorkspace) {
-    appStore.fileTree = [];
-    appStore.wikiIndex = createWikiWorkspaceIndex([]);
-    appStore.wikiIndexError = "";
-    appStore.workspaceIndexReady = false;
-    appStore.workspaceIndexTags = [];
-    return;
-  }
-  appStore.fileTree = await invoke<FileNode[]>("list_markdown_files", {
-    folder: appStore.currentWorkspace,
-  });
-  appStore.wikiIndex = createWikiWorkspaceIndex(appStore.fileTree, appStore.currentWorkspace);
+function selectWorkspace(root: string): WorkspaceView {
+  ++workspaceEpoch;
+  ++backlinkRefreshGeneration;
+  clearWorkspaceRefreshTimer();
+  wikiIndexHydrationPromise = null;
+  appStore.currentWorkspace = root;
+  appStore.fileTree = [];
+  appStore.wikiIndex = createWikiWorkspaceIndex([], root);
+  appStore.workspaceIndexReady = false;
+  appStore.workspaceIndexGeneration = 0;
+  appStore.workspaceIndexTags = [];
+  appStore.wikiIndexBusy = false;
   appStore.wikiIndexError = "";
-  const hydration = hydrateRustWorkspaceIndex().catch((error) => {
+  appStore.wikiBacklinks = [];
+  appStore.wikiBacklinksForPath = "";
+  appStore.wikiUnlinkedMentions = [];
+  appStore.wikiMentionsForPath = "";
+  appStore.wikiBacklinksBusy = false;
+  appStore.wikiBacklinksError = "";
+  return currentWorkspaceView();
+}
+
+async function readWorkspaceTree(view: WorkspaceView) {
+  const request = ++treeRequest;
+  if (!view.root) return false;
+  try {
+    const tree = await invoke<FileNode[]>("list_markdown_files", { folder: view.root });
+    if (!ownsWorkspace(view) || request !== treeRequest) return false;
+    appStore.fileTree = tree;
+    appStore.wikiIndex = createWikiWorkspaceIndex(tree, view.root);
+    return true;
+  } catch (error) {
+    if (!ownsWorkspace(view) || request !== treeRequest) return false;
+    throw error;
+  }
+}
+
+export async function refreshFileTree() {
+  const view = currentWorkspaceView();
+  await readWorkspaceTree(view);
+  if (!view.root || !ownsWorkspace(view)) return;
+  appStore.wikiIndexError = "";
+  const hydration = hydrateRustWorkspaceIndex(view).catch((error) => {
+    if (!ownsWorkspace(view) || wikiIndexHydrationPromise !== hydration) return;
     appStore.workspaceIndexReady = false;
     appStore.wikiIndexBusy = false;
     appStore.wikiIndexError = `Rust 工作区索引不可用：${error}`;
@@ -994,25 +1030,33 @@ export async function refreshFileTree() {
   });
 }
 
-async function hydrateRustWorkspaceIndex() {
+async function hydrateRustWorkspaceIndex(view: WorkspaceView) {
   appStore.wikiIndexBusy = true;
-  const workspace = appStore.currentWorkspace;
-  let status = await workspaceIndexClient.open(workspace);
-  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+  // Rust has one active index. Order root-changing commands, not the
+  // potentially long rebuild or polling of a previous workspace.
+  const opened = indexOpenTail.then(() => ownsWorkspace(view) ? workspaceIndexClient.open(view.root) : null);
+  indexOpenTail = opened.then(() => {}, () => {});
+  let status = await opened;
+  if (!status || !ownsWorkspace(view)) return;
   const delays = [100, 250, 500];
   let poll = 0;
-  while (status.busy && isSamePath(workspace, appStore.currentWorkspace)) {
+  const generation = status.generation;
+  while (status.busy && isSamePath(status.root, view.root) && status.generation === generation) {
     await new Promise((resolve) => window.setTimeout(resolve, delays[Math.min(poll, delays.length - 1)]));
+    if (!ownsWorkspace(view)) return;
     status = await workspaceIndexClient.status();
+    if (!ownsWorkspace(view)) return;
     poll += 1;
   }
-  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+  if (!isSamePath(status.root, view.root) || status.generation !== generation) return;
   if (status.error) throw new Error(status.error);
-  await applyRustWorkspaceIndexStatus(status);
+  await applyRustWorkspaceIndexStatus(status, view);
 }
 
-async function applyRustWorkspaceIndexStatus(status: WorkspaceIndexStatus) {
-  if (!isSamePath(status.root, appStore.currentWorkspace)) return;
+async function applyRustWorkspaceIndexStatus(status: WorkspaceIndexStatus, view: WorkspaceView) {
+  if (!ownsWorkspace(view) || !isSamePath(status.root, view.root) || status.busy) return;
+  const tags = await workspaceIndexClient.tags();
+  if (!ownsWorkspace(view) || tags.generation !== status.generation || status.generation < appStore.workspaceIndexGeneration) return;
   const byPath = new Map(appStore.wikiIndex.entries.map((entry) => [normalizePathKey(entry.path), entry]));
   for (const candidate of status.candidates) {
     const entry = byPath.get(normalizePathKey(candidate.path));
@@ -1021,8 +1065,6 @@ async function applyRustWorkspaceIndexStatus(status: WorkspaceIndexStatus) {
     entry.normalizedAliases = candidate.aliases.map((alias) => alias.trim().toLocaleLowerCase());
     entry.indexed = true;
   }
-  const tags = await workspaceIndexClient.tags();
-  if (tags.generation !== status.generation) return;
   appStore.workspaceIndexTags = tags.data;
   appStore.workspaceIndexGeneration = status.generation;
   appStore.workspaceIndexReady = true;
@@ -1035,12 +1077,12 @@ function scheduleWikiIndexEntryRefresh(path: string, _content: string) {
 }
 
 export async function openWorkspace(folder?: string) {
+  const request = ++workspaceSelectionRequest;
   const selected = folder ?? (await invoke<string | null>("open_folder_dialog"));
-  if (!selected) return;
-  await stopWorkspaceKnowledgeWatch();
-  appStore.currentWorkspace = selected;
-  await refreshFileTree();
-  await syncWorkspaceKnowledgeWatch();
+  if (!selected || request !== workspaceSelectionRequest) return;
+  const view = selectWorkspace(selected);
+  await Promise.all([refreshFileTree(), syncWorkspaceKnowledgeWatch()]);
+  if (!ownsWorkspace(view)) return;
   void refreshKnowledge();
   await persistConfig();
 }
@@ -1050,56 +1092,66 @@ export async function refreshKnowledgeIndex() {
   void refreshKnowledge();
 }
 
-export async function syncWorkspaceKnowledgeWatch() {
-  await invoke("unwatch_markdown_workspace").catch(() => {});
-  if (!appStore.currentWorkspace) return;
-  await invoke("watch_markdown_workspace", { path: appStore.currentWorkspace }).catch((error) => {
-    appStore.wikiIndexError = `工作区监听不可用：${error}`;
+function queueWorkspaceWatch(view: WorkspaceView, enable: boolean) {
+  workspaceWatchTail = workspaceWatchTail.then(async () => {
+    if (!ownsWorkspace(view)) return;
+    await invoke("unwatch_markdown_workspace").catch(() => {});
+    if (!enable || !view.root || !ownsWorkspace(view)) return;
+    await invoke("watch_markdown_workspace", { path: view.root, epoch: view.epoch }).catch((error) => {
+      if (ownsWorkspace(view)) appStore.wikiIndexError = `工作区监听不可用：${error}`;
+    });
   });
+  return workspaceWatchTail;
 }
 
-export async function stopWorkspaceKnowledgeWatch() {
+export function syncWorkspaceKnowledgeWatch() {
+  return queueWorkspaceWatch(currentWorkspaceView(), true);
+}
+
+function clearWorkspaceRefreshTimer() {
   if (workspaceKnowledgeRefreshTimer && typeof window !== "undefined") {
     window.clearTimeout(workspaceKnowledgeRefreshTimer);
     workspaceKnowledgeRefreshTimer = 0;
   }
   workspaceKnowledgePendingPaths.clear();
-  await invoke("unwatch_markdown_workspace").catch(() => {});
 }
 
-export function scheduleWorkspaceKnowledgeRefresh(paths: string[] = []) {
-  if (!appStore.currentWorkspace || typeof window === "undefined") return;
+export function stopWorkspaceKnowledgeWatch() {
+  clearWorkspaceRefreshTimer();
+  return queueWorkspaceWatch(currentWorkspaceView(), false);
+}
+
+export function scheduleWorkspaceKnowledgeRefresh(paths: string[], view: WorkspaceView) {
+  if (!ownsWorkspace(view) || !view.root || typeof window === "undefined") return;
   for (const path of paths) {
     if (isMarkdownFilePath(path)) workspaceKnowledgePendingPaths.add(path);
   }
   if (workspaceKnowledgeRefreshTimer) window.clearTimeout(workspaceKnowledgeRefreshTimer);
-  const expectedWorkspace = appStore.currentWorkspace;
   workspaceKnowledgeRefreshTimer = window.setTimeout(() => {
     workspaceKnowledgeRefreshTimer = 0;
     const pendingPaths = [...workspaceKnowledgePendingPaths];
     workspaceKnowledgePendingPaths.clear();
-    void refreshChangedKnowledgePaths(pendingPaths, expectedWorkspace);
+    void refreshChangedKnowledgePaths(pendingPaths, view);
   }, 250);
 }
 
-async function refreshChangedKnowledgePaths(_paths: string[], expectedWorkspace: string) {
-  if (!isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
+async function refreshChangedKnowledgePaths(_paths: string[], view: WorkspaceView) {
+  if (!ownsWorkspace(view)) return;
   appStore.wikiIndexBusy = true;
   appStore.wikiIndexError = "";
   try {
-    const nextTree = await invoke<FileNode[]>("list_markdown_files", { folder: expectedWorkspace });
-    if (!isSamePath(appStore.currentWorkspace, expectedWorkspace)) return;
-    appStore.fileTree = nextTree;
-    appStore.wikiIndex = createWikiWorkspaceIndex(nextTree, expectedWorkspace);
+    if (!await readWorkspaceTree(view) || !ownsWorkspace(view)) return;
     await new Promise<void>((resolve) => window.setTimeout(resolve, 150));
+    if (!ownsWorkspace(view)) return;
     const status = await workspaceIndexClient.status();
+    if (!ownsWorkspace(view) || !isSamePath(status.root, view.root)) return;
     if (status.error) throw new Error(status.error);
-    await applyRustWorkspaceIndexStatus(status);
-    scheduleKnowledgeRefresh();
+    await applyRustWorkspaceIndexStatus(status, view);
+    if (ownsWorkspace(view)) scheduleKnowledgeRefresh();
   } catch (error) {
-    if (isSamePath(appStore.currentWorkspace, expectedWorkspace)) appStore.wikiIndexError = String(error);
+    if (ownsWorkspace(view)) appStore.wikiIndexError = String(error);
   } finally {
-    if (isSamePath(appStore.currentWorkspace, expectedWorkspace)) appStore.wikiIndexBusy = false;
+    if (ownsWorkspace(view) && !wikiIndexHydrationPromise) appStore.wikiIndexBusy = false;
   }
 }
 
@@ -4070,7 +4122,7 @@ async function closeTabInternal(
     return false;
   }
   const closingIndexLease = target.path && target.documentMode === 'normal' && appStore.workspaceIndexReady
-    ? { path: target.path, epoch: documentRuntimeIdentity(target.id).epoch, revision: documentSessionForTab(target.id)?.revision ?? documentRuntimeMetadata.get(target.id)?.revision ?? 0 }
+    ? { path: target.path, epoch: documentRuntimeIdentity(target.id).epoch, revision: documentSessionForTab(target.id)?.revision ?? documentRuntimeMetadata.get(target.id)?.revision ?? 0, workspace: currentWorkspaceView() }
     : null;
   if (!isCloseAuthorizationCurrent(finalAuthorization)) {
     appStore.statusMessage = "关闭期间文档发生了变化，未关闭。";
@@ -4099,7 +4151,7 @@ async function closeTabInternal(
   clearDocumentRuntimeState(closingTabId);
   if (closingIndexLease) {
     void workspaceIndexClient.releaseOpenDocument(closingIndexLease.path, closingIndexLease.epoch, closingIndexLease.revision).catch(error => {
-      appStore.wikiIndexError = `释放工作区文档索引失败：${error}`;
+      if (ownsWorkspace(closingIndexLease.workspace)) appStore.wikiIndexError = `释放工作区文档索引失败：${error}`;
     });
   }
   appStore.splitLayout = resolveClosedTabSplitLayout(appStore.splitLayout, closingTabId, tabIds());
