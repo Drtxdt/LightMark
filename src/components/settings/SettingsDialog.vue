@@ -128,7 +128,7 @@ async function persist() {
     saveState.value = "正在保存...";
     localSettings.value.image.assetFolder = validateAssetFolder(localSettings.value.image.assetFolder);
     await updateSettings(cloneSettings(localSettings.value));
-    saveState.value = "已保存";
+    saveState.value = appStore.configPersistenceMessage ? "仅在本次使用中生效" : "已保存";
     window.setTimeout(() => {
       if (saveState.value === "已保存") saveState.value = "";
     }, 1200);
@@ -279,6 +279,7 @@ function cloneSettings(settings: AppSettings): AppSettings {
         </header>
 
         <main class="min-h-0 flex-1 overflow-auto px-6 py-5">
+          <p v-if="appStore.configPersistenceMessage" role="status" class="mb-4">{{ appStore.configPersistenceMessage }}</p>
           <div v-if="activeSection === 'general'" class="settings-stack">
             <div class="settings-group">
               <h4>启动</h4>

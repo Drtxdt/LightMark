@@ -85,6 +85,8 @@ function jumpToBreadcrumb(item: BreadcrumbItem) {
     </div>
     <span v-if="appStore.statusMessage" class="status-message min-w-0 flex-1 truncate text-center">{{ appStore.statusMessage }}</span>
     <div class="status-meta ml-auto flex items-center gap-3">
+      <button v-if="appStore.configPersistenceMessage" type="button" class="breadcrumb-button"
+        :title="appStore.configPersistenceMessage" @click="appStore.settingsOpen = true">设置未保存</button>
       <span v-if="draftStore.message" class="status-draft">{{ draftStore.message }}</span>
       <span v-if="appStore.settings.editor.showWordCount && stats" class="status-count">{{ stats.words }} 词</span>
       <span v-else-if="appStore.settings.editor.showWordCount" class="status-count">{{ appStore.largeFile?.totalLines ?? 0 }} 行</span>

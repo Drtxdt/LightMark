@@ -168,6 +168,7 @@ export const appStore = reactive({
   navigationBackStack: [] as NavigationLocation[],
   navigationForwardStack: [] as NavigationLocation[],
   recentFiles: [] as string[],
+  configPersistenceMessage: "",
   theme: "light" as ThemeMode,
   activeTheme: "light" as Exclude<ThemeMode, "system">,
   settings: defaultSettings(),
@@ -937,6 +938,8 @@ export function consumePendingEditorPosition(mode: EditorMode) {
 }
 
 let configLoadPromise: Promise<void> | null = null;
+let configPersistenceReady = false;
+let configWriteTail: Promise<void> = Promise.resolve();
 export function loadConfig() {
   // Bootstrap is a single application generation. A second caller must not
   // reset tabs after an early file-open command has already created one.
@@ -944,6 +947,16 @@ export function loadConfig() {
 }
 
 async function readConfigState() {
+  try {
+    await restoreConfigState();
+    configPersistenceReady = true;
+  } catch (error) {
+    appStore.configPersistenceMessage = "设置未能载入，本次更改仅保存在内存中，仍可编辑和保存文档。关闭应用后可检查配置目录中的 config.json 和 config.previous.json。";
+    throw new Error(`${appStore.configPersistenceMessage} ${error}`);
+  }
+}
+
+async function restoreConfigState() {
   const initialWorkspace = currentWorkspaceView();
   const config = await invoke<AppConfig>("read_app_config");
   appStore.recentFiles = config.recentFiles ?? [];
@@ -966,14 +979,34 @@ async function readConfigState() {
   }
 }
 
-export async function persistConfig() {
+export function persistConfig(): Promise<void> {
+  // Startup creates an untitled tab even when reading config failed. Its
+  // session defaults are never authorization to overwrite the old profile.
+  if (!configPersistenceReady) return Promise.resolve();
   syncActiveTabFromProjection();
   const config: AppConfig = {
     recentFiles: appStore.recentFiles,
     settings: appStore.settings,
     session: buildSessionRestoreState(),
   };
-  await invoke("write_app_config", { config });
+  // Vue state may change while an earlier disk write is outstanding.
+  const frozen: AppConfig = JSON.parse(JSON.stringify(config));
+  const write = configWriteTail.then(async () => {
+    await invoke("write_app_config", { config: frozen });
+    appStore.configPersistenceMessage = "";
+  });
+  configWriteTail = write.catch(error => {
+    appStore.configPersistenceMessage = `设置与会话尚未保存：${error}`;
+  });
+  return write;
+}
+
+export async function flushPendingConfigWrites() {
+  let pending: Promise<void>;
+  do {
+    pending = configWriteTail;
+    await pending;
+  } while (pending !== configWriteTail);
 }
 
 function selectWorkspace(root: string): WorkspaceView {

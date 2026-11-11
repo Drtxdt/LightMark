@@ -534,6 +534,7 @@ try {
       "  if (command === 'save_markdown_file_dialog') { if (deferSaveDialog) { deferSaveDialog = false; saveDialogStartedResolve?.(); saveDialogStartedResolve = null; await new Promise((resolve) => { releaseSaveDialogResolve = resolve; }); } return dialogPath; }",
       "  if (command === 'list_drafts') { if (shouldFailNextDraftList) { shouldFailNextDraftList = false; throw new Error('simulated draft list failure'); } return { records: [...draftRecords.values()], issues: [] }; }",
       "  if (command === 'list_markdown_files') return [];",
+      "  if (command === 'read_app_config') return {};",
       "  if (command === 'write_app_config') { if (shouldFailNextConfigWrite) { shouldFailNextConfigWrite = false; throw new Error('simulated post-save config sync failure'); } return null; }",
       "  if (command === 'workspace_index_open') return { root: args.root, generation: 0, busy: false, error: null, documentCount: 0, candidates: [] };",
       "  if (command === 'workspace_index_status') return { root: '', generation: 0, busy: false, error: null, documentCount: 0, candidates: [] };",
@@ -584,6 +585,7 @@ try {
     }
     const tauri = await import(pathToFileURL(appTauriPath).href);
     const store = await import(pathToFileURL(compiledAppStore).href);
+    await store.loadConfig(); // As in the desktop app, profile writes follow a successful read.
     const runtime = await import(pathToFileURL(path.join(appStoreDir, "editor", "documentRuntime.mjs")).href);
     const dialog = await import(pathToFileURL(dialogStorePath).href);
     const draft = await import(pathToFileURL(path.join(appStoreDir, "stores", "draftStore.mjs")).href);

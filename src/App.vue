@@ -20,6 +20,7 @@ import {
   captureWindowCloseAuthorization,
   currentFileName,
   ensureDefaultTab,
+  flushPendingConfigWrites,
   getDirtyTabs,
   goBackNavigation,
   goForwardNavigation,
@@ -265,6 +266,7 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
       if (preparation.action === "save") await showSaveFailure(preparation.error);
       return;
     }
+    await flushPendingConfigWrites();
     await closeWindowNow(preparation.ticket);
   } catch (error) {
     appStore.statusMessage = String(error);
