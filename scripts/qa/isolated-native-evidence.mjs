@@ -24,7 +24,7 @@ if (outputIndex >= 0 && (!requestedOutput || requestedOutput.startsWith("--"))) 
 }
 const scenarioIndex = args.indexOf("--scenario");
 const requestedScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "smoke";
-const supportedScenarios = new Set(["smoke", "html-security", "math-receipt", "recovery-bundle", "lm004-pending", "native-close-buffer", "normal-document", "export-document", "manual-ui", "large-source"]);
+const supportedScenarios = new Set(["smoke", "html-security", "math-receipt", "recovery-bundle", "lm004-pending", "native-close-buffer", "normal-document", "export-document", "manual-ui", "large-source", "find-integrity", "workspace-profile"]);
 const MATH_PROBE_WAIT_TIMEOUT_MS = 15000;
 const MATH_PROBE_EVALUATE_TIMEOUT_MS = 60000;
 const MATH_PROBE_POLL_INTERVAL_MS = 25;
@@ -157,6 +157,10 @@ function summarizePrepared(context) {
 }
 
 function createScenarioFixture(scenario, runToken) {
+  if (scenario === 'find-integrity' || scenario === 'workspace-profile') {
+    return { fileName: '查找完整性.md', fixtureContent: 'L$x$R\n\nAİBC!\n',
+      evidence: { name: scenario, expectedSaved: 'L$x$Z\n\nAİQC!\n' } };
+  }
   if (scenario === 'manual-ui') {
     return { fileName: 'native-manual-ui.md', fixtureContent: '# 原生中文输入验收\n\nIME_TARGET：请在这一段使用真实中文输入法。\n\n第二段用于选区、撤销、切换模式和保存重开。\n\n```text\nCODE_TARGET literal **text** $x$\n```\n\nFORMULA_TARGET $x^2$\n',
       evidence: { name: scenario, note: 'A dedicated visible native window stays alive until an explicit finish sentinel; no IME or visual success is inferred.' } };
@@ -414,6 +418,30 @@ async function launchEvidence(requestedPath, scenario = "smoke") {
         stateArchive,
         retainedIsolationPaths: isolatedPaths,
       };
+    }
+
+    if (context.scenario === 'find-integrity' || context.scenario === 'workspace-profile') {
+      const { runNativeFindIntegrity } = await import('./native-find-integrity.mjs');
+      const damagedProfile = context.scenario === 'workspace-profile';
+      const config = path.join(context.expectedAppConfigDir, 'config.json');
+      const originalConfig = Buffer.from('{"recentFiles": [ "recover-me.md" ,');
+      if (damagedProfile) {
+        // The common launcher proved this unique profile did not exist.
+        await mkdir(context.expectedAppConfigDir);
+        await writeFile(config, originalConfig, { flag: 'wx' });
+      }
+      const phase = await runNativePhase(context, context.scenario, client => runNativeFindIntegrity(client, context));
+      const bytes = await readFile(context.fixturePath);
+      assertBytesEqual(bytes, Buffer.from(context.scenarioEvidence.expectedSaved, 'utf8'), 'saved fixture after reopening and closing');
+      phase.diskAfterClose = describeBytes(bytes);
+      if (damagedProfile) {
+        const actual = await readFile(config);
+        assertBytesEqual(actual, originalConfig, 'damaged config preserved across edits, save and exit');
+        phase.originalConfigAfterClose = describeBytes(actual);
+      }
+      context.manifest.status = 'passed';
+      await persistManifest(context);
+      return { runDir: context.runDir, scenario: context.scenario, status: 'passed', steps: phase.probe.steps, diskAfterClose: phase.diskAfterClose, originalConfigAfterClose: phase.originalConfigAfterClose };
     }
 
     if (context.scenario === 'manual-ui') {

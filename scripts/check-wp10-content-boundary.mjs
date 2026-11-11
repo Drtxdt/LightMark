@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   WP10_FORBIDDEN_SENTINEL,
@@ -10,6 +10,14 @@ import {
   readWp10BoundaryManifest,
 } from "./qa/wp10-desktop-content-boundary-fixtures.mjs";
 import { checkBoundaryArtifacts } from "./qa/wp10-desktop-content-boundary-launcher.mjs";
+
+// TEMP may name a Windows alias. Compare actual directories component by
+// component; a string prefix can also mistake a sibling for a descendant.
+async function assertDescendant(root, candidate) {
+  const relative = path.relative(await realpath(root), await realpath(candidate));
+  assert.ok(relative && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative),
+    `${candidate} must be a descendant of ${root}`);
+}
 
 const fixture = await createTemporaryWp10BoundaryFixture();
 try {
@@ -41,10 +49,10 @@ try {
     assert.equal(observation.bytes, resource.bytes);
     assert.equal(observation.readSucceeded, true);
     if (resource.role === "allowed") {
-      assert.equal(observation.path.startsWith(manifest.allowedRoot), true);
+      await assertDescendant(manifest.allowedRoot, observation.path);
       assert.equal(observation.utf8.includes("WP10_FORBIDDEN"), false);
     } else {
-      assert.equal(observation.path.startsWith(manifest.forbiddenRoot), true);
+      await assertDescendant(manifest.forbiddenRoot, observation.path);
       assert.equal(observation.utf8.includes(resource.sentinel), true);
     }
   }
@@ -59,9 +67,8 @@ try {
   assert.match(pseudoImage.utf8, new RegExp(WP10_FORBIDDEN_SENTINEL, "u"));
   assert.match(textResource.utf8, new RegExp(WP10_FORBIDDEN_TEXT_SENTINEL, "u"));
 
-  const allowedRootParent = fixture.root;
-  assert.equal(manifest.allowedRoot.startsWith(allowedRootParent), true);
-  assert.equal(manifest.forbiddenRoot.startsWith(allowedRootParent), true);
+  await assertDescendant(fixture.root, manifest.allowedRoot);
+  await assertDescendant(fixture.root, manifest.forbiddenRoot);
   assert.equal(manifest.allowedRoot !== manifest.forbiddenRoot, true);
 
   const normalDist = path.join(fixture.root, "artifact-normal");
