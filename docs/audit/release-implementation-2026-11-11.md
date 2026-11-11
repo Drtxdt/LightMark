@@ -27,7 +27,7 @@
 
 ## 可重跑与交接
 
-项目已有 [Windows PR 工作流](../../.github/workflows/windows-pr.yml)：锁定 Node 24.18.0 / pnpm 10.32.1 / Rust 1.94.1，先给查找回归反馈，然后建生产包跑全套；Rust 在独立 job 中运行。旧提交对应的进行中检查可取消，失败保存每项检查日志。此工作流已写入工作树，**未推送，未声称 GitHub 已运行或已设分支保护**。原生窗口测试独立运行，不把无桌面的 PR 检查计作用户验收。
+首批验收在本机完成。后续已将 Windows 工作流纳入主分支，PR 和推送到 `main` 都会触发检查。Node 24.18.0、pnpm 10.32.1 和 Rust 1.94.1 分别固定版本。前端先跑可视化查找回归，再构建生产包、运行全套检查。Rust 在独立作业中运行。原生窗口操作另行验收。[工作流](../../.github/workflows/windows-pr.yml) · [GitHub 主分支运行记录](https://github.com/Drtxdt/LightMark/actions/workflows/windows-pr.yml?query=branch%3Amain)
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -38,17 +38,29 @@ node docs/audit/evidence/2026-11-11-writing-probe.mjs
 node scripts/qa/isolated-native-evidence.mjs --launch --scenario find-integrity
 node scripts/qa/isolated-native-evidence.mjs --launch --scenario workspace-profile
 node scripts/qa/isolated-native-evidence.mjs --launch --scenario export-document
+node scripts/qa/isolated-native-evidence.mjs --launch --scenario split-images
+node scripts/qa/isolated-native-evidence.mjs --launch --scenario normal-document
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --features tauri/custom-protocol --bins
 node scripts/qa/cli-export-integrity.mjs
 ```
 
 这次实际的 Rust 构建和测试加了 `--offline`，依赖已在本机注册表缓存中。原生用例要求 Windows/WebView2；CLI 的四格式用例另需可用的 Edge/Chrome 和 Pandoc。测试只使用新建的配置和合成笔记。配置坏时，建议先退出应用、复制整个配置目录；若有可解析的 `config.previous.json`，保留损坏文件的副本后，可复制上一份到 `config.json` 再启动。它保存的是设置与会话，不是未保存的笔记正文。
 
-仓库原本就有尚未提交的工作。为避免把旧 HEAD 当作本次候选，另留了[本机已验证源码 ZIP](../../.cache/formal-acceptance-2026-11-11/lightmark-tested-source.zip)。其中 349 个文件均与独立构建前的记录比对，含本次受测代码和测试；不含依赖目录、应用配置、安装器或这份随后撰写的交付报告。ZIP SHA-256：`774b460286b0c02b01fba2a6dfeda29940e1c52a1e330e7d1fffe1cf75b71942`。ZIP 位于本机忽略目录；版本化交接时，应按逻辑分批审查并提交对应源码，而非把 ZIP 提交进 Git。
+首次审查时工作区已有尚未提交的改动。本机归档 `.cache/formal-acceptance-2026-11-11/lightmark-tested-source.zip` 含当时验证的 349 个源码和测试文件，SHA-256 为 `774b460286b0c02b01fba2a6dfeda29940e1c52a1e330e7d1fffe1cf75b71942`。原有代码已核对快照后提交至 `c79b5c4`，随后的修复可从主分支历史逐项检出。
 
-## 下一批怎么做
+## 主分支后续修复与验收
 
-1. **文件创建与附件碰撞（A2）。** 将“选了一个尚不存在的名字”改成系统级排他创建；两个并发新建和两个同名粘贴分别验证，只有目标冲突时才换名，已有文件哈希不变。
-2. **文档资源归属与授权（A1/A3）。** 先验证分屏左右目录各有一张同名图，再收窄渲染和导出的本地文件授权。用正常本地图片、用户明确授权的父目录图片、公式、Mermaid 和应拒绝的资源一起验收；保护用户现有文档的显示能力。
-3. **恢复与日常写作。** 用多份草稿、突然退出和外部文件更改验证恢复；补齐系统打开文件入口和真实中文输入法。每条路径以“原稿和最后一次写入回执是否一致”收尾。
-4. **按实测划定发布承诺。** 在代表性 Windows 设备重测大文档输入、模式切换、峰值内存与降级阈值；将最终签名的同一个包跑完新装、升级、卸载和回退，再决定公开 Beta / 1.0。多人和独立开发的排期与各阶段放行标准见[长期路线图](roadmap-1.0-2026-11-11.md)。
+| 改动 | 可复核的结果 |
+| --- | --- |
+| `fe43655` 同名新建和粘贴（A2） | Windows 上 12 份同名粘贴均有不同的目标，读回每份内容与各自输入相符。对同一明确指定的笔记名并发发起 12 次创建，只有一次成功。自动命名可重试，已有文件的内容保留。 |
+| `c17b740`、`fc0c752` 分屏资源及笔记移动（A1） | 左右两篇笔记都写 `![封面](cover.svg)`。恢复分屏时真实图片宽度分别为 13、29 像素。将左栏重新定位到第三个目录后宽度变为 37，右栏仍为 29，快照与原稿逐字节相同，两栏均保持已保存。图片后的新段落与图片之间有一个空行，撤销后恢复原字节。另有 Windows 测试覆盖内容不同但大小相同的移动候选。 |
+| `8b321b1` 本地图片导出授权（A3 的导出入口） | 目录外的图片须单独选择或授权资源目录。共享目录授权仅对该笔记和本次启动有效，CLI 可重复传入 `--resource-root`。14 项发行模式 CLI 用例通过，覆盖拒绝授权时保留已有 HTML、授权后嵌入正确字节和拒绝伪装成图片的文件。独立打开笔记时核对了原生目录选择器标题与范围。成功授权的端到端验收使用 CLI。 |
+| `30d968e`、`e8c690e` 托管回归 | 首次 GitHub Windows 作业发现键盘测试从系统临时目录解析不到 Vue。测试移入该次检出的模块目录后，前端与 Rust 作业均通过。[修复后的托管记录](https://github.com/Drtxdt/LightMark/actions/runs/42985623698) |
+
+本批源码在 Windows 上通过生产构建、包体预算、95 项仓库检查和 136 个 Rust 测试（135 个库测试、1 个 CLI 测试）。另在隔离的 WebView2 窗口完成了常规写作的 75 个检查步骤，包含撤销、跨标签操作、节点编辑和连续保存。物理大文件矩阵由独立的性能验收运行，本批未计入。[分屏原生用例](../../scripts/qa/native-split-images.mjs) · [常规写作原生用例](../../scripts/qa/native-normal-document-probe.mjs) · [发行版 CLI 用例](../../scripts/qa/cli-export-integrity.mjs)
+
+## 下一批工作
+
+1. **桌面资源授权。** 收窄 WebView 的通用 asset scope 和生产 CSP，分别验收相对图片、公式、Mermaid、worker 与离线导出。Pandoc 自行读取的外部资源要单独核对。
+2. **恢复与日常写作。** 用多份草稿、意外退出和外部文件更改验证恢复。在真实中文输入法中验收组字、候选选择、切换模式和保存。通过资源管理器打开笔记后，核对原稿与最后一次写入回执。
+3. **性能与安装升级。** 在代表性 Windows 设备重测大文档输入延迟、模式切换和峰值内存。最终签名包须通过新装、升级、卸载和回退。独立开发与多人协作的排期以及各阶段放行标准见[长期路线图](roadmap-1.0-2026-11-11.md)。
