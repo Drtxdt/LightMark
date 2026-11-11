@@ -24,7 +24,7 @@ if (outputIndex >= 0 && (!requestedOutput || requestedOutput.startsWith("--"))) 
 }
 const scenarioIndex = args.indexOf("--scenario");
 const requestedScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "smoke";
-const supportedScenarios = new Set(["smoke", "html-security", "math-receipt", "recovery-bundle", "lm004-pending", "native-close-buffer", "normal-document", "export-document", "manual-ui", "large-source", "find-integrity", "workspace-profile"]);
+const supportedScenarios = new Set(["smoke", "html-security", "math-receipt", "recovery-bundle", "lm004-pending", "native-close-buffer", "normal-document", "export-document", "manual-ui", "large-source", "find-integrity", "workspace-profile", "split-images"]);
 const MATH_PROBE_WAIT_TIMEOUT_MS = 15000;
 const MATH_PROBE_EVALUATE_TIMEOUT_MS = 60000;
 const MATH_PROBE_POLL_INTERVAL_MS = 25;
@@ -157,6 +157,10 @@ function summarizePrepared(context) {
 }
 
 function createScenarioFixture(scenario, runToken) {
+  if (scenario === "split-images") {
+    return { fileName: "左侧笔记.md", fixtureContent: "![封面](cover.svg)\n",
+      evidence: { name: scenario, expectedWidths: [13, 29] } };
+  }
   if (scenario === 'find-integrity' || scenario === 'workspace-profile') {
     return { fileName: '查找完整性.md', fixtureContent: 'L$x$R\n\nAİBC!\n',
       evidence: { name: scenario, expectedSaved: 'L$x$Z\n\nAİQC!\n' } };
@@ -420,6 +424,16 @@ async function launchEvidence(requestedPath, scenario = "smoke") {
       };
     }
 
+    if (context.scenario === 'split-images') {
+      const { prepareSplitImages, verifySplitImages } = await import('./native-split-images.mjs');
+      const files = await prepareSplitImages(context);
+      const phase = await runNativePhase(context, context.scenario, client => verifySplitImages(client, context, files));
+      for (const file of files) assertBytesEqual(await readFile(file), Buffer.from(context.fixtureContent), 'original Markdown after split restore');
+      context.manifest.status = 'passed';
+      await persistManifest(context);
+      return { status: 'passed', scenario: context.scenario, runDir: context.runDir, observations: phase.probe };
+    }
+
     if (context.scenario === 'find-integrity' || context.scenario === 'workspace-profile') {
       const { runNativeFindIntegrity } = await import('./native-find-integrity.mjs');
       const damagedProfile = context.scenario === 'workspace-profile';
@@ -668,10 +682,25 @@ async function launchEvidence(requestedPath, scenario = "smoke") {
 
 async function runNativePhase(context, name, probe) {
   const vitePort = await findFreePort();
+  const { createServer } = await import("vite");
+  const vite = await createServer({
+    root: repositoryRoot,
+    logLevel: "error",
+    server: { host: "127.0.0.1", port: vitePort, strictPort: true },
+  });
+  try {
+    await vite.listen();
+    return await runNativeWindow(context, name, probe, vitePort);
+  } finally {
+    await vite.close();
+  }
+}
+
+async function runNativeWindow(context, name, probe, vitePort) {
   const cdpPort = await findFreePort();
   if (vitePort === cdpPort) throw new NativeIsolationError("Vite and CDP ports unexpectedly matched.");
   const targetNonce = `${context.runToken}-${name}-${randomUUID().slice(0, 8)}`;
-  await writeLaunchConfig(context.configPath, context.baseConfig, context.identifier, vitePort, targetNonce);
+  await writeLaunchConfig(context.configPath, context.baseConfig, context.identifier, vitePort, targetNonce, true);
 
   const browserArguments = [
     "--remote-debugging-address=127.0.0.1",
@@ -2873,13 +2902,13 @@ async function finishLogStream(stream) {
   await new Promise((resolve) => stream.end(resolve));
 }
 
-async function writeLaunchConfig(configPath, baseConfig, identifier, vitePort, targetNonce) {
+async function writeLaunchConfig(configPath, baseConfig, identifier, vitePort, targetNonce, serverAlreadyRunning = false) {
   const config = JSON.parse(JSON.stringify(baseConfig));
   config.identifier = identifier;
   config.build = {
     ...config.build,
     devUrl: `http://127.0.0.1:${vitePort}/?lightmarkQa=${encodeURIComponent(targetNonce)}`,
-    beforeDevCommand: {
+    beforeDevCommand: serverAlreadyRunning ? null : {
       script: `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port ${vitePort} --strictPort`,
       cwd: repositoryRoot,
       wait: false,

@@ -89,14 +89,14 @@ export async function imagePathsAsMarkdown(paths: string[], target = captureImag
   return markdown;
 }
 
-export function resolveRenderedImageSources(html: string) {
+export function resolveRenderedImageSources(html: string, markdownPath: string) {
   if (typeof document === "undefined") return html;
   const template = document.createElement("template");
   template.innerHTML = html;
-  if (appStore.currentFilePath) {
+  if (markdownPath) {
     template.content.querySelectorAll<HTMLImageElement>("img[src]").forEach((image) => {
       const source = image.getAttribute("src") || "";
-      const resolved = resolveMarkdownImageSource(source);
+      const resolved = resolveMarkdownImageSource(source, markdownPath);
       if (!resolved || resolved === source) return;
       image.setAttribute("data-markdown-src", source);
       image.setAttribute("src", resolved);
@@ -142,13 +142,14 @@ async function saveImageAsset(file: File, target: ImageAssetTarget) {
   });
 }
 
-export function resolveMarkdownImageSource(source: string, markdownPath = appStore.currentFilePath) {
+export function resolveMarkdownImageSource(source: string, markdownPath: string) {
   if (isExternalImageSource(source)) return source;
+  if (!markdownPath && !isAbsolutePath(decodeMarkdownPath(source))) return source;
   const absolute = resolveMarkdownImagePath(source, markdownPath);
   return isTauri() ? convertFileSrc(absolute) : absolute;
 }
 
-export function resolveMarkdownImagePath(source: string, markdownPath = appStore.currentFilePath) {
+export function resolveMarkdownImagePath(source: string, markdownPath: string) {
   const decodedSource = decodeMarkdownPath(source);
   return isAbsolutePath(decodedSource) ? decodedSource : joinPath(parentPath(markdownPath), decodedSource);
 }

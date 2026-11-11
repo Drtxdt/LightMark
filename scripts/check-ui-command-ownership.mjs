@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import ts from 'typescript';
 
 function scriptOf(file) {
@@ -63,7 +64,7 @@ const exports = {};
 const context = vm.createContext({
   exports, Uint8Array, Date,
   require(name) {
-    if (name === '@tauri-apps/api/core') return { invoke: async (command, payload) => { calls.push({ command, payload }); return 'assets-a/a b.png'; } };
+    if (name === '@tauri-apps/api/core') return { isTauri: () => false, invoke: async (command, payload) => { calls.push({ command, payload }); return 'assets-a/a b.png'; } };
     if (name === '../stores/appStore') return { appStore, refreshFileTree: async () => {} };
     if (name === './imageCompression') return { processPastedImage: async file => {
       await new Promise(resolve => { resumeCompression = resolve; });
@@ -92,6 +93,20 @@ assert.equal(Object.isFrozen(target.settings), true);
 appStore.currentFilePath = 'E:/C/c.md';
 await exports.imagePathsAsMarkdown(['E:/photo.png'], target);
 assert.equal(calls[1].payload.markdownPath, 'E:/B/b.md');
+
+// Use Turndown's existing DOM implementation to exercise the production
+// renderer with a different document active in the other pane.
+const requireHere = createRequire(import.meta.url);
+const dom = createRequire(requireHere.resolve('turndown'))('@mixmark-io/domino').createWindow('');
+Object.assign(context, { document: dom.document, Node: dom.Node, HTMLImageElement: dom.HTMLImageElement });
+const markup = '<p><img src="cover.svg" alt="cover"></p>';
+for (const [owner, expected] of [['E:/A/a.md', 'E:/A/cover.svg'], ['E:/B/b.md', 'E:/B/cover.svg'], ['', 'cover.svg']]) {
+  const template = dom.document.createElement('template');
+  template.innerHTML = exports.resolveRenderedImageSources(markup, owner);
+  const img = template.content.querySelector('img');
+  assert.equal(img.getAttribute('src'), expected);
+  assert.equal(exports.markdownImageSourceFromElement(img), 'cover.svg');
+}
 
 // The overflow menu executes the component's production keyboard handler.
 const menuButtons = Array.from({ length: 4 }, () => ({ focus() { menuContext.document.activeElement = this; } }));

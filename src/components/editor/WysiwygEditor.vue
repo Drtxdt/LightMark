@@ -2690,7 +2690,7 @@ const LightMarkTableHeader = TableHeader.extend({
 });
 
 function renderMarkdownForEditorWithAssets(markdown: string) {
-  return resolveRenderedImageSources(renderMarkdownForEditor(markdown));
+  return resolveRenderedImageSources(renderMarkdownForEditor(markdown), editorOwnerTab?.path ?? "");
 }
 
 function createTyporaImageView(node: any, editor: any, getPos: (() => number | undefined) | boolean) {
@@ -2805,7 +2805,7 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
   };
   const commitSource = () => {
     if (!sourceVisible) return true;
-    const parsed = parseSingleMarkdownImage(source.value.trim());
+    const parsed = parseSingleMarkdownImage(source.value.trim(), editorOwnerTab?.path ?? "");
     if (!parsed) {
       errorMessage = "图片 Markdown 格式无效，应为 ![alt](path) 或 ![alt](path \"title\")";
       sourceVisible = true;
@@ -4460,24 +4460,24 @@ async function insertImagePathsIntoWysiwyg(paths: string[], from: number, to: nu
   await insertImagesAtBookmark(from, to, target => imagePathsAsMarkdown(paths, target));
 }
 
-function parseMarkdownImageSnippets(markdown: string) {
+function parseMarkdownImageSnippets(markdown: string, markdownPath: string) {
   const images: Array<{ src: string; markdownSrc: string; alt: string; title: string | null }> = [];
   const pattern = /!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(markdown))) {
-    const image = parseSingleMarkdownImage(match[0]);
+    const image = parseSingleMarkdownImage(match[0], markdownPath);
     if (image) images.push(image);
   }
   return images;
 }
 
-function parseSingleMarkdownImage(markdown: string) {
+function parseSingleMarkdownImage(markdown: string, markdownPath: string) {
   const match = markdown.match(/^!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)$/);
   if (!match) return null;
   const markdownSrc = match[2]?.trim();
   if (!markdownSrc) return null;
   return {
-    src: resolveMarkdownImageSource(markdownSrc),
+    src: resolveMarkdownImageSource(markdownSrc, markdownPath),
     markdownSrc,
     alt: match[1].replace(/\\]/g, "]"),
     title: match[3] || null,
@@ -5148,7 +5148,7 @@ function registerWysiwygDocumentSession() {
     async applyPendingCommand(anchor, payload, expectedRevision, assertCurrent) {
       assertCurrent();
       if (payload.kind === 'image') {
-        const images = parseMarkdownImageSnippets(payload.markdown);
+        const images = parseMarkdownImageSnippets(payload.markdown, ownerTab.path);
         if (!images.length) throw new Error('图片引用解析失败，文件已保留在资源目录。');
         const snapshot = await snapshotCache!.snapshot('externalDiff');
         const [{ sourceBlockInsertionCandidates }, { sameSourceSemanticNode }] = await Promise.all([

@@ -1,23 +1,27 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import mermaid from "mermaid";
-import { appStore, openWikiLink } from "../../stores/appStore";
+import { appStore, getPaneContent, getPaneTab, openWikiLink } from "../../stores/appStore";
 import { renderMarkdown } from "../../utils/markdown";
 import { resolveRenderedImageSources } from "../../utils/imageAssets";
 import { extractOutline } from "../../utils/outline";
 import { parseWikiLinkHref } from "../../utils/wikiLinks";
+import type { EditorPaneId } from "../../types";
 
+const props = defineProps<{ paneId?: EditorPaneId }>();
+const pane = computed(() => props.paneId ?? appStore.splitLayout.activePaneId);
+const content = computed(() => getPaneContent(pane.value));
 const highlightingVersion = ref(0);
-watch(() => appStore.currentContent, async (source) => {
+watch(content, async (source) => {
   const { prepareMarkdownLanguages } = await import("../../utils/markdownHighlighting");
   await prepareMarkdownLanguages(source);
-  if (source === appStore.currentContent) highlightingVersion.value++;
+  if (source === content.value) highlightingVersion.value++;
 }, { immediate: true });
 
 const html = computed(() => {
   void highlightingVersion.value;
-  const rendered = resolveRenderedImageSources(renderMarkdown(appStore.currentContent));
-  const outline = extractOutline(appStore.currentContent);
+  const rendered = resolveRenderedImageSources(renderMarkdown(content.value), getPaneTab(pane.value)?.path ?? "");
+  const outline = extractOutline(content.value);
   let index = 0;
   return rendered.replace(/<h([1-6])>/g, (match) => {
     const item = outline[index++];
