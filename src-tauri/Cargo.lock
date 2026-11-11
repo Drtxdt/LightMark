@@ -2331,6 +2331,7 @@ dependencies = [
  "resvg",
  "rfd",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2338,6 +2339,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tempfile",
  "windows",
 ]
 

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use image::{GenericImage, GenericImageView, RgbaImage};
 
 use super::models::ExportSettings;
+use crate::export_destination::ExportDestination;
 
 #[tauri::command]
 pub fn read_export_resource(path: String) -> Result<Vec<u8>, String> {
@@ -120,7 +121,8 @@ fn export_html_png(request: ExportRequest) -> Result<ExportResult, String> {
     if pixels > MAX_PIXELS {
         return Err(format!("PNG 长图共 {pixels} 像素，超过一亿像素安全上限。请缩短文档或改用 PDF。"));
     }
-    let target_path = resolve_export_path(&request, "png")?;
+    let destination = resolve_export_path(&request, "png")?;
+    let staged = destination.stage("png")?;
     let profile_path = make_temp_dir("lightmark-edge-profile")?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
@@ -181,8 +183,8 @@ fn export_html_png(request: ExportRequest) -> Result<ExportResult, String> {
             offset += tile_height;
         }
         canvas
-            .save_with_format(&target_path, image::ImageFormat::Png)
-            .map_err(|err| format!("无法写入 PNG 文件 {}：{err}", target_path.display()))?;
+            .save_with_format(staged.path(), image::ImageFormat::Png)
+            .map_err(|err| format!("无法生成 PNG 文件：{err}"))?;
         Ok(commands.join("\n"))
     })();
     for path in temp_paths {
@@ -190,8 +192,9 @@ fn export_html_png(request: ExportRequest) -> Result<ExportResult, String> {
     }
     let _ = fs::remove_dir_all(&profile_path);
     let command = result?;
+    let published = staged.commit()?;
     Ok(ExportResult {
-        path: target_path.to_string_lossy().to_string(),
+        path: published.to_string_lossy().into_owned(),
         format: request.target,
         used_pandoc_path: None,
         command: Some(command),
@@ -220,12 +223,12 @@ fn save_export_bytes_blocking(
     bytes: Vec<u8>,
     settings: ExportSettings,
 ) -> Result<ExportResult, String> {
-    let Some(path) = choose_export_path(&current_path, &target, &extension, &settings) else {
-        return Err("Export cancelled".to_string());
-    };
-    fs::write(&path, bytes).map_err(|err| format!("Failed to export {}: {err}", path.display()))?;
+    let destination = resolve_export_path_parts(&current_path, &target, &extension, &settings, None, false)?;
+    let staged = destination.stage(&extension)?;
+    fs::write(staged.path(), bytes).map_err(|err| format!("无法暂存导出内容：{err}"))?;
+    let published = staged.commit()?;
     Ok(ExportResult {
-        path: path.to_string_lossy().to_string(),
+        path: published.to_string_lossy().into_owned(),
         format: target,
         used_pandoc_path: None,
         command: None,
@@ -264,7 +267,7 @@ fn export_text(
     output_path: Option<&str>,
     overwrite: bool,
 ) -> Result<ExportResult, String> {
-    let path = resolve_export_path_parts(
+    let destination = resolve_export_path_parts(
         current_path,
         target,
         extension,
@@ -272,9 +275,11 @@ fn export_text(
         output_path,
         overwrite,
     )?;
-    fs::write(&path, content).map_err(|err| format!("Failed to export {}: {err}", path.display()))?;
+    let staged = destination.stage(extension)?;
+    fs::write(staged.path(), content).map_err(|err| format!("无法暂存导出文本：{err}"))?;
+    let published = staged.commit()?;
     Ok(ExportResult {
-        path: path.to_string_lossy().to_string(),
+        path: published.to_string_lossy().into_owned(),
         format: target.to_string(),
         used_pandoc_path: None,
         command: None,
@@ -292,9 +297,9 @@ fn export_html_pdf(request: ExportRequest) -> Result<ExportResult, String> {
     let Some(browser) = resolve_pdf_browser() else {
         return Err("未找到 Microsoft Edge、Chrome 或 Chromium，无法生成所见即所得 PDF。可以改用 PDF (Pandoc/LaTeX) 导出。".to_string());
     };
-    let target_path = resolve_export_path(&request, "pdf")?;
+    let destination = resolve_export_path(&request, "pdf")?;
+    let staged = destination.stage("pdf")?;
     let temp_path = write_temp_html(html)?;
-    let temp_pdf_path = make_temp_file_path("lightmark-export", "pdf")?;
     let profile_path = make_temp_dir("lightmark-edge-profile")?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
@@ -308,7 +313,7 @@ fn export_html_pdf(request: ExportRequest) -> Result<ExportResult, String> {
         "--run-all-compositor-stages-before-draw".to_string(),
         "--virtual-time-budget=3000".to_string(),
         format!("--user-data-dir={}", profile_path.to_string_lossy()),
-        format!("--print-to-pdf={}", temp_pdf_path.to_string_lossy()),
+        format!("--print-to-pdf={}", staged.path().to_string_lossy()),
         path_to_file_url(&temp_path),
     ];
     let command = format!("{} {}", browser.display(), args.join(" "));
@@ -318,14 +323,12 @@ fn export_html_pdf(request: ExportRequest) -> Result<ExportResult, String> {
     let _ = fs::remove_dir_all(&profile_path);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !temp_pdf_path.is_file() {
+    if !output.status.success() || !staged.path().is_file() {
         return Err(format!("PDF 导出失败。\n命令：{command}\n{stderr}"));
     }
-    fs::copy(&temp_pdf_path, &target_path)
-        .map_err(|err| format!("无法写入 PDF 文件 {}：{err}", target_path.display()))?;
-    let _ = fs::remove_file(&temp_pdf_path);
+    let published = staged.commit()?;
     Ok(ExportResult {
-        path: target_path.to_string_lossy().to_string(),
+        path: published.to_string_lossy().into_owned(),
         format: request.target,
         used_pandoc_path: None,
         command: Some(command),
@@ -339,7 +342,8 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         return Err("未找到 Pandoc。请确认内置 Pandoc 已随应用打包，或在设置中配置 Pandoc 路径。".to_string());
     };
     let spec = pandoc_spec(&request)?;
-    let target_path = resolve_export_path(&request, &spec.extension)?;
+    let destination = resolve_export_path(&request, &spec.extension)?;
+    let staged = destination.stage(&spec.extension)?;
     let current_folder = PathBuf::from(&request.current_path)
         .parent()
         .map(Path::to_path_buf)
@@ -362,8 +366,6 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         "--metadata".to_string(),
         format!("title={}", request.title),
         "--standalone".to_string(),
-        "-o".to_string(),
-        target_path.to_string_lossy().to_string(),
     ];
     if let Some(format) = spec.to_format {
         args.push("--to".to_string());
@@ -384,6 +386,8 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         args.push("--include-in-header".to_string());
         args.push(path.to_string_lossy().to_string());
     }
+    args.push("-o".to_string());
+    args.push(staged.path().to_string_lossy().into_owned());
 
     let command = format!("{} {}", pandoc.display(), args.join(" "));
     let output = run_process_with_timeout(&pandoc, &args, &current_folder, PANDOC_TIMEOUT)
@@ -406,8 +410,9 @@ fn export_with_pandoc(request: ExportRequest) -> Result<ExportResult, String> {
         }
         return Err(format!("Pandoc 导出失败。\n命令：{command}\n{stderr}"));
     }
+    let published = staged.commit()?;
     Ok(ExportResult {
-        path: target_path.to_string_lossy().to_string(),
+        path: published.to_string_lossy().into_owned(),
         format: request.target,
         used_pandoc_path: Some(pandoc.to_string_lossy().to_string()),
         command: Some(command),
@@ -490,7 +495,11 @@ fn pandoc_spec(request: &ExportRequest) -> Result<PandocSpec, String> {
             } else {
                 Some(settings.custom_pandoc_format.trim().to_string())
             };
-            extra_args.extend(split_args(&settings.custom_pandoc_args)?);
+            let custom = split_args(&settings.custom_pandoc_args)?;
+            if custom.iter().any(|arg| arg == "--" || arg.starts_with("-o") || arg == "--output" || arg.starts_with("--output=")) {
+                return Err("Custom Pandoc 的输出文件由导出对话框或 CLI 指定，请移除输出参数。".into());
+            }
+            extra_args.extend(custom);
             (extension, to_format)
         }
         _ => return Err(format!("不支持的导出格式：{}", request.target)),
@@ -530,7 +539,7 @@ fn choose_export_path(
     dialog.save_file()
 }
 
-fn resolve_export_path(request: &ExportRequest, extension: &str) -> Result<PathBuf, String> {
+fn resolve_export_path(request: &ExportRequest, extension: &str) -> Result<ExportDestination, String> {
     resolve_export_path_parts(
         &request.current_path,
         &request.target,
@@ -548,25 +557,14 @@ fn resolve_export_path_parts(
     settings: &ExportSettings,
     output_path: Option<&str>,
     overwrite: bool,
-) -> Result<PathBuf, String> {
-    let Some(explicit) = output_path.map(str::trim).filter(|value| !value.is_empty()) else {
-        return choose_export_path(current_path, target, extension, settings)
-            .ok_or_else(|| "Export cancelled".to_string());
+) -> Result<ExportDestination, String> {
+    let (path, allow_existing) = match output_path {
+        Some(explicit) if !explicit.is_empty() => (PathBuf::from(explicit), overwrite),
+        Some(_) => return Err("导出路径不能为空。".into()),
+        None => (choose_export_path(current_path, target, extension, settings)
+            .ok_or_else(|| "Export cancelled".to_string())?, true),
     };
-    let path = PathBuf::from(explicit);
-    if path.is_dir() {
-        return Err(format!("导出路径指向目录：{}", path.display()));
-    }
-    if path.exists() && !overwrite {
-        return Err(format!("导出文件已存在；使用 --force 才能覆盖：{}", path.display()));
-    }
-    let parent = path.parent().filter(|value| !value.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        if !parent.is_dir() {
-            return Err(format!("导出目录不存在：{}", parent.display()));
-        }
-    }
-    Ok(path)
+    ExportDestination::new(Path::new(current_path), &path, allow_existing)
 }
 
 fn export_filter_name(target: &str) -> &'static str {
@@ -1022,6 +1020,23 @@ fn is_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_export_rejects_the_source_file_and_its_other_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("draft.md");
+        let alias = dir.path().join("article.html");
+        fs::write(&input, b"original markdown").unwrap();
+        fs::hard_link(&input, &alias).unwrap();
+        for target in [&input, &alias] {
+            let result = resolve_export_path_parts(
+                input.to_str().unwrap(), "html", "html", &ExportSettings::default(),
+                target.to_str(), true,
+            );
+            assert!(result.is_err(), "source alias accepted: {}", target.display());
+        }
+        assert_eq!(fs::read(&input).unwrap(), b"original markdown");
+    }
 
     #[test]
     fn wraps_cjk_text_in_pdf_math_blocks() {

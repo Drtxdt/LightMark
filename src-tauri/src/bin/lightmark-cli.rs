@@ -390,23 +390,8 @@ fn resolve_output(input: &Path, output: Option<&Path>, extension: &str, force: b
     let path = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| input.with_extension(extension));
-    let path = if path.is_absolute() {
-        path
-    } else {
-        env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
-    };
-    if path == input {
-        return Err("导出路径不能覆盖源 Markdown 文件。".to_string());
-    }
-    if path.exists() && !force {
-        return Err(format!("导出文件已存在；使用 --force 才能覆盖：{}", path.display()));
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.is_dir() {
-            return Err(format!("导出目录不存在：{}", parent.display()));
-        }
-    }
-    Ok(path)
+    lightmark_lib::export_destination::ExportDestination::new(input, &path, force)
+        .map(|dest| dest.path().to_owned())
 }
 
 fn find_format(name: &str) -> Option<&'static FormatSpec> {
@@ -435,4 +420,25 @@ fn locate_desktop_binary() -> Result<PathBuf, String> {
 
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_never_selects_another_name_for_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let ordinary = dir.path().join("notes.md");
+        fs::write(&ordinary, b"source").unwrap();
+        let input = validate_input(&ordinary).unwrap();
+        let alias = dir.path().join("report.html");
+        fs::hard_link(&ordinary, &alias).unwrap();
+        assert!(resolve_output(&input, Some(&ordinary), "html", true).is_err());
+        assert!(resolve_output(&input, Some(&alias), "html", true).is_err());
+        let distinct = dir.path().join("other.html");
+        fs::write(&distinct, b"older export").unwrap();
+        assert!(resolve_output(&input, Some(&distinct), "html", false).is_err());
+        assert!(resolve_output(&input, Some(&distinct), "html", true).is_ok());
+    }
 }
