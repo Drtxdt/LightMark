@@ -55,8 +55,9 @@ async function closeDeletedTab() {
 
 async function rebindDeletedTab() {
   const candidate = relocationCandidate.value;
-  if (!candidate) return;
-  await rebindCurrentFileToCandidate(candidate.path).catch((error) => (appStore.statusMessage = String(error)));
+  const tab = activeTab.value;
+  if (!candidate || !tab) return;
+  await rebindCurrentFileToCandidate(candidate.path, tab.id).catch((error) => (appStore.statusMessage = String(error)));
 }
 </script>
 

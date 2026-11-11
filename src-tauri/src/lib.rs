@@ -63,6 +63,7 @@ pub fn run() {
             commands::file::watch_markdown_workspace,
             commands::file::unwatch_markdown_workspace,
             commands::file::find_similar_markdown_files,
+            commands::file::read_relocated_markdown_fingerprint,
             commands::file::create_markdown_file,
             commands::draft::write_draft,
             commands::draft::read_draft,

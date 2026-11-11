@@ -3084,17 +3084,26 @@ export async function showCurrentFileDiffSummary() {
   });
 }
 
-export async function rebindCurrentFileToCandidate(path: string) {
-  const tab = getActiveTab();
+export async function rebindCurrentFileToCandidate(path: string, targetTabId = appStore.activeTabId) {
+  const tab = appStore.tabs.find(item => item.id === targetTabId);
   if (!tab || !path) return false;
   const existing = findFileTab(path);
   if (existing && existing.id !== tab.id) {
     appStore.statusMessage = "候选文件已在其他标签页打开";
     return false;
   }
-  const snapshot = await getFileSnapshot(path);
-  const previousPath = appStore.currentFilePath;
+  const previousPath = tab.path;
   const previousTabId = tab.id;
+  const ownsSource = () => tab.id === previousTabId && tab.path === previousPath && appStore.tabs.includes(tab);
+  const snapshot = tab.documentMode === "large"
+    ? await getFileSnapshot(path)
+    : await readRelocationSnapshot(path, tab.fileSnapshot?.fingerprint?.sha256);
+  if (!snapshot.exists || !ownsSource() || findFileTab(path)) return false;
+  if (tab.documentMode === "normal" && documentSessionForTab(previousTabId)) {
+    await flushDocumentSnapshot(previousTabId, "externalDiff");
+    if (!ownsSource() || findFileTab(path)) return false;
+  }
+  const isActive = appStore.activeTabId === previousTabId;
   advanceMutationEpoch(tab);
   tab.id = tabIdForPath(path);
   rebindDocumentRuntime(previousTabId, tab.id);
@@ -3102,8 +3111,11 @@ export async function rebindCurrentFileToCandidate(path: string) {
   tab.name = fileNameFromPath(path);
   tab.fileSnapshot = snapshot;
   clearTabExternalState(tab);
-  appStore.activeTabId = tab.id;
-  appStore.currentFilePath = path;
+  if (isActive) {
+    appStore.activeTabId = tab.id;
+    appStore.currentFilePath = path;
+  }
+  appStore.splitLayout = replaceTabIdInSplitLayout(appStore.splitLayout, previousTabId, tab.id, tabIds());
   rememberRecentFile(path);
   await refreshFileTree();
   void syncExternalFileWatches();
@@ -3116,6 +3128,11 @@ export function dismissCurrentExternalFileState() {
   const tab = getActiveTab();
   if (!tab) return;
   dismissTabExternalState(tab);
+}
+
+async function readRelocationSnapshot(path: string, expectedSha256?: string) {
+  const fingerprint = await invoke<LargeFileFingerprint>("read_relocated_markdown_fingerprint", { path, expectedSha256 });
+  return fileSnapshotFromFingerprint(fingerprint);
 }
 
 function checkOpenFileSnapshotsOnEvent() {

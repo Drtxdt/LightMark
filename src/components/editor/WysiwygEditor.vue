@@ -831,6 +831,9 @@ const MarkdownImage = Image.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
+      // Moving a document changes where its image is displayed, not its
+      // Markdown or its undo history. Keep the source spelling in the model.
+      src: { default: null, parseHTML: markdownImageSourceFromElement },
       markdownSrc: {
         default: null,
         parseHTML: (element) => element.getAttribute("data-markdown-src"),
@@ -2772,7 +2775,9 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
   const render = () => {
     if (document.activeElement !== source) source.value = sourceMarkdown();
     error.textContent = errorMessage;
-    image.src = currentNode.attrs.src || "";
+    const markdownSrc = currentNode.attrs.markdownSrc || currentNode.attrs.src;
+    if (markdownSrc) image.src = resolveMarkdownImageSource(markdownSrc, editorOwnerTab?.path ?? "");
+    else image.removeAttribute("src");
     image.alt = currentNode.attrs.alt || "";
     if (currentNode.attrs.title) image.title = currentNode.attrs.title;
     else image.removeAttribute("title");
@@ -2805,7 +2810,7 @@ function createTyporaImageView(node: any, editor: any, getPos: (() => number | u
   };
   const commitSource = () => {
     if (!sourceVisible) return true;
-    const parsed = parseSingleMarkdownImage(source.value.trim(), editorOwnerTab?.path ?? "");
+    const parsed = parseSingleMarkdownImage(source.value.trim());
     if (!parsed) {
       errorMessage = "图片 Markdown 格式无效，应为 ![alt](path) 或 ![alt](path \"title\")";
       sourceVisible = true;
@@ -4460,24 +4465,24 @@ async function insertImagePathsIntoWysiwyg(paths: string[], from: number, to: nu
   await insertImagesAtBookmark(from, to, target => imagePathsAsMarkdown(paths, target));
 }
 
-function parseMarkdownImageSnippets(markdown: string, markdownPath: string) {
+function parseMarkdownImageSnippets(markdown: string) {
   const images: Array<{ src: string; markdownSrc: string; alt: string; title: string | null }> = [];
   const pattern = /!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(markdown))) {
-    const image = parseSingleMarkdownImage(match[0], markdownPath);
+    const image = parseSingleMarkdownImage(match[0]);
     if (image) images.push(image);
   }
   return images;
 }
 
-function parseSingleMarkdownImage(markdown: string, markdownPath: string) {
+function parseSingleMarkdownImage(markdown: string) {
   const match = markdown.match(/^!\[([^\]\n]*)\]\((\S+?)(?:\s+"([^"\n]*)")?\)$/);
   if (!match) return null;
   const markdownSrc = match[2]?.trim();
   if (!markdownSrc) return null;
   return {
-    src: resolveMarkdownImageSource(markdownSrc, markdownPath),
+    src: markdownSrc,
     markdownSrc,
     alt: match[1].replace(/\\]/g, "]"),
     title: match[3] || null,
@@ -4594,6 +4599,12 @@ function registerWysiwygDocumentSession() {
   unregisterDocumentSession();
   const ownerTab = toRaw(tab);
   const tabId = ownerTab.id;
+  // Let StarterKit append its editable paragraph after a final block such as
+  // an image before capturing the source and history baselines. Otherwise
+  // the first focus transaction looks like a user edit to the Markdown.
+  if (activeEditor.state.doc.lastChild?.type.name !== 'paragraph') {
+    activeEditor.view.dispatch(activeEditor.state.tr.setMeta('preventUpdate', true).setMeta('addToHistory', false));
+  }
   unsubscribePendingEditorInput();
   unsubscribePendingEditorInput = subscribePendingEditorInput(activeEditor, () => {
     if (editor.value === activeEditor && ownerTabStillExists()) {
@@ -5148,7 +5159,7 @@ function registerWysiwygDocumentSession() {
     async applyPendingCommand(anchor, payload, expectedRevision, assertCurrent) {
       assertCurrent();
       if (payload.kind === 'image') {
-        const images = parseMarkdownImageSnippets(payload.markdown, ownerTab.path);
+        const images = parseMarkdownImageSnippets(payload.markdown);
         if (!images.length) throw new Error('图片引用解析失败，文件已保留在资源目录。');
         const snapshot = await snapshotCache!.snapshot('externalDiff');
         const [{ sourceBlockInsertionCandidates }, { sameSourceSemanticNode }] = await Promise.all([
@@ -5177,7 +5188,7 @@ function registerWysiwygDocumentSession() {
       assertCurrent();
       if (wysiwygRevision !== expectedRevision) throw new Error('原文档已变化，请重试重链。');
       const raw = projectAssetReferenceBookmark(activeEditor.state, snapshot.markdown, anchor);
-      const transaction = assetBookmarkTransaction(activeEditor.state, anchor, payload.insert, source => resolveMarkdownImageSource(source, ownerTab.path));
+      const transaction = assetBookmarkTransaction(activeEditor.state, anchor, payload.insert);
       activeEditor.view.dispatch(transaction);
       const markdown = snapshot.markdown.slice(0, raw.from) + payload.insert + snapshot.markdown.slice(raw.to);
       commitExactSourceCheckpoint(markdown);
@@ -5188,7 +5199,7 @@ function registerWysiwygDocumentSession() {
       }
       const snapshot = await snapshotCache!.snapshot("externalDiff");
       if (editor.value !== activeEditor || !ownerTabStillExists() || wysiwygRevision !== expectedRevision) throw new Error("资源重链期间文档已变化。");
-      activeEditor.view.dispatch(assetReferenceTransaction(activeEditor.state, snapshot.markdown, patch, source => resolveMarkdownImageSource(source, ownerTab.path)));
+      activeEditor.view.dispatch(assetReferenceTransaction(activeEditor.state, snapshot.markdown, patch));
       const markdown = snapshot.markdown.slice(0, patch.from) + patch.insert + snapshot.markdown.slice(patch.to);
       commitExactSourceCheckpoint(markdown);
     },

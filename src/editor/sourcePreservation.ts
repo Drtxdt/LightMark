@@ -64,8 +64,14 @@ export function sourceBlocksForNodes(sourceBlocks: readonly PreservedSourceBlock
     if (node.type.name === 'paragraph' && node.content.size === 0
       && !ownsWhitespaceSource
       && !(index === nodes.length - 1 && source?.synthetic === 'trailing-paragraph')) {
-      empty.push(index);
-      blocks.push({ source: '', separator: '' });
+      if (!source && index === nodes.length - 1 && index > 0 && nodes[index - 1].type.name !== 'paragraph') {
+        // An image-only Markdown paragraph is a block image in the editor.
+        // Its trailing caret paragraph has no corresponding Markdown token.
+        blocks.push({ source: '', separator: '', synthetic: 'trailing-paragraph' });
+      } else {
+        empty.push(index);
+        blocks.push({ source: '', separator: '' });
+      }
     } else {
       if (!source) return null;
       blocks.push({ ...source });
@@ -152,6 +158,10 @@ export function combinePreservedSourceBlocks(
   let result = prefix;
   let oldCursor = 0;
   let currentCursor = 0;
+  const separateBlocks = () => {
+    const endings = result.match(/[\r\n]+$/)?.[0].match(/\r\n|\r|\n/g)?.length ?? 0;
+    if (endings < 2) result += lineEnding.repeat(2 - endings);
+  };
   const appendChangedGroup = (oldEnd: number, currentEnd: number, atEnd = false) => {
     const exactReplacements = preserveChangedBlock && oldEnd - oldCursor === currentEnd - currentCursor
       ? currentNodes.slice(currentCursor, currentEnd).map((node, index) => preserveChangedBlock(originalBlocks[oldCursor + index].source, originalNodes[oldCursor + index], node))
@@ -159,7 +169,11 @@ export function combinePreservedSourceBlocks(
     if (exactReplacements?.length && exactReplacements.every((piece): piece is string => piece !== null)) {
       // Exact patches already own every byte of their original block,
       // including its terminal EOL. Only the separate separator follows it.
-      exactReplacements.forEach((piece, index) => { result += piece + originalBlocks[oldCursor + index].separator; });
+      exactReplacements.forEach((piece, index) => {
+        const originalIndex = oldCursor + index;
+        if (piece && originalIndex > 0 && originalIndex === syntheticTailIndex) separateBlocks();
+        result += piece + originalBlocks[originalIndex].separator;
+      });
       oldCursor = oldEnd;
       currentCursor = currentEnd;
       return;
@@ -177,20 +191,9 @@ export function combinePreservedSourceBlocks(
       // A heading can follow an HTML atom with one EOL. A replacement
       // paragraph needs a blank line there, otherwise reparsing merges its
       // text into the preceding HTML block and loses the source/model map.
-      if (oldCursor > 0 && firstReplacement?.type?.name === 'paragraph'
-        && firstOriginal?.type?.name !== 'paragraph') {
-        const endings = result.match(/[\r\n]+$/)?.[0].match(/\r\n|\r|\n/g)?.length ?? 0;
-        if (endings < 2) result += lineEnding.repeat(2 - endings);
-      }
-      if (oldCursor > 0 && oldCursor === originalBlocks.length) {
-        const trailingLineEndings = result.match(/[\r\n]+$/)?.[0] ?? "";
-        const trailingLineEndingCount = trailingLineEndings
-          ? trailingLineEndings.match(/\r\n|\r|\n/g)?.length ?? 0
-          : 0;
-        if (trailingLineEndingCount < 2) {
-          result += lineEnding.repeat(2 - trailingLineEndingCount);
-        }
-      }
+      if (oldCursor > 0 && (oldCursor === originalBlocks.length
+        || (oldCursor === syntheticTailIndex && replacements[0])
+        || (firstReplacement?.type?.name === 'paragraph' && firstOriginal?.type?.name !== 'paragraph'))) separateBlocks();
       result += replacements.join(`${lineEnding}${lineEnding}`);
       const lastReplaced = oldEnd > oldCursor ? originalBlocks[oldEnd - 1] : null;
       const preservedSeparator = lastReplaced

@@ -2188,6 +2188,25 @@ pub fn find_similar_markdown_files(
     similar_markdown_files(&original, size, mtime)
 }
 
+#[tauri::command(async)]
+pub fn read_relocated_markdown_fingerprint(
+    path: String,
+    expected_sha256: Option<String>,
+) -> Result<LargeFileFingerprint, String> {
+    let document = PathBuf::from(&path);
+    if !is_markdown_file(&document) {
+        return Err("请选择 Markdown 笔记。".into());
+    }
+    let fingerprint = super::large_draft::get_large_file_fingerprint(path)
+        .map_err(|error| error.to_string())?
+        .ok_or("候选笔记已不存在。")?;
+    if expected_sha256.is_some_and(|expected| expected != fingerprint.sha256) {
+        return Err("候选文件与上次读取的原稿内容不同。请单独打开候选文件核对，当前标签仍保留。".into());
+    }
+    super::export_images::export_images().opened(&document)?;
+    Ok(fingerprint)
+}
+
 #[tauri::command]
 pub fn create_markdown_file(folder: String, name: String, rename_on_conflict: Option<bool>) -> Result<String, String> {
     let folder = PathBuf::from(folder);
@@ -2839,7 +2858,7 @@ mod tests {
         default_large_snapshot_root, read_file_chunk, resolve_asset_folder, save_plan_sync,
         save_plan_test_lock,
         sanitize_asset_file_name, cleanup_temp_error, sessions, write_view_temp,
-        read_text_file_snapshot_at, transaction_index_root, write_text_file_at_root,
+        read_relocated_markdown_fingerprint, read_text_file_snapshot_at, transaction_index_root, write_text_file_at_root,
         FileBaseSnapshot,
         save_large_file, save_large_file_as, similar_markdown_files, watch_path_key,
     };
@@ -2983,6 +3002,19 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn relocation_checks_content_before_binding_a_same_size_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moved.md");
+        fs::write(&path, "first note").unwrap();
+        let candidate = path.to_string_lossy().into_owned();
+        let original = read_relocated_markdown_fingerprint(candidate.clone(), None).unwrap();
+        fs::write(&path, "other note").unwrap();
+        assert!(read_relocated_markdown_fingerprint(candidate.clone(), Some(original.sha256.clone())).is_err());
+        fs::write(&path, "first note").unwrap();
+        assert!(read_relocated_markdown_fingerprint(candidate, Some(original.sha256)).is_ok());
     }
 
     #[test]

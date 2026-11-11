@@ -28,6 +28,26 @@ try {
   assert.equal(bookmark.from, start + 4);
   assert.equal(bookmark.version, 8);
 
+  const imageMarkdown = '![封面](cover.svg)';
+  const imageBlock = { type: { name: 'image' }, content: { size: 0 } };
+  const caret = { type: { name: 'paragraph' }, content: { size: 0 } };
+  const typed = { type: { name: 'paragraph' }, content: { size: 2 } };
+  for (const ending of ['', '\n', '\r\n', '\n\n\n']) {
+    const raw = imageMarkdown + ending;
+    const eol = ending.includes('\r') ? '\r\n' : '\n';
+    const source = markdownTools.markdownTopLevelSourceBlocks(raw);
+    const nodes = [imageBlock, caret];
+    const aligned = sourceTools.sourceBlocksForNodes(source.blocks, nodes, source.prefix);
+    for (const exactPatch of [undefined, () => '尾注']) {
+      const snapshot = (current, content) => sourceTools.combinePreservedSourceBlocks(
+        nodes, aligned.blocks, current, [imageMarkdown, content], aligned.prefix, eol, aligned.syntheticTailOmitted, exactPatch,
+      );
+      assert.equal(snapshot(nodes, ''), raw);
+      const expectedGap = ending === '\n\n\n' ? ending : eol.repeat(2);
+      assert.equal(snapshot([imageBlock, typed], '尾注'), imageMarkdown + expectedGap + '尾注');
+    }
+  }
+
   const mappedSource = "\uFEFF#  Keep heading\r\n\r\nParagraph  \r\n\r\n-  keep list marker\r\n";
   const mapped = markdownTools.markdownTopLevelSourceBlocks(mappedSource);
   assert.equal(mapped.prefix, "\uFEFF");
