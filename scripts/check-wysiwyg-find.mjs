@@ -31,11 +31,47 @@ try {
   const schema = new Schema({
     nodes: {
       doc: { content: "block+" },
-      paragraph: { group: "block", content: "text*" },
+      paragraph: { group: "block", content: "inline*" },
       heading: { group: "block", content: "text*", attrs: { level: { default: 1 } } },
       text: { group: "inline" },
+      inlineMath: { group: "inline", inline: true, atom: true, attrs: { latex: {} } },
+      image: { group: "inline", inline: true, atom: true },
+      hardBreak: { group: "inline", inline: true },
     },
+    marks: { strong: {} },
   });
+  function runQuery(content, search, options = {}) {
+    let state = EditorState.create({
+      doc: schema.nodes.doc.create(null, schema.nodes.paragraph.create(null, content)),
+      plugins: [findModule.createWysiwygFindPlugin({ active: () => true, currentIndex: () => 0 })],
+    });
+    state = state.apply(findModule.setWysiwygFindQuery(state, {
+      search, regex: false, caseSensitive: false, wholeWord: false, ...options,
+    }));
+    return { state, hits: findModule.getWysiwygFindState(state).items };
+  }
+  const t = value => schema.text(value);
+  for (const separator of [schema.nodes.inlineMath.create({ latex: "x" }), schema.nodes.image.create(), schema.nodes.hardBreak.create()]) {
+    const parts = [t("L"), separator, t("R")];
+    assert.equal(runQuery(parts, "LR").hits.length, 0, "literal cannot cross " + separator.type.name);
+    assert.equal(runQuery(parts, "L.*R", { regex: true }).hits.length, 0, "regex cannot cross a nontext node");
+    const right = runQuery(parts, "R");
+    assert.deepEqual(right.hits.map(h => [h.docFrom, h.docTo]), [[3, 4]]);
+    const changed = right.state.apply(right.state.tr.insertText("X", right.hits[0].docFrom, right.hits[0].docTo));
+    assert.ok(changed.doc.firstChild.eq(schema.nodes.paragraph.create(null, [t("L"), separator, t("X")])));
+    assert.deepEqual(runQuery(parts, "L").hits.map(h => [h.docFrom, h.docTo]), [[1, 2]]);
+  }
+  const bold = schema.mark("strong");
+  assert.deepEqual(runQuery([t("L"), schema.text("R", [bold])], "LR").hits.map(h => [h.docFrom, h.docTo]), [[1, 3]],
+    "formatting marks are not boundaries in the underlying text");
+  const unicode = runQuery([t("AİBC! b")], "b");
+  assert.deepEqual(unicode.hits.map(h => [h.text, h.docFrom, h.docTo]), [["B", 3, 4], ["b", 7, 8]]);
+  let tr = unicode.state.tr;
+  for (const hit of [...unicode.hits].reverse()) tr = tr.insertText("X", hit.docFrom, hit.docTo);
+  assert.equal(unicode.state.apply(tr).doc.textContent, "AİXC! X");
+  assert.equal(runQuery([t("a.b aXb")], ".").hits.length, 1, "literal metacharacters stay literal");
+  assert.deepEqual(runQuery([t("😀e\u0301中B! b")], "b", { caseSensitive: true }).hits.map(m => [m.from, m.to]), [[8, 9]]);
+  assert.deepEqual(runQuery([t("𐐀B 中B 😀B B")], "b", { wholeWord: true }).hits.map(m => [m.from, m.to]), [[9, 10], [11, 12]]);
   const paragraph = (text) => schema.nodes.paragraph.create(null, text ? schema.text(text) : undefined);
   let state = EditorState.create({
     schema,

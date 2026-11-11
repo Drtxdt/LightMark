@@ -134,47 +134,34 @@ function scanBlock(node: ProseMirrorNode, pos: number, query: WysiwygFindQuery):
   const items: WysiwygFindMatch[] = [];
   let error = "";
   const visit = (textblock: ProseMirrorNode, textblockPos: number) => {
-    const flattened = flattenTextblock(textblock, textblockPos);
-    if (!flattened.text) return;
-    const result = findTextMatches(flattened.text, query.search, query);
-    if (result.error) {
-      error = result.error;
-      return;
-    }
-    for (const match of result.matches) {
-      const docFrom = textOffsetToDocPos(flattened.segments, match.from);
-      const docTo = textOffsetToDocPos(flattened.segments, match.to);
-      if (docFrom !== null && docTo !== null && docFrom < docTo) items.push({ ...match, docFrom, docTo });
-    }
+    // Marks split text nodes without adding document positions. Inline atoms
+    // and hard breaks occupy positions of their own and end the searchable run.
+    let text = "";
+    let start = 0;
+    const flush = () => {
+      if (!text) return;
+      const result = findTextMatches(text, query.search, query);
+      if (result.error) error = result.error;
+      for (const match of result.matches) {
+        items.push({ ...match, docFrom: start + match.from, docTo: start + match.to });
+      }
+      text = "";
+    };
+    textblock.forEach((child, offset) => {
+      if (!child.isText) { flush(); return; }
+      if (!text) start = textblockPos + 1 + offset;
+      text += child.text;
+    });
+    flush();
   };
-  if (node.isTextblock) visit(node, pos);
-  else node.descendants((child, childPos) => {
+  if (node.isTextblock && !node.isAtom) visit(node, pos);
+  else if (!node.isAtom) node.descendants((child, childPos) => {
+    if (child.isAtom) return false;
     if (!child.isTextblock) return true;
     visit(child, pos + 1 + childPos);
     return false;
   });
   return { node, pos, items, error };
-}
-
-function flattenTextblock(node: ProseMirrorNode, pos: number) {
-  const segments: Array<{ from: number; text: string; start: number; end: number }> = [];
-  let text = "";
-  node.descendants((child, childPos) => {
-    if (!child.isText || !child.text) return true;
-    const start = text.length;
-    text += child.text;
-    segments.push({ from: pos + 1 + childPos, text: child.text, start, end: text.length });
-    return false;
-  });
-  return { text, segments };
-}
-
-function textOffsetToDocPos(segments: Array<{ from: number; text: string; start: number; end: number }>, offset: number) {
-  for (const segment of segments) {
-    if (offset >= segment.start && offset <= segment.end) return segment.from + offset - segment.start;
-  }
-  const last = segments.at(-1);
-  return last && offset === last.end ? last.from + last.text.length : null;
 }
 
 function changedRanges(transaction: Transaction) {

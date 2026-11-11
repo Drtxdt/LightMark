@@ -19,11 +19,27 @@ export type FindResult = {
 export function findTextMatches(text: string, query: string, options: FindReplaceOptions): FindResult {
   if (!query) return { matches: [], error: "" };
 
-  if (options.regex) {
-    return findRegexMatches(text, query, options);
+  // Match the original string: Unicode case conversion can change its UTF-16
+  // length, so offsets from a lowercased copy cannot select original text.
+  const pattern = options.regex ? query : query.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, options.caseSensitive ? "gu" : "giu");
+  } catch (error) {
+    return { matches: [], error: error instanceof Error ? error.message : "无效正则表达式" };
   }
-
-  return findLiteralMatches(text, query, options);
+  const matches: TextMatch[] = [];
+  for (const result of text.matchAll(regex)) {
+    const value = result[0];
+    if (!value) continue;
+    const from = result.index;
+    const to = from + value.length;
+    if (options.wholeWord && !isWholeWordMatch(text, from, to)) continue;
+    const match: TextMatch = { from, to, text: value };
+    if (options.regex) match.groups = result.slice(1);
+    matches.push(match);
+  }
+  return { matches, error: "" };
 }
 
 export function replacementForMatch(match: TextMatch, replacement: string, regex: boolean) {
@@ -56,55 +72,12 @@ export function normalizeMatchIndex(index: number, total: number) {
   return ((index % total) + total) % total;
 }
 
-function findLiteralMatches(text: string, query: string, options: FindReplaceOptions): FindResult {
-  const source = options.caseSensitive ? text : text.toLocaleLowerCase();
-  const needle = options.caseSensitive ? query : query.toLocaleLowerCase();
-  const matches: TextMatch[] = [];
-  let from = 0;
-
-  while (from <= source.length) {
-    const index = source.indexOf(needle, from);
-    if (index < 0) break;
-    const to = index + needle.length;
-    if (!options.wholeWord || isWholeWordMatch(text, index, to)) {
-      matches.push({ from: index, to, text: text.slice(index, to) });
-    }
-    from = Math.max(to, index + 1);
-  }
-
-  return { matches, error: "" };
-}
-
-function findRegexMatches(text: string, query: string, options: FindReplaceOptions): FindResult {
-  let regex: RegExp;
-  try {
-    regex = new RegExp(query, options.caseSensitive ? "gu" : "giu");
-  } catch (error) {
-    return { matches: [], error: error instanceof Error ? error.message : "无效正则表达式" };
-  }
-
-  const matches: TextMatch[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(text))) {
-    const value = match[0];
-    const from = match.index;
-    const to = from + value.length;
-    if (value.length === 0) {
-      regex.lastIndex += 1;
-      continue;
-    }
-    if (!options.wholeWord || isWholeWordMatch(text, from, to)) {
-      matches.push({ from, to, text: value, groups: match.slice(1) });
-    }
-  }
-
-  return { matches, error: "" };
-}
-
 function isWholeWordMatch(text: string, from: number, to: number) {
-  return !isWordChar(text.charAt(from - 1)) && !isWordChar(text.charAt(to));
+  const low = text.charCodeAt(from - 1), high = text.charCodeAt(from - 2);
+  const prev = from - (low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? 2 : 1);
+  return !isWordChar(text.codePointAt(prev)) && !isWordChar(text.codePointAt(to));
 }
 
-function isWordChar(value: string) {
-  return /[\p{L}\p{N}_]/u.test(value);
+function isWordChar(code: number | undefined) {
+  return code !== undefined && /[\p{L}\p{N}_]/u.test(String.fromCodePoint(code));
 }
