@@ -2961,6 +2961,35 @@ mod tests {
     }
 
     #[test]
+    fn two_notes_save_and_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let left = root.join("左栏");
+        let right = root.join("右栏");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let old = "\u{feff}![封面](cover.svg)\r\n";
+        let a = left.join("笔记.md");
+        let b = right.join("笔记.md");
+        fs::write(&a, old).unwrap();
+        fs::write(&b, old).unwrap();
+        fs::write(left.join("cover.svg"), "<svg width='13'/>").unwrap();
+        fs::write(right.join("cover.svg"), "<svg width='29'/>").unwrap();
+        let copy = right.join("副本.md");
+        for (target, addition, existing) in [(&a, "", true), (&a, "左", true), (&copy, "右", false)] {
+            let expected = existing.then(|| read_text_file_snapshot_at(target).unwrap().fingerprint);
+            let receipt = write_text_file_at_root(target, &format!("{old}{addition}"), expected, transaction_index_root(&root)).unwrap();
+            assert_eq!((receipt.outcome.as_str(), receipt.disk_written.as_str()), ("committed", "yes"));
+        }
+        for (note, addition, width) in [(&a, "左", 13), (&copy, "右", 29), (&b, "", 29)] {
+            assert_eq!(read_text_file_snapshot_at(note).unwrap().content, format!("{old}{addition}"));
+            assert_eq!(fs::read_to_string(note.with_file_name("cover.svg")).unwrap(), format!("<svg width='{width}'/>"));
+        }
+        assert!(write_text_file_at_root(&b, "collision", None, transaction_index_root(&root)).is_err());
+        assert_eq!(fs::read(&b).unwrap(), old.as_bytes());
+    }
+
+    #[test]
     fn safe_text_write_replaces_target_and_cleans_temporary_files() {
         let dir = unique_test_dir("safe-text-write");
         fs::create_dir_all(&dir).unwrap();

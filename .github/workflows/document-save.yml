@@ -1,0 +1,22 @@
+name: Document save and reopen
+on:
+  push:
+    branches: [main, codex/macos-save-reopen]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  save:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: rustup toolchain install 1.94.1 --profile minimal
+      - name: Create, save as, and reopen both notes
+        run: cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml two_notes_save_and_reopen -- --nocapture
+      - name: Write and read recovery draft
+        if: success() || failure()
+        run: cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml write_draft_entry_serializes_and_publishes_a_receipt
