@@ -54,6 +54,9 @@ const editorMd = new MarkdownIt({
   typographer: true,
 });
 installLightMarkMarkdown(editorMd);
+// A filename such as A.md also looks like a domain. Turning plain text into
+// a persistent link mark here changes the Markdown on the next nearby edit.
+editorMd.linkify.set({ fuzzyLink: false });
 
 export function renderMarkdown(
   markdown: string,

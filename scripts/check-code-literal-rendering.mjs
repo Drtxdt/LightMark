@@ -7,6 +7,8 @@ const temp = fs.mkdtempSync(path.resolve('node_modules/.lightmark-code-render-')
 try {
   const markdown = await import(pathToFileURL(compileTypeScriptModuleGraph(path.resolve('src/utils/markdown.ts'), temp)).href);
   const failures = [];
+  assert.doesNotMatch(markdown.renderMarkdownForEditor('A.md'), /<a\b/, 'a plain filename must stay editable as plain text');
+  assert.match(markdown.renderMarkdownForEditor('[note](A.md)'), /<a\b/, 'explicit Markdown links still open as links');
   for (const fence of ['```', '~~~', '````']) {
     const body = '==literal== ^sup^ ~sub~ [^not-a-reference] $x$ **bold**';
     const html = markdown.renderMarkdownForEditor(`${fence}text\n${body}\n${fence}\n`);
