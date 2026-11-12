@@ -2086,7 +2086,7 @@ async function chooseSaveAsTargetForContext(context: SaveContext, avoidPath?: st
     return null;
   }
   const existing = findFileTab(selected);
-  if (existing && existing !== context.tab) {
+  if (existing && toRaw(existing) !== context.tab) {
     await alertDialog({
       title: "目标文件已打开",
       message: "另存为目标已经在其他标签页打开，请选择其他文件名。",
@@ -2105,7 +2105,7 @@ async function writeCapturedVersion(
 ) {
   if (retarget) {
     const existing = findFileTab(targetPath);
-    if (existing && existing !== context.tab) {
+    if (existing && toRaw(existing) !== context.tab) {
       if (isCapturedTabActive(context)) appStore.statusMessage = "另存为目标已经在其他标签页打开。";
       return false;
     }

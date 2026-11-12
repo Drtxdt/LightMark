@@ -15,13 +15,13 @@ const dirs = ['左栏', '右栏'].map(name => path.join(root, name));
 const [left, right] = dirs.map(dir => path.join(dir, '笔记.md'));
 const copy = path.join(dirs[1], '副本.md');
 const occupied = path.join(dirs[1], '已有.md');
-await writeFile(occupied, '必须保留');
 const original = '![封面](cover.svg)\n\n底稿';
 for (const [i, dir] of dirs.entries()) {
   await mkdir(dir);
   await writeFile(path.join(dir, '笔记.md'), original);
   await writeFile(path.join(dir, 'cover.svg'), `<svg xmlns="http://www.w3.org/2000/svg" width="${i ? 29 : 13}" height="10"/>`);
 }
+await writeFile(occupied, '必须保留');
 let reopen = false, result;
 const server = await createServer({
   server: { host: '127.0.0.1', port: 0, strictPort: false },
