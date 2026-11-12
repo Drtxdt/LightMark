@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { defineAsyncComponent, onMounted, onUnmounted, watch } from "vue";
+import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
@@ -93,8 +94,11 @@ let closingTicket: WindowCloseTicket<
 > | null = null;
 const closePreparationGate = createWindowClosePreparationGate();
 const windowCloseDraftPolicy: WindowCloseDraftPolicy = "preserve";
+const closeProtectionReady = ref(false);
 
 onMounted(async () => {
+  if (isTauri()) unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
+  closeProtectionReady.value = true;
   activatePlugins([wordCountPlugin]);
   await loadConfig().catch((error) => {
     appStore.statusMessage = String(error);
@@ -159,7 +163,6 @@ onMounted(async () => {
   window.addEventListener("dragover", handleGlobalImageDragOver);
   window.addEventListener("drop", handleGlobalImageDrop);
   window.addEventListener("keydown", handleDistractionFreeEscape);
-  unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
   unlistenExternalFileWatch = await listen("lightmark-file-watch-event", () => {
     void checkOpenFileSnapshots();
   });
@@ -346,7 +349,7 @@ function handleGlobalImageDrop(event: DragEvent) {
 </script>
 
 <template>
-  <AppLayout />
+  <AppLayout v-if="closeProtectionReady" />
   <CommandPalette v-if="appStore.commandPaletteOpen" />
   <QuickOpenPalette v-if="appStore.quickOpenOpen" />
   <HeadingJumpPalette v-if="appStore.headingJumpOpen" />

@@ -299,12 +299,12 @@ function cloneSettings(settings: AppSettings): AppSettings {
                 <input v-model="localSettings.general.autoSave" type="checkbox" @change="persist" />
               </label>
               <label class="settings-row">
-                <span><b>自动保存间隔</b><small>默认 5 分钟，范围 1-60 分钟。</small></span>
+                <span><b>草稿保存间隔（分钟）</b><small>0 表示每 8 秒检查修改，也可指定 1–60 分钟。</small></span>
                 <input
                   v-model.number="localSettings.general.autoSaveIntervalMinutes"
                   class="settings-number"
                   type="number"
-                  min="1"
+                  min="0"
                   max="60"
                   @change="persist"
                 />

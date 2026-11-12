@@ -52,6 +52,8 @@ export const draftStore = reactive({
 });
 
 let autosaveTimer = 0;
+const lastCheckpoint = new WeakMap<DocumentTab, DraftVersion>();
+const checkpointInProgress = new WeakSet<DocumentTab>();
 const draftTransactionQueue = new SaveTransactionQueue();
 const untitledDraftIds = new WeakMap<DocumentTab, string>();
 // Native draft commands are individually locked, but a large-draft cleanup
@@ -141,10 +143,11 @@ type DraftRestoreFence = DraftContext & {
 
 export function startDraftAutosave() {
   stopDraftAutosave();
-  window.addEventListener("blur", flushCurrentDraft);
+  if (!appStore.settings.general.autoSave) return;
+  window.addEventListener("blur", checkpointOpenDrafts);
   document.addEventListener("visibilitychange", flushDraftWhenHidden);
   autosaveTimer = window.setInterval(() => {
-    void flushCurrentDraft();
+    checkpointOpenDrafts();
   }, autosaveIntervalMs());
 }
 
@@ -153,7 +156,7 @@ export function stopDraftAutosave() {
     window.clearInterval(autosaveTimer);
     autosaveTimer = 0;
   }
-  window.removeEventListener("blur", flushCurrentDraft);
+  window.removeEventListener("blur", checkpointOpenDrafts);
   document.removeEventListener("visibilitychange", flushDraftWhenHidden);
 }
 
@@ -356,7 +359,23 @@ export async function discardDraft(id: string, record?: DraftRecord) {
 }
 
 function flushDraftWhenHidden() {
-  if (document.visibilityState === "hidden") void flushCurrentDraft();
+  if (document.visibilityState === "hidden") checkpointOpenDrafts();
+}
+
+function checkpointOpenDrafts() {
+  for (const candidate of appStore.tabs) {
+    const tab = toRaw(candidate);
+    if (checkpointInProgress.has(tab)) continue;
+    if (!tab.isDirty && !documentSessionForTab(tab.id)?.hasPendingEdits?.()) continue;
+    const previous = lastCheckpoint.get(tab);
+    if (previous && isDraftVersionCurrent(previous) && !previous.session?.hasPendingEdits?.()) continue;
+    checkpointInProgress.add(tab);
+    void draftTransactionQueue.enqueue(tab, async () => {
+      if (!appStore.settings.general.autoSave || !isTabRegistered(tab)) return;
+      if (!tab.isDirty && !documentSessionForTab(tab.id)?.hasPendingEdits?.()) return;
+      await flushDraftForContext(captureDraftContext(tab), { allowInactive: true });
+    }).finally(() => checkpointInProgress.delete(tab));
+  }
 }
 
 async function flushDraftForContext(
@@ -433,6 +452,7 @@ async function flushDraftForContext(
       if (options.allowInactive !== true && appStore.activeTabId !== context.tabId) {
         return { saved: false, reason: "草稿写入期间活动标签页发生变化。" };
       }
+      lastCheckpoint.set(context.tab, version);
       if (appStore.activeTabId === context.tabId) {
         draftStore.activeDraftId = record.id;
         draftStore.status = "saved";
@@ -843,7 +863,8 @@ function fnv1a(value: string) {
 }
 
 function autosaveIntervalMs() {
-  return Math.max(1, appStore.settings.general.autoSaveIntervalMinutes || 5) * 60 * 1000;
+  const minutes = appStore.settings.general.autoSaveIntervalMinutes;
+  return minutes > 0 ? minutes * 60_000 : 8_000;
 }
 
 function formatTime(value: number) {
