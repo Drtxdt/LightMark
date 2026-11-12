@@ -18,6 +18,8 @@ async function waitFor(read, description) {
 }
 async function writeFive() {
   await store.loadConfig();
+  const general = store.appStore.settings.general;
+  if (!general.autoSave || general.autoSaveIntervalMinutes !== 0) throw Error('Unexpected first-run draft settings: ' + JSON.stringify(general));
   await waitFor(() => store.getPaneTab('main'), 'initial tab');
   for (const file of fixture.files) await store.openFile(file);
   const named = fixture.files.map(file => store.appStore.tabs.find(t => t.path === file).id);

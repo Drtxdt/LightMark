@@ -278,9 +278,9 @@ pub struct GeneralSettings {
     pub restore_last_file: bool,
     #[serde(default = "default_recent_files_limit")]
     pub recent_files_limit: u8,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_save: bool,
-    #[serde(default = "default_auto_save_interval_minutes")]
+    #[serde(default)]
     pub auto_save_interval_minutes: u8,
     #[serde(default = "default_language")]
     pub language: String,
@@ -939,8 +939,8 @@ impl Default for GeneralSettings {
             launch_behavior: default_launch_behavior(),
             restore_last_file: false,
             recent_files_limit: default_recent_files_limit(),
-            auto_save: false,
-            auto_save_interval_minutes: default_auto_save_interval_minutes(),
+            auto_save: true,
+            auto_save_interval_minutes: 0,
             language: default_language(),
             spellcheck: false,
             spellcheck_language: default_spellcheck_language(),
@@ -1061,8 +1061,14 @@ fn default_recent_files_limit() -> u8 {
     10
 }
 
-fn default_auto_save_interval_minutes() -> u8 {
-    5
+#[test]
+fn draft_defaults_respect_existing_preferences() {
+    let fresh = GeneralSettings::default();
+    assert!(fresh.auto_save);
+    assert_eq!(fresh.auto_save_interval_minutes, 0);
+    let old: GeneralSettings = serde_json::from_str(r#"{"autoSave":false,"autoSaveIntervalMinutes":7}"#).unwrap();
+    assert!(!old.auto_save);
+    assert_eq!(old.auto_save_interval_minutes, 7);
 }
 
 fn default_language() -> String {
