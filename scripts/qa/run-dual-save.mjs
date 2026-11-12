@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createServer } from 'vite';
 
-const base = path.resolve('.cache/dual-save-windows');
+const base = path.join(tmpdir(), 'LightMark-dual-save');
 await mkdir(base, { recursive: true });
 const root = await realpath(await mkdtemp(path.join(base, 'run-')));
 const token = randomUUID();
@@ -43,6 +44,7 @@ const server = await createServer({
   }],
 });
 async function exec(command, args, env, timeout) {
+  console.log('Launching', command, args);
   const child = spawn(command, args, { env, stdio: 'inherit', windowsHide: true });
   const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
   try {
@@ -70,4 +72,10 @@ try {
     }
     console.log(JSON.stringify({ phase, ...result, diskBytesVerified: true }));
   }
-} finally { await server.close(); }
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
+} finally {
+  server.httpServer.closeAllConnections();
+  await server.close();
+}

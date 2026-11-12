@@ -2490,7 +2490,9 @@ try {
       "}",
     ].join("\n"));
     let draftSource = fs.readFileSync(path.join(root, "src", "stores", "draftStore.ts"), "utf8");
+    compileTypeScriptModuleGraph(path.join(root, "src", "utils", "documentPath.ts"), draftDir);
     draftSource = draftSource
+      .replaceAll('from "../utils/documentPath"', 'from "./utils/documentPath.mjs"')
       .replaceAll("from \"./appStore\"", "from \"./draft-app-store.mjs\"")
       .replaceAll("from \"../editor/documentRuntime\"", "from \"./draft-runtime.mjs\"")
       .replaceAll("from \"../editor/documentMutationTracker\"", "from \"./draft-tracker.mjs\"")
