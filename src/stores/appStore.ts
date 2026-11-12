@@ -3446,7 +3446,20 @@ export async function activateTabInPane(paneId: EditorPaneId, tabId: string) {
   return true;
 }
 
-export async function setActivePane(paneId: EditorPaneId) {
+// A click dispatches pointerdown and focusin for the same pane. They must
+// await one transition, not flush the outgoing editor twice concurrently.
+let activatingPane: { paneId: EditorPaneId; promise: Promise<boolean> } | null = null;
+export function setActivePane(paneId: EditorPaneId): Promise<boolean> {
+  if (activatingPane?.paneId === paneId) return activatingPane.promise;
+  const promise = activatePaneOnce(paneId);
+  const activation = { paneId, promise };
+  activatingPane = activation;
+  const clear = () => { if (activatingPane === activation) activatingPane = null; };
+  void promise.then(clear, clear);
+  return promise;
+}
+
+async function activatePaneOnce(paneId: EditorPaneId) {
   const previousActivePaneId = appStore.splitLayout.activePaneId;
   if (paneId === previousActivePaneId) {
     // Pointer activation of the already active split pane is a focus action,
