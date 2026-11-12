@@ -187,6 +187,7 @@ export async function reviewPendingDrafts() {
           `第 ${index + 1} / ${offered.length} 篇 · ${labels[index]}。恢复后在新标签中打开。`,
           record.kind === "large" ? null : activeDraftTab(), undefined,
           [...labels, ...(draftStore.recoveryIssues ? [draftStore.recoveryIssues] : [])]);
+        if (handled === "laterAll") break;
         if (handled) draftStore.pendingRecovery = draftStore.pendingRecovery.filter(item => item.id !== record.id);
       } catch (error) {
         draftStore.status = "failed";
@@ -200,6 +201,7 @@ export async function reviewPendingDrafts() {
 
 export async function checkDraftForOpenedFile(path: string) {
   const expectedTab = activeDraftTab();
+  if (expectedTab?.isDirty || draftStore.pendingRecovery.some(record => record.path === path)) return;
   const listing = await readDraftListing();
   if (!listing) return;
   const issueMessage = formatDraftIssues(listing.issues);
@@ -773,11 +775,13 @@ async function promptRecoverDraft(record: DraftRecord, message: string, expected
     cancelId: "keep",
     defaultId: "restore",
     buttons: [
+      ...(details && draftStore.pendingRecovery.length > 1 ? [{ id: "laterAll", label: "其余稍后处理", variant: "secondary" as const }] : []),
       { id: "keep", label: "保留稍后处理", variant: "secondary" },
       { id: "discard", label: "丢弃草稿", variant: "danger" },
       { id: "restore", label: "恢复草稿", variant: "primary" },
     ],
   });
+  if (result === "laterAll") return "laterAll";
   if (result === "restore") {
     return await restoreDraft(record, expectedTab, expectedPath, restoreFence);
   }
@@ -800,6 +804,7 @@ async function restoreDraft(
     draftStore.message = "当前标签页已变化，草稿仍保留待处理。";
     return;
   }
+  let restoredId = record.id;
   if (record.kind === "large") {
     if (!record.largeSnapshot) {
       draftStore.status = "recoverable";
@@ -830,17 +835,18 @@ async function restoreDraft(
       untitledDraftIds.set(owner, record.id);
     } else {
       // Commit the detached copy before releasing the named checkpoint.
+      restoredId = draftIdForTab(owner);
       await persistDraftRecord({
-        id: draftIdForTab(owner), kind: "untitled", content: record.content ?? "",
+        id: restoredId, kind: "untitled", content: record.content ?? "",
         editorMode: record.editorMode, updatedAt: Date.now(),
       });
       await discardDraft(record.id, record);
     }
+    if (appStore.activeTabId === owner.id && (record.editorMode === "wysiwyg" || record.editorMode === "source")) {
+      await switchMode(record.editorMode);
+    }
   }
-  if (record.kind !== "large" && (record.editorMode === "wysiwyg" || record.editorMode === "source")) {
-    await switchMode(record.editorMode);
-  }
-  draftStore.activeDraftId = record.id;
+  draftStore.activeDraftId = restoredId;
   draftStore.status = "restored";
   draftStore.message = "已恢复草稿";
   return true;

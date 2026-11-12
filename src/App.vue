@@ -98,12 +98,12 @@ const closeProtectionReady = ref(false);
 
 onMounted(async () => {
   if (isTauri()) unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested);
-  closeProtectionReady.value = true;
   activatePlugins([wordCountPlugin]);
   await loadConfig().catch((error) => {
     appStore.statusMessage = String(error);
   });
   applyTheme();
+  closeProtectionReady.value = true;
   startDraftAutosave();
   startExternalFileMonitor();
   await syncWorkspaceKnowledgeWatch();

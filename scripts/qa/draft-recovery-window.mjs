@@ -40,6 +40,15 @@ async function writeFive() {
 }
 async function recover() {
   const count = fixture.corrupt ? 4 : 5;
+  if (!fixture.corrupt) {
+    const later = await waitFor(() => [...document.querySelectorAll('[role="dialog"] button')]
+      .find(b => b.textContent.trim() === '其余稍后处理'), 'defer recovery list');
+    later.click();
+    await waitFor(() => !dialogStore.active && draftStore.pendingRecovery.length === count, 'five deferred drafts');
+    const resume = await waitFor(() => [...document.querySelectorAll('footer button')]
+      .find(b => b.textContent.includes('待恢复草稿')), 'resume from status bar');
+    resume.click();
+  }
   for (let i = 0; i < count; i++) {
     const prompt = await waitFor(() => dialogStore.active?.title === '发现可恢复草稿' && dialogStore.active.message.startsWith('第 ' + (i+1) + ' / ' + count) && dialogStore.active, 'startup recovery prompt ' + i);
     const button = await waitFor(() => [...document.querySelectorAll('[role="dialog"] button')].find(b => b.textContent.trim() === '恢复草稿'), 'restore button');
