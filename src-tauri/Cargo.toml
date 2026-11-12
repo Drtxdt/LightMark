@@ -37,6 +37,7 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "2"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem"] }
 
 [[bin]]

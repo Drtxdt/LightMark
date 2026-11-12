@@ -30,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "fileAssociations": [{ "ext": ["md", "markdown"], "name": "Markdown Document", "mimeType": "text/markdown", "role": "Editor" }],
     "icon": ["icons/icon.ico"],
     "resources": ["../THIRD_PARTY_NOTICES.md"],
     "externalBin": []

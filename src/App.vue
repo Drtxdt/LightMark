@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppLayout from "./components/layout/AppLayout.vue";
@@ -28,6 +28,7 @@ import {
   checkOpenFileSnapshots,
   loadConfig,
   isWindowCloseAuthorizationCurrent,
+  openFile,
   openCommandPalette,
   openHeadingJump,
   openGoToLine,
@@ -82,6 +83,7 @@ let unbindTypewriterMode = () => {};
 let unbindDistractionFreeMode = () => {};
 let unbindPreventUiSelectAll = () => {};
 let unlistenTauriImageDrop: (() => void) | null = null;
+let unlistenDesktopOpen: (() => void) | null = null;
 let unlistenCloseRequested: (() => void) | null = null;
 let unlistenExternalFileWatch: (() => void) | null = null;
 let unlistenWorkspaceWatch: (() => void) | null = null;
@@ -108,6 +110,19 @@ onMounted(async () => {
   startExternalFileMonitor();
   await syncWorkspaceKnowledgeWatch();
   await recoverStartupDrafts();
+  if (isTauri()) {
+    let pending = Promise.resolve();
+    const drain = () => {
+      pending = pending.then(async () => {
+        for (const path of await invoke<string[]>("take_desktop_documents")) {
+          try { await openFile(path); } catch (error) { appStore.statusMessage = String(error); }
+        }
+      }).catch(error => { appStore.statusMessage = String(error); });
+      return pending;
+    };
+    unlistenDesktopOpen = await listen("desktop-open-ready", drain);
+    await drain();
+  }
   ensureDefaultTab();
   unwatchWindowChrome = watch(
     () => [currentFileName.value, appStore.activeTheme] as const,
@@ -185,6 +200,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  unlistenDesktopOpen?.();
   unbindSave();
   unbindPalette();
   unbindQuickOpen();

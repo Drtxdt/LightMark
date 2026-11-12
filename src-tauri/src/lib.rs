@@ -1,6 +1,7 @@
 mod commands;
 pub mod export_destination;
 mod profile;
+mod desktop_open;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,9 +17,24 @@ pub fn run() {
         context.config_mut().identifier = profile::profile_identifier(&name)
             .expect("profile was validated before creating the application");
     }
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().manage(desktop_open::Inbox::default());
+    #[cfg(windows)]
+    let builder = if std::env::args_os().any(|a| a == "--lightmark-headless-request" || a.to_string_lossy().starts_with("--lightmark-headless-request=")) {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            desktop_open::receive(app, desktop_open::documents(args.into_iter().skip(1), std::path::Path::new(&cwd)));
+        }))
+    };
+    builder
+        .setup(|_app| {
+            #[cfg(windows)]
+            desktop_open::receive(_app.handle(), desktop_open::documents(std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()), &std::env::current_dir()?));
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            desktop_open::take_desktop_documents,
             commands::cli::get_headless_export_request,
             commands::cli::trace_headless_frontend,
             commands::cli::complete_headless_export,
@@ -88,6 +104,12 @@ pub fn run() {
             commands::workspace_index::workspace_query_tags,
             commands::workspace_index::workspace_resolve_wiki_link,
         ])
-        .run(context)
-        .expect("failed to run LightMark");
+        .build(context)
+        .expect("failed to build LightMark")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                desktop_open::receive(_app, urls.into_iter().filter_map(|u| u.to_file_path().ok()));
+            }
+        });
 }
