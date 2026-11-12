@@ -26,7 +26,17 @@ jobs:
         run: |
           cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml document_names_follow_volume_case_sensitivity
           mountpoint=$(mktemp -d)
-          hdiutil create -quiet -size 96m -fs APFSX -volname LightMarkCase "$RUNNER_TEMP/case.dmg"
-          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$RUNNER_TEMP/case.dmg"
+          hdiutil create -size 256m -fs "Case-sensitive APFS" -volname LightMarkCase "$RUNNER_TEMP/case.dmg"
+          hdiutil attach -nobrowse -mountpoint "$mountpoint" "$RUNNER_TEMP/case.dmg"
           trap 'hdiutil detach "$mountpoint"' EXIT
           LIGHTMARK_CASE_VOLUME="$mountpoint" cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml document_names_follow_volume_case_sensitivity
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Edit and reopen two documents in real desktop windows
+        env:
+          RUSTUP_TOOLCHAIN: 1.94.1
+        run: node scripts/qa/run-dual-save.mjs

@@ -10,6 +10,7 @@ import {
   openFile,
   openWorkspace,
   saveCurrentFile,
+  saveCurrentFileAs,
   setTheme,
   switchMode,
   toggleSplitLayout,
@@ -220,6 +221,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
     <div class="toolbar-overflow-wrap">
       <button ref="overflowTrigger" class="lm-toolbar-button" aria-label="更多编辑操作" title="更多编辑操作" aria-haspopup="menu" :aria-expanded="overflowOpen" @click="toggleOverflow">•••</button>
       <div v-if="overflowOpen" ref="overflowPanel" class="lm-export-menu toolbar-overflow-menu" role="menu" @keydown="handleOverflowKeys">
+        <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(() => saveCurrentFileAs())">另存为…</button>
         <button v-for="item in overflowCommands" :key="item.command" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand(item.command, item.value)">{{ item.label }}<span v-if="isFormatActive(item.command)" aria-label="已启用">✓</span></button>
         <button v-for="level in 7" :key="`h${level}`" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand('heading', level - 1)">{{ level === 1 ? '正文' : `H${level - 1}` }}<span v-if="headingLevel === level - 1">✓</span></button>
         <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(formatCurrentMarkdown)">格式化 Markdown</button>

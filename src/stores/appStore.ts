@@ -2070,9 +2070,9 @@ async function conflictDiffDetails(path: string, markdown: string) {
   return buildTextDiffSummary(markdown, disk);
 }
 
-async function chooseSaveAsTargetForContext(context: SaveContext, avoidPath?: string) {
+async function chooseSaveAsTargetForContext(context: SaveContext, avoidPath?: string, pick?: () => Promise<string | null>) {
   if (!isSaveContextBound(context)) return null;
-  const chosen = await invoke<string | null>("save_markdown_file_dialog", {
+  const chosen = pick ? await pick() : await invoke<string | null>("save_markdown_file_dialog", {
     defaultFileName: defaultMarkdownFileName(context.tab.name),
   });
   if (!chosen) return null;
@@ -3034,6 +3034,20 @@ export async function reloadCurrentFileFromDisk() {
     void syncExternalFileWatches();
     await persistConfig();
     return true;
+  });
+}
+
+export async function saveCurrentFileAs(pick?: () => Promise<string | null>) {
+  syncActiveTabFromProjection();
+  const context = captureSaveContext();
+  if (!context || context.kind === "large") return false;
+  return saveTransactionQueue.enqueue(context.tab, async () => {
+    const target = await chooseSaveAsTargetForContext(context, undefined, pick);
+    if (!target || !isSaveContextBound(context)) return false;
+    if (context.path && isSamePath(context.path, target)) return runSaveTransaction(context);
+    const version = await captureSaveVersion(context, "saveAs");
+    if (!version) return staleSaveResult(context);
+    return writeCapturedVersion(context, version, target, true);
   });
 }
 
