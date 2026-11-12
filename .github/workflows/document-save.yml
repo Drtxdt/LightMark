@@ -42,10 +42,16 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.94.1
         run: node scripts/qa/run-dual-save.mjs
+      - name: Detach the test volume
+        if: always() && runner.os == 'macOS' && env.LIGHTMARK_CASE_VOLUME != ''
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if hdiutil detach "$LIGHTMARK_CASE_VOLUME"; then exit 0; fi
+            sleep 2
+          done
+          hdiutil detach -force "$LIGHTMARK_CASE_VOLUME"
       - name: Kill and reopen five drafts, then repeat with one corrupt record
         env:
           RUSTUP_TOOLCHAIN: 1.94.1
         run: node scripts/qa/run-dual-save.mjs --drafts
-      - name: Detach the test volume
-        if: always() && runner.os == 'macOS' && env.LIGHTMARK_CASE_VOLUME != ''
-        run: hdiutil detach "$LIGHTMARK_CASE_VOLUME"
