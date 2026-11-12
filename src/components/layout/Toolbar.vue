@@ -41,6 +41,7 @@ const exportMenuOpen = ref(false);
 const exportTrigger = ref<HTMLButtonElement | null>(null);
 const exportPanel = ref<HTMLElement | null>(null);
 const overflowOpen = ref(false);
+const overflowOwner = ref("");
 const overflowTrigger = ref<HTMLButtonElement | null>(null);
 const overflowPanel = ref<HTMLElement | null>(null);
 const formatState = ref<Record<string, boolean | number | string>>({});
@@ -57,6 +58,7 @@ function receiveFormatState(event: Event) { formatState.value = (event as Custom
 function closeOverflow() { overflowOpen.value = false; void nextTick(() => overflowTrigger.value?.focus()); }
 async function toggleOverflow() {
   overflowOpen.value = !overflowOpen.value;
+  if (overflowOpen.value) overflowOwner.value = appStore.activeTabId;
   if (overflowOpen.value) { await nextTick(); overflowPanel.value?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus(); }
 }
 function handleOverflowKeys(event: KeyboardEvent) {
@@ -221,7 +223,7 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
     <div class="toolbar-overflow-wrap">
       <button ref="overflowTrigger" class="lm-toolbar-button" aria-label="更多编辑操作" title="更多编辑操作" aria-haspopup="menu" :aria-expanded="overflowOpen" @click="toggleOverflow">•••</button>
       <div v-if="overflowOpen" ref="overflowPanel" class="lm-export-menu toolbar-overflow-menu" role="menu" @keydown="handleOverflowKeys">
-        <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(() => saveCurrentFileAs())">另存为…</button>
+        <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(() => saveCurrentFileAs(undefined, overflowOwner))">另存为…</button>
         <button v-for="item in overflowCommands" :key="item.command" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand(item.command, item.value)">{{ item.label }}<span v-if="isFormatActive(item.command)" aria-label="已启用">✓</span></button>
         <button v-for="level in 7" :key="`h${level}`" class="lm-export-menu-item" role="menuitem" :disabled="!canRunWysiwygCommand()" @click="overflowOpen = false; runEditorCommand('heading', level - 1)">{{ level === 1 ? '正文' : `H${level - 1}` }}<span v-if="headingLevel === level - 1">✓</span></button>
         <button class="lm-export-menu-item" role="menuitem" :disabled="appStore.documentMode === 'large'" @click="overflowOpen = false; run(formatCurrentMarkdown)">格式化 Markdown</button>
@@ -312,9 +314,8 @@ function runEditorCommand(command: EditorCommand, value?: string | number | null
 .large-source-capability { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--lm-border); border-radius: 7px; background: var(--lm-surface-soft); color: var(--lm-ink); font-size: 12px; }
 .toolbar-heading-select { width: 64px; height: 30px; border: 1px solid var(--lm-border); border-radius: 7px; background: var(--lm-surface); color: var(--lm-ink); font-size: 12px; }
 .lm-toolbar-button[aria-pressed="true"] { background: var(--lm-accent-soft); color: var(--lm-accent); }
-.toolbar-overflow-wrap { position: relative; display: none; flex: 0 0 auto; }
+.toolbar-overflow-wrap { position: relative; display: inline-grid; flex: 0 0 auto; }
 .toolbar-overflow-menu { left: 0; right: auto; width: 220px; }
-@media (max-width: 1180px) { .toolbar-overflow-wrap { display: inline-grid; } }
 
 .lm-toolbar {
   display: flex;

@@ -3037,9 +3037,11 @@ export async function reloadCurrentFileFromDisk() {
   });
 }
 
-export async function saveCurrentFileAs(pick?: () => Promise<string | null>) {
-  syncActiveTabFromProjection();
-  const context = captureSaveContext();
+export async function saveCurrentFileAs(pick?: () => Promise<string | null>, tabId = appStore.activeTabId) {
+  const owner = appStore.tabs.find(tab => tab.id === tabId);
+  if (!owner) return false;
+  if (owner.id === appStore.activeTabId) syncActiveTabFromProjection();
+  const context = captureSaveContext(owner);
   if (!context || context.kind === "large") return false;
   return saveTransactionQueue.enqueue(context.tab, async () => {
     const target = await chooseSaveAsTargetForContext(context, undefined, pick);
