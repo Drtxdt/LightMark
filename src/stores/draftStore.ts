@@ -21,6 +21,7 @@ import {
 } from "../editor/documentMutationTracker";
 import {
   documentSessionForTab,
+  waitForDocumentSession,
   flushDocumentSessionPendingEdits,
   type DocumentSessionAdapter,
   type DocumentSessionFlushResult,
@@ -767,6 +768,13 @@ function mutationTokensMatch(left: DocumentMutationToken | null, right: Document
 }
 
 async function promptRecoverDraft(record: DraftRecord, message: string, expectedTab: DocumentTab | null = null, expectedPath?: string, details?: string[]) {
+  // Startup and creation of the preceding recovered tab mount their editors
+  // asynchronously. Capture the prompt's version after that initial mount.
+  if (expectedTab && typeof document !== "undefined" && document.querySelector?.(".lm-editor-pane")
+    && !documentSessionForTab(expectedTab.id)) {
+    await waitForDocumentSession(expectedTab.id, expectedTab.editorMode, 30000);
+    if (activeDraftTab() !== expectedTab) return false;
+  }
   const restoreFence = expectedTab ? captureDraftRestoreFence(expectedTab) : null;
   const result = await showDialog({
     title: "发现可恢复草稿",

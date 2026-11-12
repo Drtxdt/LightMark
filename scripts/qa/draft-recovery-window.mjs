@@ -4,9 +4,12 @@ import { dialogStore } from '/src/stores/dialogStore.ts';
 import { documentSessionForTab } from '/src/editor/documentRuntime.ts';
 import { appDataDir, join } from '@tauri-apps/api/path';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { watch } from 'vue';
 
 const fixture = await (await fetch('/__draft_fixture')).json();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const messages = [];
+watch(() => draftStore.message, value => { messages.push(value); if (messages.length > 12) messages.shift(); });
 async function waitFor(read, description) {
   const deadline = Date.now() + 35000;
   while (Date.now() < deadline) {
@@ -14,7 +17,8 @@ async function waitFor(read, description) {
     if (value) return value;
     await delay(50);
   }
-  throw Error(description + ': ' + JSON.stringify({ status: store.appStore.statusMessage, draft: draftStore.message, receipts: [...qaDraftReceipts.keys()] }));
+  throw Error(description + ': ' + JSON.stringify({ status: store.appStore.statusMessage, messages,
+    remaining: draftStore.pendingRecovery.map(r => r.id), receipts: [...qaDraftReceipts.keys()] }));
 }
 async function writeFive() {
   await store.loadConfig();

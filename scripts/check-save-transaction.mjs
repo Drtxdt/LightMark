@@ -2457,7 +2457,7 @@ try {
   const draftDir = fs.mkdtempSync(path.join(root, "node_modules", ".lightmark-draft-transaction-"));
   try {
     fs.writeFileSync(path.join(draftDir, "draft-vue.mjs"), proxyStub);
-    fs.writeFileSync(path.join(draftDir, "draft-runtime.mjs"), "export function documentSessionForTab() { return null; }\nexport async function flushDocumentSessionPendingEdits() { return undefined; }\n");
+    fs.writeFileSync(path.join(draftDir, "draft-runtime.mjs"), "export function documentSessionForTab() { return null; }\nexport async function waitForDocumentSession() {}\nexport async function flushDocumentSessionPendingEdits() { return undefined; }\n");
     fs.writeFileSync(path.join(draftDir, "draft-tracker.mjs"), fs.readFileSync(mutationTrackerPath));
     fs.writeFileSync(path.join(draftDir, "draft-dialog.mjs"), "export function showDialog() { return Promise.resolve('keep'); }\n");
     fs.writeFileSync(path.join(draftDir, "draft-app-store.mjs"), [
