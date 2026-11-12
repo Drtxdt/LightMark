@@ -854,6 +854,28 @@ fn classify_create_only(
     )
 }
 
+#[cfg(target_os = "macos")]
+fn macos_rename(from: &Path, to: &Path, flags: libc::c_uint) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // Both C strings live for the entire call. Darwin applies the flag atomically.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_call(operation: &str, result: io::Result<()>) -> NativeCall {
+    match result {
+        Ok(()) => NativeCall { succeeded: true, code: None, message: format!("{operation} succeeded") },
+        Err(error) => NativeCall { succeeded: false, code: error.raw_os_error(), message: format!("{operation}: {error}") },
+    }
+}
+
 fn replace_existing_os(transaction: &FileReplaceTransaction) -> NativeCall {
     #[cfg(windows)]
     {
@@ -883,7 +905,23 @@ fn replace_existing_os(transaction: &FileReplaceTransaction) -> NativeCall {
             },
         };
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // The displaced target lands directly at the journal's backup path.
+        // A process exit after the exchange cannot strand it under another name.
+        let result = (|| {
+            let permissions = fs::metadata(&transaction.target)?.permissions();
+            if permissions.readonly() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&transaction.replacement, fs::Permissions::from_mode(permissions.mode() & 0o777))?;
+            fs::hard_link(&transaction.replacement, &transaction.backup)?;
+            macos_rename(&transaction.backup, &transaction.target, libc::RENAME_SWAP)
+        })();
+        macos_call("atomic file exchange", result)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = transaction;
         NativeCall {
@@ -923,7 +961,11 @@ fn create_only_os(transaction: &FileReplaceTransaction) -> NativeCall {
             },
         };
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_call("exclusive file creation", macos_rename(&transaction.replacement, &transaction.target, libc::RENAME_EXCL))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = transaction;
         NativeCall {

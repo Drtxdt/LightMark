@@ -28,11 +28,16 @@ sha2 = "0.10"
 same-file = "1"
 tempfile = "3"
 serde_yaml = "0.9"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 quick-xml = "0.39"
 resvg = { version = "0.45", default-features = true }
 clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem"] }
 
 [[bin]]
 name = "lightmark"
