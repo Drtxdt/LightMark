@@ -5052,9 +5052,11 @@ function currentNavigationLocation(overrides: Partial<NavigationLocation> = {}):
 
 function requestEditorPositionRestore(position: EditorPositionSnapshot | undefined) {
   if (!position || typeof window === "undefined") return;
+  const paneId = appStore.splitLayout.activePaneId, tabId = appStore.activeTabId;
   appStore.pendingEditorPosition = position;
   window.setTimeout(() => {
-    window.dispatchEvent(new CustomEvent("lightmark:restore-position", { detail: position }));
+    if (appStore.splitLayout.activePaneId !== paneId || appStore.activeTabId !== tabId) return;
+    window.dispatchEvent(new CustomEvent("lightmark:restore-position", { detail: { ...position, paneId, tabId } }));
   }, 0);
 }
 

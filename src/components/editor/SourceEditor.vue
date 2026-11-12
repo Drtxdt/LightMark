@@ -1415,7 +1415,6 @@ function restoreSourcePosition(position: any) {
     if (view !== requestedView || sourceRevision !== revision || restoreEpoch !== sourceSelectionRestoreEpoch) return;
     view.dispatch({ selection: { anchor, head } });
     view.scrollDOM.scrollTop = scrollTopFromSnapshot(position, view.scrollDOM.scrollHeight, view.scrollDOM.clientHeight);
-    view.focus();
     window.requestAnimationFrame(() => scheduleSourceTypewriter(view));
   });
 }

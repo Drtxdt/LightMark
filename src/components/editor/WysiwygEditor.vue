@@ -5430,7 +5430,8 @@ function restoreWysiwygPosition(position: any) {
       scrollWysiwygPositionIntoView(view, docPos);
     }
     if (shell) shell.scrollTop = scrollTopFromSnapshot(position, shell.scrollHeight, shell.clientHeight);
-    view.focus();
+    // Restoring a saved selection is not a request to activate this pane.
+    // Keep keyboard focus where the user put it during the deferred frame.
     window.requestAnimationFrame(() => scheduleWysiwygTypewriter(view));
   });
 }
