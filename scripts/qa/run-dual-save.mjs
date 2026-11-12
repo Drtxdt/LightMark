@@ -22,6 +22,15 @@ for (const [i, dir] of dirs.entries()) {
   await writeFile(path.join(dir, 'cover.svg'), `<svg xmlns="http://www.w3.org/2000/svg" width="${i ? 29 : 13}" height="10"/>`);
 }
 await writeFile(occupied, '必须保留');
+const caseFiles = [];
+if (process.env.LIGHTMARK_CASE_VOLUME) {
+  const volumeDir = await realpath(await mkdtemp(path.join(process.env.LIGHTMARK_CASE_VOLUME, 'notes-')));
+  for (const name of ['A.md', 'a.md']) {
+    const file = path.join(volumeDir, name);
+    await writeFile(file, name, { flag: 'wx' });
+    caseFiles.push(file);
+  }
+}
 let reopen = false, result;
 const server = await createServer({
   server: { host: '127.0.0.1', port: 0, strictPort: false },
@@ -33,7 +42,7 @@ const server = await createServer({
         if (req.url === '/' || req.url.startsWith('/__dual_')) console.log(req.method, req.url.split(token)[0]);
         if (req.url === '/__dual_fixture') {
           res.setHeader('Cache-Control', 'no-store');
-          res.end(JSON.stringify({ left, right, copy, occupied, profile, token, reopen }));
+          res.end(JSON.stringify({ left, right, copy, occupied, caseFiles, profile, token, reopen }));
         } else if (req.url === '/__dual_result/' + token && req.method === 'POST') {
           let body = '';
           for await (const chunk of req) body += chunk;
@@ -73,6 +82,7 @@ try {
       assert.deepEqual(await readFile(file), Buffer.from(text));
     }
     console.log(JSON.stringify({ phase, ...result, diskBytesVerified: true }));
+    for (const file of caseFiles) assert.deepEqual(await readFile(file), Buffer.from(path.basename(file) + '改'));
   }
 } catch (error) {
   console.error(error);

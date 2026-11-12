@@ -47,6 +47,26 @@ async function run(fixture) {
     }
     observed.push({ pane, width, path: store.getPaneTab(pane).path });
   }
+  if (fixture.caseFiles.length) {
+    const owners = [];
+    for (const [index, pane] of ['main', 'secondary'].entries()) {
+      const path = fixture.caseFiles[index];
+      await store.openFile(path, { paneId: pane });
+      const editor = await waitFor(() => {
+        const tab = store.getPaneTab(pane);
+        return tab?.path === path && documentSessionForTab(tab.id)?.editorIdentity;
+      });
+      owners.push(store.getPaneTab(pane).id);
+      if (!await store.setActivePane(pane) || store.appStore.currentFilePath !== path) throw Error('Case-sensitive pane activation failed');
+      const expected = path.split('/').pop() + (fixture.reopen ? '改' : '');
+      if (editor.state.doc.textContent !== expected) throw Error('Case-sensitive note mismatch: ' + path);
+      if (!fixture.reopen) {
+        editor.commands.insertContentAt(editor.state.doc.content.size - 1, '改');
+        if (!await store.saveCurrentFile()) throw Error('Case-sensitive save failed: ' + path);
+      }
+    }
+    if (owners[0] === owners[1] || store.getPaneTab('main').path !== fixture.caseFiles[0]) throw Error('Case-sensitive document identities collided');
+  }
   return observed;
 }
 
