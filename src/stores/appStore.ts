@@ -1,4 +1,5 @@
 import { computed, nextTick, reactive, toRaw } from "vue";
+import { documentOpenPath, documentPathKey } from "../utils/documentPath";
 import { invoke } from "@tauri-apps/api/core";
 import { invokeLargeSource, readLargeSourceRange, runLargeSourceJob, assertLargeStateReceipt, type LargeRangeRequest } from "../editor/largeSourceClient";
 import { throwIfLargeSearchAborted } from '../editor/largeSearchCoordinator';
@@ -1196,8 +1197,9 @@ export async function openFile(path?: string, options: { recordNavigation?: bool
     await loadConfig().catch(error => { appStore.statusMessage = String(error); });
     await nextTick();
   }
-  const selected = path ?? (await invoke<string | null>("open_file_dialog"));
-  if (!selected) return;
+  const chosen = path ?? (await invoke<string | null>("open_file_dialog"));
+  if (!chosen) return;
+  const selected = await documentOpenPath(chosen);
   const paneId = requestedPaneId;
   const activation = await preparePaneActivation(paneId, "tabSwitch");
   if (!activation) return false;
@@ -2070,10 +2072,11 @@ async function conflictDiffDetails(path: string, markdown: string) {
 
 async function chooseSaveAsTargetForContext(context: SaveContext, avoidPath?: string) {
   if (!isSaveContextBound(context)) return null;
-  const selected = await invoke<string | null>("save_markdown_file_dialog", {
+  const chosen = await invoke<string | null>("save_markdown_file_dialog", {
     defaultFileName: defaultMarkdownFileName(context.tab.name),
   });
-  if (!selected) return null;
+  if (!chosen) return null;
+  const selected = await documentOpenPath(chosen);
   if (avoidPath && isSamePath(selected, avoidPath)) {
     await alertDialog({
       title: "请选择不同文件名",
@@ -4529,9 +4532,11 @@ function shouldRestoreSession(config: AppConfig) {
 async function restoreSession(session: SessionRestoreState | undefined) {
   if (!session?.openTabs?.length) return;
   const restored: DocumentTab[] = [];
-  for (const item of session.openTabs) {
-    if (!item.path || restored.some((tab) => isSamePath(tab.path, item.path))) continue;
+  for (const saved of session.openTabs) {
+    if (!saved.path) continue;
     try {
+      const item = { ...saved, path: await documentOpenPath(saved.path) };
+      if (restored.some((tab) => isSamePath(tab.path, item.path))) continue;
       const info = await invoke<FileInfo>("get_file_info", { path: item.path });
       if (info.isLarge) {
         const largeSession = await invoke<LargeFileSession>("open_large_file", { path: item.path });
@@ -5042,7 +5047,7 @@ function isSamePath(left: string, right: string) {
 }
 
 function normalizePathKey(path: string) {
-  return path.replace(/\\/g, "/").toLocaleLowerCase();
+  return documentPathKey(path);
 }
 
 function normalizeHeadingText(value: string) {

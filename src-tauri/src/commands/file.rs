@@ -2513,7 +2513,44 @@ fn similar_markdown_files(
     Ok(candidates)
 }
 
+#[tauri::command]
+pub fn document_open_path(path: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CStr;
+        use std::os::fd::AsRawFd;
+        // Keep symlink paths subject to the save transaction's own checks.
+        let requested = Path::new(&path);
+        let mut existing = requested;
+        if let Err(error) = fs::symlink_metadata(requested) {
+            if error.kind() != io::ErrorKind::NotFound { return Err(error.to_string()); }
+            existing = requested.parent().ok_or("目标没有父目录")?;
+        }
+        for ancestor in existing.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            if fs::symlink_metadata(ancestor).map_err(|e| e.to_string())?.is_symlink() {
+                return Ok(path);
+            }
+        }
+        let file = File::open(existing).map_err(|e| e.to_string())?;
+        let mut bytes = [0u8; libc::PATH_MAX as usize];
+        // F_GETPATH returns the filesystem spelling for this open descriptor.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let spelling = CStr::from_bytes_until_nul(&bytes).map_err(|e| e.to_string())?
+            .to_str().map_err(|e| e.to_string())?;
+        return if existing == requested { Ok(spelling.to_owned()) } else {
+            Ok(Path::new(spelling).join(requested.file_name().ok_or("无效的目标文件名")?).to_string_lossy().into_owned())
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(path)
+}
+
 fn watch_path_key(path: &Path) -> String {
+    #[cfg(target_os = "macos")]
+    return document_open_path(path.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    #[cfg(not(target_os = "macos"))]
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
@@ -2958,6 +2995,31 @@ mod tests {
         for (revision,text) in [(0,"marker1 "),(1,"marker2 ")]{super::apply_file_operation(id.clone(),revision,space,format!("input-{revision}"),vec![TextEdit{start_line:0,start_column:0,end_line:0,end_column:0,text:text.into()}]).unwrap();}
         save_large_file(id.clone(),2,space).unwrap();super::move_large_history(id.clone(),2,space,"undo".into(),"undo".into()).unwrap();save_large_file(id.clone(),3,space).unwrap();assert_eq!(fs::read_to_string(&path).unwrap(),"marker1 base\n");
         super::move_large_history(id.clone(),3,space,"redo".into(),"redo".into()).unwrap();assert_eq!(super::read_file_range(id.clone(),4,space,0,0,None,None,None).unwrap().text,"marker2 marker1 base\n");save_large_file(id.clone(),4,space).unwrap();assert_eq!(fs::read_to_string(&path).unwrap(),"marker2 marker1 base\n");close_large_file(id,4,LargeCloseDisposition::Saved).unwrap();fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn document_names_follow_volume_case_sensitivity() {
+        let mount = std::env::var_os("LIGHTMARK_CASE_VOLUME");
+        let temp = match &mount {
+            Some(path) => tempfile::tempdir_in(path).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        let dir = temp.path().canonicalize().unwrap();
+        let upper = dir.join("A.md");
+        let lower = dir.join("a.md");
+        fs::write(&upper, "upper").unwrap();
+        if mount.is_some() {
+            fs::OpenOptions::new().write(true).create_new(true).open(&lower).unwrap();
+            fs::write(&lower, "lower").unwrap();
+        } else if !lower.exists() {
+            // On a case-sensitive boot volume the mounted-volume test covers both names.
+            return;
+        }
+        let resolved = |p: &std::path::Path| super::document_open_path(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(resolved(&upper) == resolved(&lower), mount.is_none());
+        assert_eq!(super::watch_path_key(&upper) == super::watch_path_key(&lower), mount.is_none());
+        assert_eq!(fs::read(&upper).unwrap(), b"upper");
     }
 
     #[test]

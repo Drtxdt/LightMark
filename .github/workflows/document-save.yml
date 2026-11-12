@@ -20,3 +20,13 @@ jobs:
       - name: Write and read recovery draft
         if: success() || failure()
         run: cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml write_draft_entry_serializes_and_publishes_a_receipt
+      - name: Check path identity on both APFS volume types
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml document_names_follow_volume_case_sensitivity
+          mountpoint=$(mktemp -d)
+          hdiutil create -quiet -size 96m -fs APFSX -volname LightMarkCase "$RUNNER_TEMP/case.dmg"
+          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$RUNNER_TEMP/case.dmg"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          LIGHTMARK_CASE_VOLUME="$mountpoint" cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml document_names_follow_volume_case_sensitivity

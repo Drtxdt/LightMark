@@ -1334,9 +1334,13 @@ fn remove_owned_index(path: &Path, expected_bytes: &[u8]) -> Result<(), String> 
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    path_key(left) == path_key(right)
+    #[cfg(target_os = "macos")]
+    return left == right || same_file::is_same_file(left, right).unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    { path_key(left) == path_key(right) }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -1345,9 +1349,14 @@ fn path_key(path: &Path) -> String {
 }
 
 fn is_within(path: &Path, root: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    return path.starts_with(root);
+    #[cfg(not(target_os = "macos"))]
+    {
     let path = path_key(path);
     let root = path_key(root);
     path == root || path.starts_with(&(root + "\\"))
+    }
 }
 
 fn validate_transaction_id(value: &str) -> bool {
@@ -1380,6 +1389,14 @@ fn reject_reparse_components(path: &Path) -> Result<(), String> {
     }
     components.reverse();
     for component in components {
+        #[cfg(target_os = "macos")]
+        if (component == Path::new("/var") || component == Path::new("/tmp"))
+            && fs::canonicalize(&component).ok().as_deref() == Some(Path::new("/private").join(component.file_name().unwrap()).as_path())
+        {
+            // Darwin exposes both system directories through root-owned aliases.
+            // Their descendants are still checked individually.
+            continue;
+        }
         match fs::symlink_metadata(&component) {
             Ok(metadata) => reject_reparse_metadata(&component, &metadata)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,

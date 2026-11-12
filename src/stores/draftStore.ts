@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { reactive, toRaw } from "vue";
+import { isMacDesktop } from "../utils/documentPath";
 import {
   appStore,
   captureLargeFileDraftSnapshot,
@@ -829,7 +830,7 @@ function isRecoveryActivationFenceCurrent(fence: RecoveryActivationFence) {
 }
 
 function draftIdForPath(path: string) {
-  return `file-${fnv1a(path.toLowerCase())}`;
+  return `file-${fnv1a(isMacDesktop() ? path : path.toLowerCase())}`;
 }
 
 function fnv1a(value: string) {

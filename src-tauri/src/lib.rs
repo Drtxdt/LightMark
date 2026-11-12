@@ -23,6 +23,7 @@ pub fn run() {
             commands::cli::trace_headless_frontend,
             commands::cli::complete_headless_export,
             commands::file::open_file_dialog,
+            commands::file::document_open_path,
             commands::file::open_folder_dialog,
             commands::file::open_asset_file_dialog,
             commands::file::save_markdown_file_dialog,
