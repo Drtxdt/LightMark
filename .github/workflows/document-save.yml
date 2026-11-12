@@ -20,6 +20,8 @@ jobs:
       - name: Write and read recovery draft
         if: success() || failure()
         run: cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml write_draft_entry_serializes_and_publishes_a_receipt
+      - name: Exercise concurrent writers and interrupted save transactions
+        run: cargo +1.94.1 test --locked --manifest-path src-tauri/Cargo.toml file_replace_transaction::tests
       - name: Check path identity on both APFS volume types
         if: runner.os == 'macOS'
         shell: bash

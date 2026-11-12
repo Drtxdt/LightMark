@@ -917,7 +917,12 @@ fn replace_existing_os(transaction: &FileReplaceTransaction) -> NativeCall {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&transaction.replacement, fs::Permissions::from_mode(permissions.mode() & 0o777))?;
             fs::hard_link(&transaction.replacement, &transaction.backup)?;
-            macos_rename(&transaction.backup, &transaction.target, libc::RENAME_SWAP)
+            let swapped = macos_rename(&transaction.backup, &transaction.target, libc::RENAME_SWAP);
+            // Unlink only the redundant staging link. After a successful swap
+            // the backup already holds the displaced file, including on crash.
+            let redundant = if swapped.is_ok() { &transaction.replacement } else { &transaction.backup };
+            let _ = fs::remove_file(redundant);
+            swapped
         })();
         macos_call("atomic file exchange", result)
     }
@@ -1900,6 +1905,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn interrupted_exchange_leaves_discoverable_original_before_receipt() {
+        let root = test_root("interrupted-exchange").canonicalize().unwrap();
+        let target = root.join("note.md");
+        let index = root.join("index");
+        fs::write(&target, b"original").unwrap();
+        let txn = FileReplaceTransaction::prepare(&target, Some(fingerprint(&target)),
+            &replacement(&root, b"edited"), &index).unwrap();
+        assert!(super::replace_existing_os(&txn).succeeded);
+        let dir = txn.transaction_dir.clone();
+        drop(txn); // no post-call receipt or manifest update
+        let candidates = discover_recovery(&index, std::slice::from_ref(&root)).unwrap();
+        assert!(candidates.iter().any(|item| item.trusted && item.transaction_dir == dir));
+        assert_eq!(fs::read(&target).unwrap(), b"edited");
+        assert_eq!(fs::read(dir.join(super::BACKUP_NAME)).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn target_share_violation_is_not_committed_with_b_and_n_retained() {
         let root = test_root("share-violation");
         let target = root.join("note.md");
@@ -1921,7 +1945,9 @@ mod tests {
             assert_eq!(fs::read(receipt.output_path).unwrap(), b"new bytes");
             assert!(receipt.recovery_artifact.unwrap().exists());
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        assert_eq!(receipt.outcome, TransactionOutcome::Committed); // no Windows share modes
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             assert_eq!(receipt.outcome, TransactionOutcome::Ambiguous);
             assert_eq!(receipt.disk_written, DiskWriteStatus::Unknown);

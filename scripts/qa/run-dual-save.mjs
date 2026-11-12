@@ -14,6 +14,8 @@ const profile = 'qa-' + token.slice(0, 8);
 const dirs = ['左栏', '右栏'].map(name => path.join(root, name));
 const [left, right] = dirs.map(dir => path.join(dir, '笔记.md'));
 const copy = path.join(dirs[1], '副本.md');
+const occupied = path.join(dirs[1], '已有.md');
+await writeFile(occupied, '必须保留');
 const original = '![封面](cover.svg)\n\n底稿';
 for (const [i, dir] of dirs.entries()) {
   await mkdir(dir);
@@ -31,7 +33,7 @@ const server = await createServer({
         if (req.url === '/' || req.url.startsWith('/__dual_')) console.log(req.method, req.url.split(token)[0]);
         if (req.url === '/__dual_fixture') {
           res.setHeader('Cache-Control', 'no-store');
-          res.end(JSON.stringify({ left, right, copy, profile, token, reopen }));
+          res.end(JSON.stringify({ left, right, copy, occupied, profile, token, reopen }));
         } else if (req.url === '/__dual_result/' + token && req.method === 'POST') {
           let body = '';
           for await (const chunk of req) body += chunk;
@@ -67,7 +69,7 @@ try {
     await exec(exe, ['--profile', profile], env, 120000);
     assert.ok(result && !result.error, result?.error ?? 'Window exited without receipt');
     assert.deepEqual(result.observed.map(row => row.path), [left, copy]);
-    for (const [file, text] of [[left, original + '左'], [copy, original + '右'], [right, original]]) {
+    for (const [file, text] of [[left, original + '左'], [copy, original + '右'], [right, original], [occupied, '必须保留']]) {
       assert.deepEqual(await readFile(file), Buffer.from(text));
     }
     console.log(JSON.stringify({ phase, ...result, diskBytesVerified: true }));

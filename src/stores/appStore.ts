@@ -2110,10 +2110,10 @@ async function writeCapturedVersion(
       return false;
     }
   }
-  const expectedTargetFingerprint = await expectedFingerprintForWriteTarget(
-    targetPath,
-    retarget ? undefined : context.fileSnapshot?.fingerprint,
-  );
+  // A new document identity is create-only, even if another writer wins
+  // the race between choosing the destination and the native transaction.
+  const expectedTargetFingerprint = retarget ? null
+    : await expectedFingerprintForWriteTarget(targetPath, context.fileSnapshot?.fingerprint);
   if (!isFrozenSaveVersionCurrent(version)) return staleSaveResult(context);
   let committed: { tab: DocumentTab; epoch: number; session: DocumentSessionAdapter | null } | null = null;
   const savedHistory = documentHistoryForTab(context.tabId);
@@ -3045,6 +3045,10 @@ export async function saveCurrentFileAs(pick?: () => Promise<string | null>) {
     const target = await chooseSaveAsTargetForContext(context, undefined, pick);
     if (!target || !isSaveContextBound(context)) return false;
     if (context.path && isSamePath(context.path, target)) return runSaveTransaction(context);
+    if ((await getFileSnapshot(target)).exists) {
+      appStore.statusMessage = "另存为目标已存在。原件已保留，请选择其他文件名。";
+      return false;
+    }
     const version = await captureSaveVersion(context, "saveAs");
     if (!version) return staleSaveResult(context);
     return writeCapturedVersion(context, version, target, true);

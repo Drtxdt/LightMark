@@ -41,6 +41,7 @@ async function run(fixture) {
     } else {
       if (!editor.commands.insertContentAt(editor.state.doc.content.size - 1, suffix)) throw Error('Insert failed');
       if (store.appStore.currentFilePath !== path) throw Error('Active document changed before save');
+      if (pane === 'secondary' && await store.saveCurrentFileAs(async () => fixture.occupied)) throw Error('Overwrote an existing file');
       const saved = pane === 'main' ? await store.saveCurrentFile() : await store.saveCurrentFileAs(async () => fixture.copy);
       if (!saved) throw Error(store.appStore.statusMessage || 'Save failed');
     }
