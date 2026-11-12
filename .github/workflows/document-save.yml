@@ -1,7 +1,7 @@
 name: Document save and reopen
 on:
   push:
-    branches: [main, codex/macos-save-reopen]
+    branches: [main, codex/macos-save-reopen, codex/multi-draft-recovery]
   pull_request:
 permissions:
   contents: read
@@ -42,6 +42,10 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.94.1
         run: node scripts/qa/run-dual-save.mjs
+      - name: Kill and reopen five drafts, then repeat with one corrupt record
+        env:
+          RUSTUP_TOOLCHAIN: 1.94.1
+        run: node scripts/qa/run-dual-save.mjs --drafts
       - name: Detach the test volume
         if: always() && runner.os == 'macOS' && env.LIGHTMARK_CASE_VOLUME != ''
         run: hdiutil detach "$LIGHTMARK_CASE_VOLUME"

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createServer } from 'vite';
+import { draftRecoveryHarness } from './draft-recovery-host.mjs';
 
 const base = path.join(tmpdir(), 'LightMark-dual-save');
 await mkdir(base, { recursive: true });
@@ -32,9 +33,10 @@ if (process.env.LIGHTMARK_CASE_VOLUME) {
   }
 }
 let reopen = false, result;
+const recovery = process.argv.includes('--drafts') ? draftRecoveryHarness(root) : null;
 const server = await createServer({
   server: { host: '127.0.0.1', port: 0, strictPort: false },
-  plugins: [{
+  plugins: recovery ? [recovery.plugin] : [{
     name: 'dual-save-window-test',
     transformIndexHtml() { return [{ tag: 'script', attrs: { type: 'module', src: '/scripts/qa/dual-save-window.mjs' }, injectTo: 'body' }]; },
     configureServer(vite) {
@@ -72,7 +74,8 @@ try {
   const env = { ...process.env, TAURI_CONFIG: JSON.stringify({ build: { devUrl } }) };
   await exec('cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--bin', 'lightmark'], env, 1200000);
   const exe = path.resolve(process.env.CARGO_TARGET_DIR ?? 'src-tauri/target', 'debug', process.platform === 'win32' ? 'lightmark.exe' : 'lightmark');
-  for (const phase of ['edit', 'reopen']) {
+  if (recovery) await recovery.run(exe, env);
+  for (const phase of recovery ? [] : ['edit', 'reopen']) {
     reopen = phase === 'reopen';
     result = null;
     await exec(exe, ['--profile', profile], env, 120000);
