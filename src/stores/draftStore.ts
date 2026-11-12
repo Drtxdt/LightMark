@@ -11,7 +11,6 @@ import {
   type PaneActivationBoundary,
   flushDocumentSnapshotWithReceipt,
   getPaneTab,
-  setContent,
   switchMode,
   largePaneForTab,
 } from "./appStore";
@@ -49,6 +48,8 @@ export const draftStore = reactive({
   message: "",
   lastSavedAt: 0,
   activeDraftId: "",
+  pendingRecovery: [] as DraftRecord[],
+  recoveryIssues: "",
 });
 
 let autosaveTimer = 0;
@@ -161,27 +162,40 @@ export function stopDraftAutosave() {
 }
 
 export async function recoverStartupDrafts() {
-  const expectedTab = activeDraftTab();
   const listing = await readDraftListing();
   if (!listing) return;
-  const issueMessage = formatDraftIssues(listing.issues);
-  const drafts = listing.records;
-  const untitled = drafts.find((draft) => draft.kind === "untitled" && draft.content);
-  const large = drafts.find((draft) => draft.kind === "large" && draft.largeSnapshot);
-  if (!untitled && !large) {
-    if (issueMessage) {
-      draftStore.status = "failed";
-      draftStore.message = issueMessage;
-    }
-    return;
+  draftStore.pendingRecovery = listing.records;
+  draftStore.recoveryIssues = formatDraftIssues(listing.issues);
+  if (draftStore.recoveryIssues) {
+    draftStore.status = "failed";
+    draftStore.message = draftStore.recoveryIssues;
   }
-  draftStore.status = "recoverable";
-  draftStore.message = `发现未命名草稿${issueMessage ? `；${issueMessage}` : ""}`;
-  await promptRecoverDraft(
-    untitled ?? large!,
-    untitled ? "发现未保存的未命名草稿，是否恢复？" : "发现未保存的大文件草稿，是否恢复为新文档？",
-    untitled ? expectedTab : null,
-  );
+  await reviewPendingDrafts();
+}
+
+let reviewingDrafts = false;
+export async function reviewPendingDrafts() {
+  if (reviewingDrafts || !draftStore.pendingRecovery.length) return;
+  reviewingDrafts = true;
+  try {
+    const offered = [...draftStore.pendingRecovery];
+    const labels = offered.map(record => record.path || record.content?.split("\n")[0]?.slice(0, 60) || "未命名草稿");
+    for (const [index, record] of offered.entries()) {
+      draftStore.status = "recoverable";
+      try {
+        const handled = await promptRecoverDraft(record,
+          `第 ${index + 1} / ${offered.length} 篇 · ${labels[index]}。恢复后在新标签中打开。`,
+          record.kind === "large" ? null : activeDraftTab(), undefined,
+          [...labels, ...(draftStore.recoveryIssues ? [draftStore.recoveryIssues] : [])]);
+        if (handled) draftStore.pendingRecovery = draftStore.pendingRecovery.filter(item => item.id !== record.id);
+      } catch (error) {
+        draftStore.status = "failed";
+        draftStore.message = formatDraftError(error);
+      }
+    }
+  } finally {
+    reviewingDrafts = false;
+  }
 }
 
 export async function checkDraftForOpenedFile(path: string) {
@@ -350,6 +364,13 @@ export function clearCapturedDraft(context: DraftCleanupContext | null, options:
 export async function discardDraft(id: string, record?: DraftRecord) {
   if (record?.kind === "large" && record.largeSnapshot) {
     await deleteLargeDraftRecord(id, record);
+  } else if (record) {
+    await withDraftRecordLock(id, async () => {
+      const current = (await listDrafts()).records.find(item => item.id === id);
+      if (!current) return;
+      if (draftRecordVersionKey(current) !== draftRecordVersionKey(record)) throw Error("草稿版本已更新，已保留更新的记录。");
+      await deleteDraftNative(id);
+    });
   } else {
     await deleteDraft(id);
   }
@@ -743,11 +764,12 @@ function mutationTokensMatch(left: DocumentMutationToken | null, right: Document
   return documentMutationTokensEqual(left, right);
 }
 
-async function promptRecoverDraft(record: DraftRecord, message: string, expectedTab: DocumentTab | null = null, expectedPath?: string) {
+async function promptRecoverDraft(record: DraftRecord, message: string, expectedTab: DocumentTab | null = null, expectedPath?: string, details?: string[]) {
   const restoreFence = expectedTab ? captureDraftRestoreFence(expectedTab) : null;
   const result = await showDialog({
     title: "发现可恢复草稿",
     message,
+    details,
     cancelId: "keep",
     defaultId: "restore",
     buttons: [
@@ -757,11 +779,11 @@ async function promptRecoverDraft(record: DraftRecord, message: string, expected
     ],
   });
   if (result === "restore") {
-    await restoreDraft(record, expectedTab, expectedPath, restoreFence);
-    return;
+    return await restoreDraft(record, expectedTab, expectedPath, restoreFence);
   }
   if (result === "discard") {
     await discardDraft(record.id, record);
+    return true;
   }
 }
 
@@ -798,26 +820,21 @@ async function restoreDraft(
     }
     createRecoveredLargeTab(opened, activationFence.paneId);
   } else {
+    const tab = await createUntitledTabAfterFlush(appStore.splitLayout.activePaneId, record.content ?? "", true);
+    if (!tab) {
+      draftStore.message = "当前标签页或编辑器会话已变化，草稿仍保留待处理。";
+      return false;
+    }
+    const owner = toRaw(tab);
     if (record.kind === "untitled") {
-      let tab: DocumentTab | null;
-      try {
-        tab = await createUntitledTabAfterFlush(
-          appStore.splitLayout.activePaneId,
-          record.content || "",
-          true,
-        );
-      } catch (error) {
-        draftStore.status = "failed";
-        draftStore.message = `恢复草稿前的输入 flush 失败，草稿仍保留：${formatDraftError(error)}`;
-        return;
-      }
-      if (!tab) {
-        draftStore.message = "当前标签页或编辑器会话已变化，未覆盖当前输入；草稿仍保留待处理。";
-        return;
-      }
-      untitledDraftIds.set(tab, record.id);
+      untitledDraftIds.set(owner, record.id);
     } else {
-      setContent(record.content || "", true);
+      // Commit the detached copy before releasing the named checkpoint.
+      await persistDraftRecord({
+        id: draftIdForTab(owner), kind: "untitled", content: record.content ?? "",
+        editorMode: record.editorMode, updatedAt: Date.now(),
+      });
+      await discardDraft(record.id, record);
     }
   }
   if (record.kind !== "large" && (record.editorMode === "wysiwyg" || record.editorMode === "source")) {
@@ -826,6 +843,7 @@ async function restoreDraft(
   draftStore.activeDraftId = record.id;
   draftStore.status = "restored";
   draftStore.message = "已恢复草稿";
+  return true;
 }
 
 type RecoveryActivationFence = {

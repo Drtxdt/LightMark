@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { appStore, getPaneTab, recordNavigationLocation } from "../../stores/appStore";
-import { draftStore } from "../../stores/draftStore";
+import { draftStore, reviewPendingDrafts } from "../../stores/draftStore";
 import { getWordStats } from "../../plugins/wordCountPlugin";
 import { extractOutlineWithLines, resolveHeadingBreadcrumb, type BreadcrumbItem } from "../../utils/outline";
 import UiIcon from "../ui/UiIcon.vue";
@@ -87,6 +87,8 @@ function jumpToBreadcrumb(item: BreadcrumbItem) {
     <div class="status-meta ml-auto flex items-center gap-3">
       <button v-if="appStore.configPersistenceMessage" type="button" class="breadcrumb-button"
         :title="appStore.configPersistenceMessage" @click="appStore.settingsOpen = true">设置未保存</button>
+      <button v-if="draftStore.pendingRecovery.length" @click="reviewPendingDrafts()">待恢复草稿（{{ draftStore.pendingRecovery.length }}）</button>
+      <span v-if="draftStore.recoveryIssues" :title="draftStore.recoveryIssues">部分草稿读取失败</span>
       <span v-if="draftStore.message" class="status-draft">{{ draftStore.message }}</span>
       <span v-if="appStore.settings.editor.showWordCount && stats" class="status-count">{{ stats.words }} 词</span>
       <span v-else-if="appStore.settings.editor.showWordCount" class="status-count">{{ appStore.largeFile?.totalLines ?? 0 }} 行</span>

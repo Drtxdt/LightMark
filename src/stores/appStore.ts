@@ -4640,9 +4640,6 @@ async function restoreSession(session: SessionRestoreState | undefined) {
     restored.find((tab) => tab.id === paneTabId(appStore.splitLayout, appStore.splitLayout.activePaneId)) ??
     restored.slice().sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   projectTab(active);
-  if (active.path) {
-    await checkDraftForOpenedFile(active.path);
-  }
 }
 
 function buildSessionRestoreState(): SessionRestoreState | undefined {
