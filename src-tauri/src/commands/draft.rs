@@ -110,9 +110,17 @@ fn list_drafts_at_dir(dir: &std::path::Path) -> Result<DraftListReceipt, String>
     for entry in fs::read_dir(dir)
         .map_err(|err| format!("Failed to read draft folder {}: {err}", dir.display()))?
     {
-        let entry = entry.map_err(|err| {
-            format!("Failed to inspect draft folder {}: {err}", dir.display())
-        })?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                issues.push(DraftListIssue {
+                    path: dir.to_string_lossy().into_owned(),
+                    code: "draft-entry-failed".to_string(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
@@ -129,7 +137,13 @@ fn list_drafts_at_dir(dir: &std::path::Path) -> Result<DraftListReceipt, String>
             }
         };
         match serde_json::from_str::<DraftRecord>(&content) {
-            Ok(record) => records.push(record),
+            Ok(record) if path.file_stem().and_then(|name| name.to_str()) == Some(record.id.as_str())
+                && sanitize_draft_id(&record.id).is_ok() => records.push(record),
+            Ok(_) => issues.push(DraftListIssue {
+                path: path.to_string_lossy().into_owned(),
+                code: "draft-id-mismatch".to_string(),
+                message: "草稿编号与文件名不符，已保留原文件。".to_string(),
+            }),
             Err(error) => issues.push(DraftListIssue {
                 path: path.to_string_lossy().into_owned(),
                 code: "draft-parse-failed".to_string(),
@@ -367,6 +381,13 @@ mod tests {
         assert_eq!(listed.issues[0].code, "draft-parse-failed");
         assert_eq!(listed.issues[0].path, corrupt_path.to_string_lossy());
         assert_eq!(fs::read(&corrupt_path).unwrap(), b"{ definitely not json");
+
+        // A readable JSON file must not impersonate another document when
+        // the user restores or discards it.
+        fs::copy(dir.join("valid.json"), dir.join("other.json")).unwrap();
+        let listed = list_drafts_at_dir(&dir).unwrap();
+        assert_eq!(listed.records.len(), 1);
+        assert!(listed.issues.iter().any(|issue| issue.code == "draft-id-mismatch"));
 
         fs::remove_dir_all(dir).unwrap();
     }
