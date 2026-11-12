@@ -509,6 +509,8 @@ export async function completePendingAssetRelink(handle: PendingCommandHandle, a
   throw new Error('原文档路径正在变化，请重试重链。');
 }
 
+const switchedTabSnapshots = new WeakMap<DocumentTab, { epoch: number; markdown: string; tabId: string }>();
+
 export async function flushDocumentSnapshotWithReceipt(
   tabId: string,
   reason: SnapshotReason,
@@ -532,7 +534,15 @@ export async function flushDocumentSnapshotWithReceipt(
   documentSnapshotCoordinator.prepare(tabId, reason);
   const snapshot = await snapshotDocumentTab(tabId, reason, { signal });
   if (!snapshot) {
-    if (documentRuntimeMetadata.has(tabId)) throw new Error("活动编辑器会话不可用，已阻止使用旧正文。");
+    if (documentRuntimeMetadata.has(tabId)) {
+      const handoff = switchedTabSnapshots.get(toRaw(expectedTab));
+      const hidden = getPaneTab("main")?.id !== tabId
+        && (!appStore.splitLayout.enabled || getPaneTab("secondary")?.id !== tabId);
+      if (reason !== "draft" || !hidden || handoff?.tabId !== tabId
+        || handoff.epoch !== mutationEpoch(expectedTab) || handoff.markdown !== expectedTab.content) {
+        throw new Error("活动编辑器会话不可用，已阻止使用旧正文。");
+      }
+    }
     if (!appStore.tabs.includes(expectedTab)
       || expectedTab.id !== tabId
       || documentSessionForTab(tabId) !== expectedSession) {
@@ -1693,6 +1703,9 @@ async function flushPanePendingEdits(paneId: EditorPaneId, reason: SnapshotReaso
   const result = await flushDocumentSnapshotWithReceipt(tab.id, reason);
   const session = documentSessionForTab(tab.id);
   if (!session) return null;
+  if (reason === "tabSwitch") {
+    switchedTabSnapshots.set(toRaw(tab), { epoch: mutationEpoch(tab), markdown: result.markdown, tabId: tab.id });
+  }
   return {
     session,
     afterRevision: session.revision,

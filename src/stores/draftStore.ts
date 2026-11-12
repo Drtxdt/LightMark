@@ -563,7 +563,7 @@ async function buildDraftRecord(context: DraftContext): Promise<DraftRecord | nu
   // A whitespace-only untitled document still contains user bytes and must
   // be recoverable.  Only a truly empty untitled buffer has no payload to
   // persist.
-  if (context.tab.content.length === 0) return null;
+  if (context.tab.content.length === 0 && !untitledDraftIds.has(context.tab)) return null;
   const id = draftIdForTab(context.tab);
   return {
     id,
